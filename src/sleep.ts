@@ -1,0 +1,250 @@
+// §5 Sleep — Cole-Kripke actigraphy + HR-dip fusion. Tier HIGH (duration/eff),
+// ESTIMATE (stages). One-minute epochs.
+import type { Minute, Baseline, Metric, SleepValue, SleepStages } from './types';
+import { isHrUsable, mean, round } from './util';
+
+// Cole-Kripke weights over window [-4..+2].
+const CK_W = [1.06, 0.54, 0.58, 0.76, 2.3, 0.74, 0.67];
+
+/**
+ * calcSleep(minutes, baseline)
+ *
+ * Per 1-min epoch: S = 0.001 * Σ W_i * A_i over window [−4..+2] with
+ *   W = [1.06,0.54,0.58,0.76,2.30,0.74,0.67]; asleep = S < 1.
+ * HR-dip fusion: hr_avg < 0.95*RHR nudges toward asleep; clearly elevated HR
+ *   (> 1.15*RHR) nudges awake. RHR is the 5th-PERCENTILE sleep HR (a floor), and
+ *   normal REM HR legitimately runs >10% above that floor, so the awake-override
+ *   margin must clear REM — 1.10 would mis-flag REM epochs as awake and fragment
+ *   the night.
+ * Main sleep = the longest CONSOLIDATED period (asleep epochs joined only across
+ *   short interior awake gaps ≤20 min; a longer awake stretch ends the period).
+ *   NOT first-asleep→last-asleep across the whole night window — that would let
+ *   evening/morning low-activity minutes bridge into a giant span. A 14h
+ *   plausibility cap re-segments with a tighter gap if the period is too long.
+ *   duration = asleep minutes; efficiency = asleep / in-bed span of that period.
+ * Stages (BETA): deep = very low activity + lowest HR; REM = low activity + HR
+ *   variability up; else light.
+ *
+ * Confidence formula: (#inputs present among {hr,activity,temp}/3) × coverage,
+ *   where coverage = clamp(in_bed_min/240, 0, 1) so a full ~4h needs to clear >0.5.
+ */
+export function calcSleep(minutes: Minute[], baseline: Baseline): Metric<SleepValue> {
+  const sorted = [...minutes].sort((a, b) => a.ts - b.ts);
+  const n = sorted.length;
+
+  const empty = (): Metric<SleepValue> => ({
+    onset_ts: null,
+    wake_ts: null,
+    duration_min: 0,
+    in_bed_min: 0,
+    efficiency: 0,
+    stages: null,
+    stages_beta: true,
+    confidence: 0,
+    tier: 'HIGH',
+    inputs_used: [],
+  });
+  if (n === 0) return empty();
+
+  const rhr = baseline.resting_hr;
+
+  // 1. Cole-Kripke score + HR-dip fusion → boolean asleep per epoch.
+  const asleep: boolean[] = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    // window offsets -4..+2 align with weights index 0..6
+    for (let k = 0; k < CK_W.length; k++) {
+      const off = k - 4; // -4..+2
+      const idx = i + off;
+      if (idx >= 0 && idx < n) s += CK_W[k] * sorted[idx].activity;
+    }
+    s *= 0.001;
+    const m = sorted[i];
+    // Off-wrist epochs carry NO sleep signal (activity reads 0, no HR). They must
+    // NOT default to asleep just because Cole-Kripke on activity=0 scores < 1 —
+    // otherwise a long daytime off-wrist stretch (band on charger / removed)
+    // bridges the gap-tolerant period across hours of non-sleep. Treat unknown as
+    // awake so it acts as a period boundary; real interior brief off-wrist blips
+    // are still absorbed by the ≤MAX_GAP_MIN bridging in step 2.
+    if (!m.wrist_on) { asleep[i] = false; continue; }
+    let isAsleep = s < 1;
+    // HR-dip fusion (only when we have a usable HR reading).
+    if (m.hr_avg > 0) {
+      if (m.hr_avg < 0.95 * rhr) isAsleep = true; // strong dip → asleep
+      else if (m.hr_avg > 1.15 * rhr) isAsleep = false; // clearly elevated → awake
+    }
+    asleep[i] = isAsleep;
+  }
+
+  // 2. Main consolidated sleep period. We DON'T take first-asleep→last-asleep
+  //    across the whole local-night window — that lets evening wind-down and
+  //    morning-in-bed minutes (which can read as low-activity) bridge into one
+  //    giant block spanning most of the ~18h window. Instead we segment the
+  //    night into CONSOLIDATED periods: a period grows over asleep epochs and
+  //    over SHORT interior awake gaps (≤ MAX_GAP_MIN, real awakenings are brief),
+  //    but a longer contiguous awake stretch ENDS the period (out-of-bed /
+  //    separate nap / wind-down). The main sleep = the longest such consolidated
+  //    period, trimmed to its first/last asleep epoch so a trailing gap isn't
+  //    counted as in-bed. Interior short awakenings stay inside and count
+  //    against efficiency.
+  const MAX_GAP_MIN = 20; // an awake gap longer than this ends the period
+
+  let bestStart = -1;
+  let bestEnd = -1;
+  let bestAsleep = 0;
+  // current consolidated period, tracked by its first/last ASLEEP epoch.
+  let periodFirst = -1; // first asleep epoch of the current period
+  let periodLast = -1;  // last asleep epoch seen in the current period
+  let periodAsleep = 0; // asleep-epoch count in the current period
+  let gap = 0;          // consecutive awake epochs since the last asleep epoch
+
+  const closePeriod = () => {
+    // score by asleep-epoch count (the consolidated block's actual sleep).
+    if (periodFirst >= 0 && periodAsleep > bestAsleep) {
+      bestAsleep = periodAsleep;
+      bestStart = periodFirst;
+      bestEnd = periodLast;
+    }
+    periodFirst = -1;
+    periodLast = -1;
+    periodAsleep = 0;
+    gap = 0;
+  };
+
+  for (let i = 0; i < n; i++) {
+    if (asleep[i]) {
+      if (periodFirst < 0) periodFirst = i;
+      periodLast = i;
+      periodAsleep++;
+      gap = 0;
+    } else if (periodFirst >= 0) {
+      // inside a period — tolerate a short awake gap, else close it.
+      if (++gap > MAX_GAP_MIN) closePeriod();
+    }
+  }
+  closePeriod();
+
+  if (bestStart < 0 || bestAsleep === 0) return empty();
+
+  let startIdx = bestStart;
+  let endIdx = bestEnd;
+
+  // 2a. Plausibility guard. A single main-sleep period spanning more than
+  //     MAX_SLEEP_MIN is implausible — it means low-activity non-sleep time
+  //     (daytime sedentary / off-wrist) is being merged in. Tighten the gap
+  //     bound and re-segment; the shorter bound severs the spurious bridges so
+  //     the true night survives as the longest consolidated period.
+  const MAX_SLEEP_MIN = 14 * 60; // 14h hard ceiling on one main-sleep period
+  if (endIdx - startIdx + 1 > MAX_SLEEP_MIN) {
+    for (const tighter of [10, 5, 2]) {
+      let bs = -1, be = -1, ba = 0;
+      let pf = -1, pl = -1, pa = 0, g = 0;
+      const close = () => {
+        if (pf >= 0 && pa > ba) { ba = pa; bs = pf; be = pl; }
+        pf = -1; pl = -1; pa = 0; g = 0;
+      };
+      for (let i = 0; i < n; i++) {
+        if (asleep[i]) { if (pf < 0) pf = i; pl = i; pa++; g = 0; }
+        else if (pf >= 0) { if (++g > tighter) close(); }
+      }
+      close();
+      if (bs >= 0 && be - bs + 1 <= MAX_SLEEP_MIN) { startIdx = bs; endIdx = be; break; }
+      // keep the tightest attempt even if still over, so we never fall back to
+      // the giant span.
+      if (bs >= 0) { startIdx = bs; endIdx = be; }
+    }
+    // Last resort: if even the tightest re-segmentation can't get under the
+    // ceiling (a genuinely uninterrupted block with no awake epoch to split on —
+    // implausible for real sleep), hard-clamp to MAX_SLEEP_MIN from the onset so
+    // we never report a >14h "night".
+    if (endIdx - startIdx + 1 > MAX_SLEEP_MIN) endIdx = startIdx + MAX_SLEEP_MIN - 1;
+  }
+
+  const onset_ts = sorted[startIdx].ts;
+  const wake_ts = sorted[endIdx].ts;
+
+  // in-bed span = first-asleep → last-asleep epoch inclusive (epoch count).
+  const inBedEpochs = sorted.slice(startIdx, endIdx + 1);
+  const in_bed_min = inBedEpochs.length;
+  // asleep minutes within the span; interior awake epochs reduce efficiency.
+  let duration_min = 0;
+  for (let i = startIdx; i <= endIdx; i++) if (asleep[i]) duration_min++;
+  const efficiency = in_bed_min > 0 ? duration_min / in_bed_min : 0;
+
+  // 3. Stages (BETA/ESTIMATE) over the asleep epochs within main sleep.
+  const sleepEpochs = inBedEpochs.filter((_, i) => asleep[startIdx + i]);
+  const stages = estimateStages(sleepEpochs, rhr);
+
+  // 4. Confidence: input completeness × coverage.
+  const hasHr = inBedEpochs.some((m) => m.wrist_on && m.hr_avg > 0);
+  const hasActivity = inBedEpochs.some((m) => m.activity > 0);
+  const hasTemp = baseline.skin_temp != null;
+  const present = [hasHr, hasActivity, hasTemp].filter(Boolean).length;
+  const inputCompleteness = present / 3;
+  const coverage = Math.min(1, in_bed_min / 240);
+  const confidence = inputCompleteness * coverage;
+
+  const inputs_used: string[] = ['activity'];
+  if (hasHr) inputs_used.push('hr_avg');
+  if (hasTemp) inputs_used.push('baseline.skin_temp');
+
+  return {
+    onset_ts,
+    wake_ts,
+    duration_min,
+    in_bed_min,
+    efficiency: round(efficiency, 4),
+    stages,
+    stages_beta: true,
+    confidence: round(confidence, 4),
+    tier: 'HIGH',
+    inputs_used,
+  };
+}
+
+/**
+ * BETA stage estimator. Splits asleep epochs into deep/REM/light using activity
+ * + HR relative to that night's own distribution. Honest heuristic, not clinical.
+ */
+function estimateStages(sleepEpochs: Minute[], rhr: number): SleepStages | null {
+  if (sleepEpochs.length === 0) return null;
+  const hrs = sleepEpochs.filter((m) => m.hr_avg > 0).map((m) => m.hr_avg);
+  const meanHr = hrs.length ? mean(hrs) : rhr;
+  const acts = sleepEpochs.map((m) => m.activity);
+  const meanAct = mean(acts);
+
+  // Band the night's OWN asleep-HR distribution (robust, scale-free): the lowest
+  // band → deep, the highest band → REM-leaning, middle → light. We pick band
+  // edges so a healthy night lands roughly deep ~13–23% / REM ~18–28% / rest
+  // light. Variability (HR jump vs neighbours) also routes elevated/erratic
+  // epochs to REM. Honest heuristic — stays ESTIMATE/beta.
+  const sortedHr = [...hrs].sort((a, b) => a - b);
+  const q = (p: number): number =>
+    sortedHr.length ? sortedHr[Math.min(sortedHr.length - 1, Math.floor(p * sortedHr.length))] : meanHr;
+  const deepEdge = q(0.16);  // bottom ~16% of HR → deep candidates
+  const remEdge = q(0.62);   // top ~38% of HR → REM candidates
+
+  let light = 0;
+  let deep = 0;
+  let rem = 0;
+  for (let i = 0; i < sleepEpochs.length; i++) {
+    const m = sleepEpochs[i];
+    // Activity at or below the night's own mean = "quiet"; deep needs the very
+    // quietest epochs (≤ mean, since deep activity ≈ 0 sits well below mean).
+    const lowAct = m.activity <= meanAct;
+    const hr = m.hr_avg > 0 ? m.hr_avg : meanHr;
+    // HR variability proxy: jump vs neighbour (REM = irregular HR).
+    const prev = i > 0 && sleepEpochs[i - 1].hr_avg > 0 ? sleepEpochs[i - 1].hr_avg : hr;
+    const next = i + 1 < sleepEpochs.length && sleepEpochs[i + 1].hr_avg > 0
+      ? sleepEpochs[i + 1].hr_avg : hr;
+    const hrJump = Math.max(Math.abs(hr - prev), Math.abs(hr - next));
+    if (lowAct && hr <= deepEdge && hrJump <= 2) {
+      deep++; // quietest + HR in the night's lowest band + stable → deep
+    } else if (lowAct && (hr >= remEdge || hrJump > 2)) {
+      rem++; // quiet but HR in the night's upper band or variable → REM
+    } else {
+      light++;
+    }
+  }
+  return { light_min: light, deep_min: deep, rem_min: rem };
+}

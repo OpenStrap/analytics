@@ -1,0 +1,17 @@
+{
+  "name": "openstrap-analytics",
+  "version": "1.0.0",
+  "description": "Published-algorithm analytics (sleep/strain/recovery/load/readiness) over minute rollups. HRV/stress are BANNED.",
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "license": "ISC",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/__tests__/analytics.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

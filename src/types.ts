@@ -1,0 +1,185 @@
+// Shared input/output types for openstrap-analytics.
+// These match docs/ANALYTICS_SPEC.md and docs/CONFIDENCE.md exactly.
+//
+// All analytics consume arrays of MINUTE ROLLUPS (not 1Hz samples). Each fn is a
+// pure, deterministic function returning a Metric<T> with a COMPUTED confidence.
+
+/** One minute rollup. `activity` is the actigraphy signal (stddev of |accel(g)|). */
+export interface Minute {
+  ts: number; // unix seconds at the start of the minute
+  hr_avg: number; // mean HR over the minute (0 = off-wrist / no reading)
+  hr_min: number;
+  hr_max: number;
+  hr_n: number; // number of HR samples that contributed
+  activity: number; // motion magnitude (actigraphy count)
+  steps: number; // detected steps this minute (accel peak-count; ESTIMATE)
+  wrist_on: boolean;
+}
+
+/** User profile. Fields are frequently absent — algorithms must degrade honestly. */
+export interface Profile {
+  age?: number;
+  weight_kg?: number;
+  height_cm?: number;
+  sex?: 'm' | 'f';
+}
+
+/** Rolling baselines (see calcBaselines). */
+export interface Baseline {
+  resting_hr: number;
+  max_hr: number;
+  sleep_need_min: number;
+  skin_temp?: number; // RELATIVE only; deviation, never absolute health truth
+  chronic_strain?: number; // 28d mean daily strain (for ACWR)
+}
+
+export type Tier = 'AUTH' | 'HIGH' | 'ESTIMATE' | 'RELATIVE';
+
+/** Every metric returns its value plus computed confidence + provenance. */
+export type Metric<T> = T & {
+  confidence: number; // 0..1, COMPUTED (coverage × input_completeness)
+  tier: Tier;
+  inputs_used: string[];
+};
+
+// ── value shapes (wrapped by Metric<>) ──────────────────────────────────────
+
+export interface RestingHrValue {
+  resting_hr: number | null; // bpm, null when no usable data
+}
+
+export interface StrainValue {
+  score: number; // 0..21
+  trimp: number;
+  max_hr_used: number;
+  max_hr_source: 'measured' | 'age';
+}
+
+export interface HrZonesValue {
+  zone1_min: number; // 50-60% HRmax
+  zone2_min: number; // 60-70%
+  zone3_min: number; // 70-80%
+  zone4_min: number; // 80-90%
+  zone5_min: number; // 90-100%
+  max_hr_used: number;
+  max_hr_source: 'measured' | 'age';
+}
+
+export interface CaloriesValue {
+  kcal: number;
+  label: string; // always carries "(est.)"
+}
+
+export interface SleepStages {
+  light_min: number;
+  deep_min: number;
+  rem_min: number;
+}
+
+export interface SleepValue {
+  onset_ts: number | null;
+  wake_ts: number | null;
+  duration_min: number; // asleep minutes
+  in_bed_min: number;
+  efficiency: number; // 0..1
+  stages: SleepStages | null; // BETA/ESTIMATE
+  stages_beta: boolean;
+}
+
+export interface SleepRegularityValue {
+  sri: number; // 0..100
+  onset_std_min: number;
+  wake_std_min: number;
+  nights_used: number;
+}
+
+export interface SessionValue {
+  start_ts: number;
+  end_ts: number;
+  duration_min: number;
+  avg_hr: number;
+  max_hr: number;
+  strain: number;
+  trimp: number;
+  kcal: number;
+  zones: HrZonesValue;
+  hrr60: number | null;
+  mean_activity: number;
+  peak_activity: number;
+  type: 'walk' | 'run/cardio' | 'strength/other';
+  type_confidence: number; // ESTIMATE 0.4
+}
+
+export interface HrRecoveryValue {
+  hrr60: number | null; // bpm dropped ~60s after peak
+  peak_hr: number | null;
+}
+
+export interface LoadValue {
+  acwr: number | null;
+  acute: number; // mean daily strain last 7d
+  chronic: number; // mean daily strain last 28d
+  band: 'detraining' | 'optimal' | 'caution' | 'high-risk' | 'unknown';
+}
+
+export interface FitnessTrendValue {
+  direction: 'improving' | 'flat' | 'declining' | 'unknown';
+  rhr_slope: number; // per-day slope of rolling 7d RHR
+  hrr_slope: number; // per-day slope of session HRR60
+  days_used: number;
+}
+
+export interface ReadinessComponents {
+  rhr: number; // 0..1
+  sleep_debt: number; // 0..1
+  sleep_quality: number; // 0..1
+  temp_adjust: number; // multiplicative factor applied (1 if none)
+}
+
+export interface ReadinessValue {
+  score: number; // 0..100
+  components: ReadinessComponents;
+  note: string; // ALWAYS "(est.) — not HRV-based"
+}
+
+export interface AnomalyValue {
+  signal: boolean;
+  triggers: string[]; // which inputs fired
+  note: string; // "signal, not a diagnosis"
+}
+
+export interface BaselinesValue {
+  resting_hr: number | null;
+  sleep_need_min: number | null;
+  skin_temp: number | null; // RELATIVE
+  max_hr: number | null;
+  max_hr_source: 'measured' | 'age';
+  chronic_strain: number | null;
+  zone_min: [number, number, number, number, number] | null; // median per-zone minutes
+  days_used: number;
+}
+
+// ── history shapes for trend/baseline fns ───────────────────────────────────
+
+/** One night's sleep summary (for SRI). */
+export interface NightSummary {
+  onset_ts: number | null;
+  wake_ts: number | null;
+}
+
+/** One day of aggregate history (for baselines / load / fitness). */
+export interface DayHistory {
+  resting_hr?: number;
+  sleep_duration_min?: number;
+  skin_temp?: number;
+  daily_strain?: number;
+  session_hr_max?: number; // max session peak that day (for measured maxHR)
+  hrr60?: number; // representative session HRR60 that day
+  zone_min?: [number, number, number, number, number];
+}
+
+/** Per-day strain entry for ACWR / fitness. */
+export interface DailyStrain {
+  ts: number; // unix seconds (day)
+  strain: number;
+}
