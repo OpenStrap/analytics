@@ -7,7 +7,10 @@ import { isHrUsable, resolveMaxHr, clamp, round } from './util';
  *
  * Per worn minute with hr_avg>0:
  *   ratio = clamp((hr_avg − RHR)/(maxHR − RHR), 0, 1)
- *   trimp += ratio * 0.64 * e^(1.92*ratio)
+ *   trimp += ratio * k * e^(b*ratio)
+ * where (k,b) are Banister's sex-specific weights: men (0.64, 1.92), women
+ *   (0.86, 1.67). Sex unknown → men's weights (the classic default; keeps prior
+ *   behaviour for sex-less profiles).
  * score = min(21, log(trimp+1)/log(1.5)), rounded to 0.01.
  * maxHR = measured session max if available else 220−age (see resolveMaxHr).
  *
@@ -23,12 +26,14 @@ export function calcStrain(
   const rhr = baseline.resting_hr;
   const worn = minutes.filter(isHrUsable);
 
+  // Banister TRIMP weights: women (0.86, 1.67), men / unknown (0.64, 1.92).
+  const [k, b] = profile?.sex === 'f' ? [0.86, 1.67] : [0.64, 1.92];
   let trimp = 0;
   const denom = maxHr - rhr;
   for (const m of worn) {
     if (denom <= 0) continue;
     const ratio = clamp((m.hr_avg - rhr) / denom, 0, 1);
-    trimp += ratio * 0.64 * Math.exp(1.92 * ratio);
+    trimp += ratio * k * Math.exp(b * ratio);
   }
 
   const score = Math.min(21, Math.log(trimp + 1) / Math.log(1.5));

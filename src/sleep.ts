@@ -213,35 +213,47 @@ function estimateStages(sleepEpochs: Minute[], rhr: number): SleepStages | null 
   const acts = sleepEpochs.map((m) => m.activity);
   const meanAct = mean(acts);
 
-  // Band the night's OWN asleep-HR distribution (robust, scale-free): the lowest
-  // band → deep, the highest band → REM-leaning, middle → light. We pick band
-  // edges so a healthy night lands roughly deep ~13–23% / REM ~18–28% / rest
-  // light. Variability (HR jump vs neighbours) also routes elevated/erratic
-  // epochs to REM. Honest heuristic — stays ESTIMATE/beta.
+  // Band the night's OWN asleep-HR distribution (robust, scale-free). Physiology:
+  // sleeping HR is LOWEST in deep/slow-wave sleep and HIGHER + more variable in
+  // REM and light. With no EEG/PPG this relative-HR-depth proxy is the honest
+  // signal — so we band by HR percentile to land a PHYSIOLOGICALLY plausible split
+  // (deep ~20%, REM ~25%, light ~55%):
+  //   • bottom ~22% of sleeping HR + quiet → deep
+  //   • top   ~26% of sleeping HR + quiet → REM
+  //   • everything else → light
+  // We deliberately DON'T gate on minute-to-minute HR variability: the earlier
+  // estimator did (REM = high-band OR jump>2 bpm), and on minute-AVERAGED HR that
+  // mis-fired catastrophically — almost every minute jumps >2 bpm, so 60–70% of
+  // the night read as REM. Variability is too noisy at minute resolution to be a
+  // reliable REM cue, so HR depth alone drives the split. A small variability
+  // NUDGE only rescues a mid-band epoch that is unusually erratic → REM-leaning.
   const sortedHr = [...hrs].sort((a, b) => a - b);
   const q = (p: number): number =>
     sortedHr.length ? sortedHr[Math.min(sortedHr.length - 1, Math.floor(p * sortedHr.length))] : meanHr;
-  const deepEdge = q(0.16);  // bottom ~16% of HR → deep candidates
-  const remEdge = q(0.62);   // top ~38% of HR → REM candidates
+  const deepEdge = q(0.22);  // bottom ~22% of sleeping HR → deep
+  const remEdge = q(0.79);   // top ~21% of sleeping HR → REM
+  const hrSpread = hrs.length ? Math.max(1, q(0.9) - q(0.1)) : 1;
+  const bigJump = Math.max(6, hrSpread * 0.6); // a clearly erratic minute
 
   let light = 0;
   let deep = 0;
   let rem = 0;
   for (let i = 0; i < sleepEpochs.length; i++) {
     const m = sleepEpochs[i];
-    // Activity at or below the night's own mean = "quiet"; deep needs the very
-    // quietest epochs (≤ mean, since deep activity ≈ 0 sits well below mean).
+    // Activity at or below the night's own mean = "quiet"; deep/REM need quiet
+    // epochs (sustained movement → light/arousal).
     const lowAct = m.activity <= meanAct;
     const hr = m.hr_avg > 0 ? m.hr_avg : meanHr;
-    // HR variability proxy: jump vs neighbour (REM = irregular HR).
     const prev = i > 0 && sleepEpochs[i - 1].hr_avg > 0 ? sleepEpochs[i - 1].hr_avg : hr;
     const next = i + 1 < sleepEpochs.length && sleepEpochs[i + 1].hr_avg > 0
       ? sleepEpochs[i + 1].hr_avg : hr;
     const hrJump = Math.max(Math.abs(hr - prev), Math.abs(hr - next));
-    if (lowAct && hr <= deepEdge && hrJump <= 2) {
-      deep++; // quietest + HR in the night's lowest band + stable → deep
-    } else if (lowAct && (hr >= remEdge || hrJump > 2)) {
-      rem++; // quiet but HR in the night's upper band or variable → REM
+    if (lowAct && hr <= deepEdge) {
+      deep++; // quietest + HR in the night's lowest band → deep
+    } else if (lowAct && hr >= remEdge) {
+      rem++; // quiet + HR in the night's upper band → REM
+    } else if (lowAct && hrJump > bigJump) {
+      rem++; // mid-band but a clearly erratic minute → REM-leaning
     } else {
       light++;
     }

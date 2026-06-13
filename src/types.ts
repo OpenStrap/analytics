@@ -35,12 +35,71 @@ export interface Baseline {
 
 export type Tier = 'AUTH' | 'HIGH' | 'ESTIMATE' | 'RELATIVE';
 
-/** Every metric returns its value plus computed confidence + provenance. */
+/** A pointer the UI can navigate to: another metric (optionally at a date/scale).
+ *  This is the edge of the cross-metric "driver graph" — every contributor links
+ *  to its own deep-dive. */
+export interface MetricRef {
+  metric: string; // 'hr' | 'hrv' | 'rhr' | 'sleep' | 'activity' | 'strain' | ...
+  date?: string;  // YYYY-MM-DD
+  scale?: 'day' | 'week' | 'month' | 'quarter';
+}
+
+/** One ranked contributor to a metric's value — "what affected this number".
+ *  `contribution` is signed (positive = pushed the value up). `ref` makes it
+ *  tappable in the UI (deep-dive into the cause). */
+export interface Driver {
+  label: string;        // human label, e.g. "Elevated heart rate"
+  contribution: number; // signed magnitude (units are metric-specific / normalized)
+  detail?: string;      // e.g. "82 bpm vs your 61 resting"
+  ref?: MetricRef;      // where tapping this driver navigates
+}
+
+/** Every metric returns its value plus computed confidence + provenance, and
+ *  (optionally) the ranked drivers that explain it. */
 export type Metric<T> = T & {
   confidence: number; // 0..1, COMPUTED (coverage × input_completeness)
   tier: Tier;
   inputs_used: string[];
+  drivers?: Driver[];
 };
+
+// ── HRV-derived value shapes (see hrv.ts / recovery.ts / stress.ts) ──────────
+
+/** Recovery from nocturnal HRV (Plews et al. 2013 — ln RMSSD vs rolling baseline). */
+export interface RecoveryValue {
+  score: number | null;          // 0..100, null when no usable HRV
+  rmssd: number | null;          // tonight's nocturnal RMSSD (ms)
+  baseline_rmssd: number | null; // rolling mean RMSSD (ms)
+  z: number | null;              // ln-RMSSD z vs baseline (sd units)
+  note: string;                  // "HRV-based"
+}
+
+/** Stress from HRV (Baevsky Stress Index + LF/HF). Personal-relative when a
+ *  baseline SI distribution is available. */
+export interface StressValue {
+  score: number | null;   // 0..100 (percentile/z vs personal baseline SI)
+  si: number | null;      // Baevsky Stress Index
+  lf_hf: number | null;   // sympatho-vagal balance
+  rmssd: number | null;   // ms (context)
+  level: 'low' | 'moderate' | 'elevated' | null;
+}
+
+/** Multivariate illness / under-recovery signal (Mahalanobis distance). */
+export interface IllnessValue {
+  signal: boolean;
+  distance: number | null; // Mahalanobis distance from personal baseline
+  triggers: string[];      // which features deviated (rhr/rmssd/temp)
+  note: string;            // "a signal, not a diagnosis"
+}
+
+/** Nocturnal arousal / sleep-stress (HR surges + RMSSD dips + motion in sleep). */
+export interface SleepStressValue {
+  score: number | null;       // 0..100 nocturnal arousal load
+  arousal_events: number;     // count of HR-surge + motion events
+  restless_min: number;       // minutes with elevated motion during sleep
+  mean_sleeping_hr: number | null;
+  events: { ts: number; kind: 'arousal' | 'restless' }[]; // for the hypnogram overlay
+}
 
 // ── value shapes (wrapped by Metric<>) ──────────────────────────────────────
 
