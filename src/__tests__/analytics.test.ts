@@ -16,6 +16,7 @@ import { calcReadiness, calcAnomaly } from '../readiness';
 import { calcBaselines } from '../baselines';
 import { calcStress, classifyArousal } from '../stress';
 import { calcNocturnalHeart } from '../nocturnal';
+import { resolveMaxHr } from '../util';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -499,6 +500,77 @@ console.log('--- §14 buildNotifications ---');
   assert(n.length <= 6, 'capped at 6');
   assert(JSON.stringify(buildNotifications(base)) === JSON.stringify(buildNotifications(base)),
     'notifications deterministic');
+}
+
+// ── regression: SRI circular statistics (midnight-wrap bug) ──────────────────
+console.log('--- regression: SRI circular (midnight wrap) ---');
+{
+  const DAY = 86400;
+  // A TIGHT schedule that straddles midnight: onsets 23:50 / 00:05 / 23:55,
+  // wakes ~07:20–07:30. These are within ~15 min of each other, so a regular
+  // sleeper — but a LINEAR minute-of-day std treats 23:50 (1430) and 00:05 (5)
+  // as ~1425 min apart and floors SRI to 0. Circular std must score it HIGH.
+  const straddle = [
+    { onset_ts: 0 * DAY + 1430 * 60, wake_ts: 0 * DAY + 440 * 60 },
+    { onset_ts: 1 * DAY + 5 * 60,    wake_ts: 1 * DAY + 450 * 60 },
+    { onset_ts: 2 * DAY + 1435 * 60, wake_ts: 2 * DAY + 435 * 60 },
+  ];
+  const r = calcSleepRegularity(straddle);
+  assert(r.sri > 80, `midnight-straddle tight schedule → SRI high, not floored (got ${r.sri})`);
+  // Genuinely scattered onsets (spread across the clock) → low SRI.
+  const scattered = [
+    { onset_ts: 0 * DAY + 1320 * 60, wake_ts: 0 * DAY + 360 * 60 }, // 22:00
+    { onset_ts: 1 * DAY + 120 * 60,  wake_ts: 1 * DAY + 600 * 60 }, // 02:00
+    { onset_ts: 2 * DAY + 1200 * 60, wake_ts: 2 * DAY + 480 * 60 }, // 20:00
+  ];
+  assert(calcSleepRegularity(scattered).sri < r.sri,
+    'scattered schedule scores lower than the tight straddle schedule');
+}
+
+// ── regression: sleep stages are physiologically plausible (not REM-dominated) ─
+console.log('--- regression: sleep stage proportions ---');
+{
+  // A realistic night: low activity throughout, sleeping HR varying within a
+  // narrow band (deep = lowest HR, REM = highest). The OLD estimator routed the
+  // top ~38% of HR plus any >2 bpm jump into REM → 60–70% REM. The fix must keep
+  // REM a minority and produce a light-dominant night with some deep.
+  const night: Minute[] = [];
+  for (let i = 0; i < 5; i++) night.push(min(i * 60, 70, 2000));     // awake before
+  for (let i = 5; i < 365; i++) {
+    // sleeping HR oscillates 44..58 with minute-to-minute wobble (REM-like noise).
+    const base = 44 + 7 * (1 + Math.sin(i / 25));
+    const wobble = (i % 3) - 1; // -1,0,1 every minute
+    night.push(min(i * 60, Math.round(base + wobble), 40));
+  }
+  for (let i = 365; i < 370; i++) night.push(min(i * 60, 72, 2000));  // awake after
+  const s = calcSleep(night, baseline);
+  const st = s.stages!;
+  const tot = st.light_min + st.deep_min + st.rem_min;
+  assert(tot > 0, 'stages computed');
+  assert(st.rem_min / tot < 0.40, `REM is a minority, not dominant (got ${(100*st.rem_min/tot).toFixed(0)}%)`);
+  assert(st.deep_min / tot > 0.05, `some deep sleep detected (got ${(100*st.deep_min/tot).toFixed(0)}%)`);
+  assert(st.light_min >= st.rem_min, `light ≥ REM (light ${st.light_min} vs REM ${st.rem_min})`);
+}
+
+// ── regression: resolveMaxHr doesn't promote a quiet within-day peak ──────────
+console.log('--- regression: resolveMaxHr source ---');
+{
+  // No baseline max, age present, day peaks only at 110 bpm (a quiet day). Must
+  // use the age-predicted max (191) as the denominator, NOT call 110 "measured".
+  const quiet: Minute[] = [];
+  for (let i = 0; i < 60; i++) quiet.push(min(i * 60, 95 + (i % 5), 100, { hr_max: 110 }));
+  const r1 = resolveMaxHr(quiet, { max_hr: 0 }, { age: 29 });
+  assert(r1.source === 'age' && r1.maxHr === 191,
+    `quiet-day peak not promoted to measured (got ${r1.maxHr}/${r1.source})`);
+  // A genuine hard effort above age-max IS taken as measured.
+  const effort: Minute[] = [];
+  for (let i = 0; i < 60; i++) effort.push(min(i * 60, 150, 5000, { hr_max: i === 30 ? 198 : 150 }));
+  const r2 = resolveMaxHr(effort, { max_hr: 0 }, { age: 29 });
+  assert(r2.source === 'measured' && r2.maxHr === 198,
+    `real above-age effort taken as measured (got ${r2.maxHr}/${r2.source})`);
+  // Baseline max always wins (stable session max).
+  const r3 = resolveMaxHr(quiet, { max_hr: 185 }, { age: 29 });
+  assert(r3.source === 'measured' && r3.maxHr === 185, 'baseline max_hr wins');
 }
 
 summary('analytics');

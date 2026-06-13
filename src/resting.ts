@@ -65,7 +65,13 @@ export function calcRestingHR(
   };
 }
 
-/** Lowest-mean contiguous worn stretch of `windowMin` consecutive worn minutes. */
+/**
+ * Lowest-mean stretch of `windowMin` worn minutes that are actually ADJACENT IN
+ * TIME (≤90s apart). Filtering off-wrist minutes out first and then taking
+ * index-adjacent slices would let a "30-min stretch" span hours of fragmented
+ * wear; a resting-HR window must be a genuine continuous quiet block, so we only
+ * slide the window within a run of time-contiguous worn minutes.
+ */
 function lowestContiguousStretch(
   minutes: Minute[],
   windowMin: number
@@ -74,17 +80,37 @@ function lowestContiguousStretch(
     .filter(isHrUsable)
     .sort((a, b) => a.ts - b.ts);
   if (worn.length === 0) return null;
-  if (worn.length < windowMin) return { hrs: worn.map((m) => m.hr_avg) };
 
+  const MAX_GAP = 90; // seconds; > this breaks time-contiguity
   let bestMean = Infinity;
-  let bestHrs: number[] = [];
-  for (let i = 0; i + windowMin <= worn.length; i++) {
-    const slice = worn.slice(i, i + windowMin);
-    const m = slice.reduce((s, x) => s + x.hr_avg, 0) / windowMin;
-    if (m < bestMean) {
-      bestMean = m;
-      bestHrs = slice.map((s) => s.hr_avg);
+  let bestHrs: number[] | null = null;
+
+  // Walk maximal time-contiguous runs; slide a windowMin window inside each.
+  let runStart = 0;
+  for (let i = 1; i <= worn.length; i++) {
+    const broken = i === worn.length || worn[i].ts - worn[i - 1].ts > MAX_GAP;
+    if (!broken) continue;
+    const run = worn.slice(runStart, i);
+    runStart = i;
+    if (run.length < windowMin) continue;
+    let windowSum = run.slice(0, windowMin).reduce((s, x) => s + x.hr_avg, 0);
+    for (let j = 0; j + windowMin <= run.length; j++) {
+      if (j > 0) windowSum += run[j + windowMin - 1].hr_avg - run[j - 1].hr_avg;
+      const m = windowSum / windowMin;
+      if (m < bestMean) {
+        bestMean = m;
+        bestHrs = run.slice(j, j + windowMin).map((s) => s.hr_avg);
+      }
     }
+  }
+
+  // No run long enough for a full window → fall back to the quietest worn minutes
+  // we have (better than nothing; confidence is already capped at ≤0.5 upstream).
+  if (!bestHrs) {
+    const lowest = [...worn].sort((a, b) => a.hr_avg - b.hr_avg)
+      .slice(0, Math.min(windowMin, worn.length))
+      .map((m) => m.hr_avg);
+    return { hrs: lowest };
   }
   return { hrs: bestHrs };
 }

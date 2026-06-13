@@ -73,24 +73,39 @@ export function resolveMaxHr(
   baseline: Pick<Baseline, 'max_hr'>,
   profile?: Profile
 ): { maxHr: number; source: 'measured' | 'age' } {
-  // 1. Prefer a measured max carried on the baseline (from observed sessions).
+  // 1. Prefer a measured max carried on the baseline (rolling observed SESSION
+  //    max — a real peak effort, accumulated across days). This is the stable,
+  //    trustworthy denominator.
   if (baseline.max_hr && baseline.max_hr > 0) {
     return { maxHr: baseline.max_hr, source: 'measured' };
   }
-  // 2. Measured max from the minutes themselves.
+
+  // The highest HR seen in THIS window. NOTE: on a low-activity day this is just
+  // the day's quiet peak (e.g. 110 bpm) — NOT a true HRmax. Using it directly as
+  // the zone/strain denominator over-states zone occupancy and inflates strain on
+  // sedentary days, and varies wildly day-to-day. So we only treat it as a
+  // 'measured' max when it actually EXCEEDS the age-predicted max (a genuine hard
+  // effort); otherwise the age floor wins so a quiet peak can't shrink the scale.
   const observed = minutes
     .filter(isHrUsable)
     .reduce((mx, m) => Math.max(mx, m.hr_max, m.hr_avg), 0);
-  if (observed > 0) {
-    // If we have an observed max we treat it as 'measured' truth.
-    return { maxHr: observed, source: 'measured' };
-  }
-  // 3. Age-based default only when age is present.
+
+  // 2. Age-predicted max (floor), taking a genuine above-age effort if present.
   if (profile?.age && profile.age > 0) {
-    return { maxHr: 220 - profile.age, source: 'age' };
+    const ageMax = 220 - profile.age;
+    if (observed > ageMax) return { maxHr: observed, source: 'measured' };
+    return { maxHr: ageMax, source: 'age' };
   }
-  // 4. No data at all: honest neutral fallback (still flagged as age-derived,
-  //    using a population mean age of 30 ONLY as a denominator guard so HR-zone
-  //    math doesn't divide by zero — callers should down-weight confidence).
+
+  // 3. No age, but we have an observed peak: best available, but flag it 'age'
+  //    (not 'measured') so callers down-weight confidence — it's an unverified
+  //    within-window peak, not a true measured HRmax.
+  if (observed > 0) {
+    return { maxHr: observed, source: 'age' };
+  }
+
+  // 4. No data at all: honest neutral fallback (population HRmax ~190) used ONLY
+  //    as a denominator guard so HR-zone math doesn't divide by zero — callers
+  //    should down-weight confidence.
   return { maxHr: 190, source: 'age' };
 }

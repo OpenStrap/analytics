@@ -1,4 +1,5 @@
-// §9 Training load / fitness trend. Tier HIGH (trend only — never a VO2max number).
+// §9 Training load (calcLoad, Tier HIGH) + fitness trend (calcFitnessTrend, Tier
+// ESTIMATE — directional only, never a VO2max number).
 import type {
   DailyStrain,
   DayHistory,
@@ -63,7 +64,8 @@ export function calcLoad(dailyStrain: DailyStrain[]): Metric<LoadValue> {
  *
  * Rolling 7d RHR and rolling 7d session-HRR60 over the history. Fitness improving
  * when RHR slope < 0 AND HRR slope > 0 over ~4 weeks. Output direction + the two
- * slopes. NEVER emits an absolute VO2max number.
+ * slopes. NEVER emits an absolute VO2max number. Tier ESTIMATE — it's a noisy
+ * directional read from two proxy slopes, not a measured fitness score.
  *
  * Confidence formula: min(0.8, (days/21)*0.8) — spec pins ≥21 days → 0.8; below
  *   that it ramps linearly. 'unknown' until ≥7 days & ≥3 RHR points.
@@ -84,7 +86,7 @@ export function calcFitnessTrend(daily: DayHistory[]): Metric<FitnessTrendValue>
       hrr_slope: 0,
       days_used: days,
       confidence: round(Math.min(0.8, (days / 21) * 0.8), 4),
-      tier: 'HIGH',
+      tier: 'ESTIMATE',
       inputs_used: ['resting_hr', 'hrr60'],
     };
   }
@@ -108,7 +110,7 @@ export function calcFitnessTrend(daily: DayHistory[]): Metric<FitnessTrendValue>
     hrr_slope: round(hrrSlope, 5),
     days_used: days,
     confidence: round(confidence, 4),
-    tier: 'HIGH',
+    tier: 'ESTIMATE',
     inputs_used: ['resting_hr', 'hrr60'],
   };
 }
