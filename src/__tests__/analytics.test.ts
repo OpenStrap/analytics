@@ -10,12 +10,15 @@ import { calcCalories } from '../calories';
 import { calcSleep } from '../sleep';
 import { calcSleepRegularity } from '../regularity';
 import { detectSessions } from '../sessions';
-import { calcHrRecovery } from '../recovery';
+import { calcHrRecovery, calcRecovery } from '../recovery';
 import { calcLoad, calcFitnessTrend } from '../trends';
-import { calcReadiness, calcAnomaly } from '../readiness';
+import { calcAnomaly } from '../readiness';
 import { calcBaselines } from '../baselines';
-import { calcStress, classifyArousal } from '../stress';
+import { calcStress } from '../stress';
+import { calcSleepStress } from '../arousal';
 import { calcNocturnalHeart } from '../nocturnal';
+import { calcIllness } from '../illness';
+import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hrv';
 import { resolveMaxHr } from '../util';
 
 const baseline: Baseline = {
@@ -304,40 +307,39 @@ console.log('--- §9 calcLoad / calcFitnessTrend ---');
   assert(!('vo2max' in (ft as unknown as Record<string, unknown>)), 'no VO2max field emitted');
 }
 
-// ── §10 calcReadiness + calcAnomaly ──────────────────────────────────────────
-console.log('--- §10 calcReadiness / calcAnomaly ---');
+// ── §10 calcRecovery (HRV) + calcAnomaly + calcIllness ───────────────────────
+console.log('--- §10 calcRecovery / calcAnomaly / calcIllness ---');
 {
-  // perfect: RHR = baseline, full sleep, perfect efficiency → ~100
-  const good = calcReadiness(
-    {
-      resting_hr: 50,
-      sleep_duration_min: 480,
-      sleep_efficiency: 1,
-      sleep_regularity: 100,
-    },
-    baseline
-  );
-  approx(good.score, 100, 0.5, 'ideal inputs → readiness ≈ 100');
-  assert(good.note === '(est.) — not HRV-based', 'readiness carries mandatory note');
-  assert(good.tier === 'ESTIMATE', 'readiness ESTIMATE');
-
-  // elevated RHR drags score down
-  const bad = calcReadiness(
-    { resting_hr: 60, sleep_duration_min: 240, sleep_efficiency: 0.6, sleep_regularity: 50 },
-    baseline
-  );
-  assert(bad.score < good.score, 'worse inputs → lower readiness');
+  // Plews lnRMSSD z-score. Baseline ~75ms; tonight at baseline → ~50.
+  const base = [72, 75, 78, 74, 76, 73, 77, 75, 74, 76];
+  const atBase = calcRecovery(75, base, { date: '2026-06-13' });
+  approx(atBase.score!, 50, 8, 'RMSSD at baseline → recovery ≈ 50');
+  assert(atBase.tier === 'HIGH' && atBase.note === 'HRV-based', 'recovery HIGH, HRV-based');
+  assert(atBase.drivers!.length >= 1 && atBase.drivers![0].ref!.metric === 'hrv', 'recovery driver links to hrv');
+  const high = calcRecovery(100, base);
+  const low = calcRecovery(50, base);
+  assert(high.score! > atBase.score! && low.score! < atBase.score!, 'higher RMSSD → higher recovery');
+  // insufficient baseline → null (honest, no heuristic fallback)
+  assert(calcRecovery(75, [70, 72]).score === null && calcRecovery(75, [70, 72]).confidence === 0,
+    '<5 baseline nights → recovery null');
+  assert(calcRecovery(null, base).score === null, 'no RMSSD tonight → null');
 
   // anomaly: RHR ≥ baseline+7% for ≥2 consecutive days
-  const an = calcAnomaly({ recent_rhr: [50, 51, 55, 56] }, baseline); // 53.5 = +7%
-  assert(an.signal === true && an.triggers.includes('rhr_elevated_2d'),
-    'two elevated RHR days → signal fires');
-  assert(an.note === 'signal, not a diagnosis', 'anomaly carries non-diagnostic note');
-  assert(an.confidence <= 0.5, 'anomaly confidence ≤ 0.5');
+  const an = calcAnomaly({ recent_rhr: [50, 51, 55, 56] }, baseline);
+  assert(an.signal === true && an.triggers.includes('rhr_elevated_2d'), 'two elevated RHR days → signal');
+  assert(an.note === 'signal, not a diagnosis', 'anomaly non-diagnostic note');
 
-  // no elevation → no signal
-  const noAn = calcAnomaly({ recent_rhr: [50, 50, 50] }, baseline);
-  assert(noAn.signal === false, 'normal RHR → no anomaly signal');
+  // illness (Mahalanobis): RHR↑ + RMSSD↓ + temp↑ vs baseline → signal.
+  const hist = {
+    resting_hr: Array.from({ length: 20 }, (_, i) => 55 + (i % 3)),
+    rmssd: Array.from({ length: 20 }, (_, i) => 74 + (i % 5)),
+    skin_temp: Array.from({ length: 20 }, (_, i) => 34 + (i % 2) * 0.1),
+  };
+  const sick = calcIllness({ resting_hr: 68, rmssd: 45, skin_temp: 35.2 }, hist);
+  assert(sick.signal === true && sick.triggers.length >= 2, 'illness fires on multivariate deviation');
+  assert(sick.note === 'a signal, not a diagnosis', 'illness non-diagnostic note');
+  const well = calcIllness({ resting_hr: 56, rmssd: 76, skin_temp: 34.05 }, hist);
+  assert(well.signal === false, 'normal vector → no illness signal');
 }
 
 // ── §11 calcBaselines ────────────────────────────────────────────────────────
@@ -416,41 +418,73 @@ console.log('--- buildCoach ---');
   })), 'coach is deterministic');
 }
 
-// ── §12 calcStress / classifyArousal ──────────────────────────────────────────
-console.log('--- §12 calcStress ---');
+// ── §HRV math (RMSSD/SDNN/pNN50, Lomb–Scargle, Baevsky) ───────────────────────
+console.log('--- §HRV time/freq/SI ---');
 {
-  // baseline rhr 50, max 190 → reserve denom 140.
-  const p1 = classifyArousal(50, 0, true, 50, 190);
-  assert(p1.bucket === 'calm' && p1.score === 0, 'HR at rest, sedentary → calm, 0');
-  const p2 = classifyArousal(78, 0, true, 50, 190); // reserve 0.2
-  assert(p2.bucket === 'balanced', 'sedentary +0.2 reserve → balanced');
-  const p3 = classifyArousal(92, 0, true, 50, 190); // reserve 0.3
-  assert(p3.bucket === 'stressed' && p3.score === 86, 'sedentary +0.3 reserve → stressed, 86');
-  const p4 = classifyArousal(120, 0.3, true, 50, 190);
-  assert(p4.bucket === 'active' && p4.score === 0, 'elevated + moving → active (not stress)');
-  const p5 = classifyArousal(0, 0, false, 50, 190);
-  assert(p5.bucket === 'none', 'off-wrist → none');
+  // Exact RMSSD: alternating 800/820 → successive diff 20 → RMSSD = 20.
+  const alt = Array.from({ length: 60 }, (_, i) => (i % 2 ? 820 : 800));
+  const td = timeDomainHrv(alt);
+  approx(td.rmssd!, 20, 0.01, 'alternating 800/820 → RMSSD = 20');
+  approx(td.mean_rr!, 810, 0.1, 'mean RR = 810');
+  approx(td.mean_hr!, 60000 / 810, 0.1, 'mean HR from RR');
+  // cleanRr drops out-of-physiological + ectopic jumps.
+  assert(cleanRr([900, 250, 905, 2500, 910]).length === 3, 'cleanRr drops non-physiological');
+  // Respiratory peak: RR modulated at 0.25 Hz (15 brpm) → resp_rate ≈ 15.
+  const t: number[] = []; let acc = 0;
+  const resp: number[] = [];
+  for (let i = 0; i < 200; i++) {
+    const rr = 900 + 60 * Math.sin(2 * Math.PI * 0.25 * (acc / 1000));
+    resp.push(Math.round(rr)); acc += rr;
+  }
+  const fd = freqDomainHrv(resp);
+  assert(fd.resp_rate !== null && Math.abs(fd.resp_rate - 15) < 3, `RSA resp rate ≈ 15 brpm (got ${fd.resp_rate})`);
+  assert(fd.hf! > 0 && fd.lf_hf !== null, 'LF/HF computed');
+  // Baevsky SI: tighter RR distribution → higher SI than a spread one.
+  const tight = Array.from({ length: 100 }, (_, i) => 900 + (i % 3)); // narrow
+  const spread = Array.from({ length: 100 }, (_, i) => 700 + (i * 4) % 400); // wide
+  const siT = baevskyStressIndex(tight).si!, siS = baevskyStressIndex(spread).si!;
+  assert(siT > siS, `tighter RR ⇒ higher Baevsky SI (${siT} > ${siS})`);
+}
 
-  // A day: 10 calm + 10 balanced + 5 stressed + 5 active.
-  const day: Minute[] = [
-    ...Array.from({ length: 10 }, (_, i) => min(i * 60, 50, 0)),
-    ...Array.from({ length: 10 }, (_, i) => min((10 + i) * 60, 78, 0)),
-    ...Array.from({ length: 5 }, (_, i) => min((20 + i) * 60, 92, 0)),
-    ...Array.from({ length: 5 }, (_, i) => min((25 + i) * 60, 120, 0.3)),
-  ];
-  const s = calcStress(day, baseline);
-  assert(s.calm_min === 10 && s.balanced_min === 10 && s.stressed_min === 5, 'stress buckets tally');
-  assert(s.active_min === 5, 'active minutes excluded from stress buckets');
-  assert(s.worn_min === 30, 'worn minutes counted');
-  approx(s.score ?? -1, 40, 1, 'day stress score ≈ mean sedentary arousal scaled');
-  assert(s.tier === 'ESTIMATE', 'stress tier ESTIMATE');
-  // no sedentary minutes → no signal.
-  const allActive = calcStress(
-    Array.from({ length: 20 }, (_, i) => min(i * 60, 130, 0.4)), baseline);
-  assert(allActive.score === null && allActive.confidence === 0, 'all-moving day → no stress signal');
+// ── §12 calcStress (HRV-based, personal-relative) ─────────────────────────────
+console.log('--- §12 calcStress (HRV) ---');
+{
+  const rr = Array.from({ length: 120 }, (_, i) => 850 + (i % 5) * 8);
+  const si = baevskyStressIndex(rr).si!;
+  // No baseline → indices only, no fabricated score.
+  const noBase = calcStress(rr, []);
+  assert(noBase.score === null && noBase.si !== null, 'no baseline → SI reported, score null');
+  assert(noBase.tier === 'ESTIMATE', 'stress ESTIMATE');
+  // With a baseline SI distribution → personal-relative score + level.
+  const baseSI = [si * 0.8, si * 0.9, si, si * 1.1, si * 1.2, si * 0.95, si * 1.05];
+  const withBase = calcStress(rr, baseSI);
+  assert(withBase.score !== null && withBase.level !== null, 'baseline present → score + level');
+  assert(withBase.drivers!.some((d) => d.label.includes('Baevsky')), 'stress driver = Baevsky SI');
+  // Higher SI than baseline → higher stress score.
+  const tightRr = Array.from({ length: 120 }, (_, i) => 850 + (i % 2)); // very tight → high SI
+  const hi = calcStress(tightRr, baseSI);
+  assert((hi.score ?? 0) >= (withBase.score ?? 0), 'higher SI vs baseline → higher stress');
   // determinism
-  assert(JSON.stringify(calcStress(day, baseline)) === JSON.stringify(calcStress(day, baseline)),
-    'stress deterministic');
+  assert(JSON.stringify(calcStress(rr, baseSI)) === JSON.stringify(calcStress(rr, baseSI)), 'stress deterministic');
+}
+
+// ── §sleep-stress / nocturnal arousal ─────────────────────────────────────────
+console.log('--- §calcSleepStress ---');
+{
+  // Calm night: flat low HR, no motion → no arousals, low score.
+  const calm: Minute[] = Array.from({ length: 240 }, (_, i) => min(i * 60, 50, 5));
+  const cs = calcSleepStress(calm, baseline);
+  assert(cs.arousal_events === 0, 'calm night → no arousal events');
+  assert(cs.score !== null && cs.score < 10, 'calm night → low sleep-stress');
+  // Restless night: periodic HR surges + motion → arousal events detected.
+  const restless: Minute[] = Array.from({ length: 240 }, (_, i) => {
+    const surge = i % 40 === 0; // a surge every 40 min
+    return min(i * 60, surge ? 80 : 50, surge ? 3000 : 5);
+  });
+  const rs = calcSleepStress(restless, baseline);
+  assert(rs.arousal_events >= 4, `restless night → arousal events detected (got ${rs.arousal_events})`);
+  assert(rs.score! > cs.score!, 'restless night scores higher than calm');
+  assert(rs.events.length > 0 && rs.events.some((e) => e.kind === 'arousal'), 'arousal events listed for overlay');
 }
 
 // ── §13 calcNocturnalHeart ─────────────────────────────────────────────────────

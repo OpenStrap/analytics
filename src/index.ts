@@ -1,6 +1,6 @@
 // openstrap-analytics — public surface.
-// Pure, deterministic, spec-aligned (docs/ANALYTICS_SPEC.md + docs/CONFIDENCE.md).
-// NOTE: HRV / rMSSD / stress are BANNED and are NOT exported.
+// Pure, deterministic, spec-aligned. Every metric is a published algorithm.
+// HRV is derived from real type-24 RR intervals (validated on hardware).
 
 export * from './types';
 
@@ -29,15 +29,25 @@ export { calcSleepRegularity } from './regularity';
 // §7 Auto-workout detection
 export { detectSessions } from './sessions';
 
-// §8 HR recovery (HRR60)
-export { calcHrRecovery } from './recovery';
+// §8 HR recovery (HRR60) + HRV-based recovery (Plews lnRMSSD z-score)
+export { calcHrRecovery, calcRecovery } from './recovery';
+
+// §HRV — RMSSD/SDNN/pNN50, Lomb–Scargle LF/HF, Baevsky SI, RSA respiratory rate
+export {
+  timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr,
+  VLF_BAND, LF_BAND, HF_BAND,
+} from './hrv';
+export type { TimeDomainHrv, FreqDomainHrv } from './hrv';
 
 // §9 Training load / fitness trend
 export { calcLoad, calcFitnessTrend } from './trends';
 
-// §10 Readiness + anomaly signals
-export { calcReadiness, calcAnomaly } from './readiness';
-export type { ReadinessInputs, AnomalyInputs } from './readiness';
+// §10 Anomaly + illness (Mahalanobis). calcReadiness REMOVED (heuristic) — use
+//     calcRecovery (HRV) instead.
+export { calcAnomaly } from './readiness';
+export type { AnomalyInputs } from './readiness';
+export { calcIllness } from './illness';
+export type { IllnessToday, IllnessHistory } from './illness';
 
 // §11 Baselines
 export { calcBaselines } from './baselines';
@@ -50,9 +60,11 @@ export type {
   CoachInputs, CoachOutput, Suggestion, Contributor, Why,
 } from './coach';
 
-// §12 Stress / arousal monitor (HR-above-resting while sedentary; NOT HRV).
-export { calcStress, classifyArousal, STRESS_ACT_FLOOR } from './stress';
-export type { StressValue, ArousalPoint, ArousalBucket } from './stress';
+// §12 Stress — HRV-based (Baevsky Stress Index + LF/HF, personal-relative).
+export { calcStress } from './stress';
+
+// §Sleep stress / nocturnal arousal (HR surge + motion during sleep).
+export { calcSleepStress } from './arousal';
 
 // §13 Nocturnal Heart (sleeping-HR dynamics + dip + elevated-overnight flag).
 export { calcNocturnalHeart } from './nocturnal';
