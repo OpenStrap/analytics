@@ -1,7 +1,7 @@
 {
   "name": "openstrap-analytics",
   "version": "1.0.0",
-  "description": "Published-algorithm analytics (sleep/strain/recovery/load/readiness) over minute rollups. HRV/stress are BANNED.",
+  "description": "Published-algorithm analytics (sleep/strain/recovery/load/readiness/stress) over minute rollups. Stress is an HR+motion arousal ESTIMATE (not HRV). HRV itself is computed in the backend from raw RR intervals, not here.",
   "type": "commonjs",
   "main": "src/index.ts",
   "license": "ISC",

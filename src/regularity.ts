@@ -1,6 +1,6 @@
 // §6 Sleep regularity (SRI). Tier HIGH (≥3 nights).
 import type { NightSummary, Metric, SleepRegularityValue } from './types';
-import { stddev, round } from './util';
+import { round } from './util';
 
 const DAY_MIN = 24 * 60;
 
@@ -11,11 +11,39 @@ function minuteOfDay(ts: number): number {
 }
 
 /**
+ * Circular standard deviation (in MINUTES) of a set of minute-of-day values.
+ *
+ * Clock time is cyclic: 23:50 and 00:10 are 20 min apart, not ~1430. A LINEAR
+ * stddev of minute-of-day blows up for any bedtime straddling midnight and floors
+ * SRI to 0 for people who simply sleep around midnight. We instead map each time
+ * to an angle θ = 2π·m/1440, take the mean resultant length R, and derive the
+ * circular std σ = √(−2·ln R) (Mardia), converted back to minutes. Identical
+ * times → R=1 → σ=0; uniformly scattered → R→0 → σ→∞ (clamped by the caller).
+ */
+function circularStdMin(minutesOfDay: number[]): number {
+  if (minutesOfDay.length < 2) return 0;
+  let sumCos = 0;
+  let sumSin = 0;
+  for (const m of minutesOfDay) {
+    const theta = (2 * Math.PI * m) / DAY_MIN;
+    sumCos += Math.cos(theta);
+    sumSin += Math.sin(theta);
+  }
+  const n = minutesOfDay.length;
+  const r = Math.sqrt(sumCos * sumCos + sumSin * sumSin) / n;
+  // R∈(0,1]; guard R→0 (fully scattered) so ln stays finite.
+  const rClamped = Math.max(1e-9, Math.min(1, r));
+  const sigmaRad = Math.sqrt(-2 * Math.log(rClamped));
+  return sigmaRad * (DAY_MIN / (2 * Math.PI));
+}
+
+/**
  * calcSleepRegularity(nights[])
  *
  * For each night compute onset/wake minute-of-day.
- *   SRI = max(0, 100 − (avg(std_onset, std_wake)/120)*100).
- * confidence = 0 if <3 nights, else 0.7.
+ *   SRI = max(0, 100 − (avg(circ_std_onset, circ_std_wake)/120)*100).
+ * Uses CIRCULAR std (see circularStdMin) so midnight-straddling bedtimes don't
+ * spuriously read as irregular. confidence = 0 if <3 nights, else 0.7.
  *
  * Confidence formula: pinned 0.7 once ≥3 nights with both onset & wake present;
  *   0 below that threshold (input incompleteness).
@@ -39,8 +67,8 @@ export function calcSleepRegularity(
     };
   }
 
-  const onsetStd = stddev(onsets);
-  const wakeStd = stddev(wakes);
+  const onsetStd = circularStdMin(onsets);
+  const wakeStd = circularStdMin(wakes);
   const avgStd = (onsetStd + wakeStd) / 2;
   const sri = Math.max(0, 100 - (avgStd / 120) * 100);
 
