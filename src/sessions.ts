@@ -103,7 +103,7 @@ export function detectSessions(
     const peakAct = Math.max(...acts);
 
     const strain = calcStrain(slice, baseline, profile);
-    const cals = calcCalories(slice, profile ?? {});
+    const cals = calcCalories(slice, profile ?? {}, baseline.resting_hr, maxHr);
     const zones = calcHrZones(slice, baseline, profile);
     const hrr = calcHrRecovery(slice, baseline, profile);
 

@@ -112,17 +112,26 @@ console.log('--- §3 calcHrZones ---');
 // ── §4 calcCalories ──────────────────────────────────────────────────────────
 console.log('--- §4 calcCalories ---');
 {
-  // one min @120bpm, age30 w70, sex-avg → 8.0329 kcal
+  // ACTIVE calories = burn ABOVE resting. One min @120 with RHR 60, sex-avg:
+  // delta/min = avg((0.6309+0.4472)/2)*(120−60)/4.184 = 0.53905*60/4.184 ≈ 7.73 kcal.
   const one: Minute[] = [min(0, 120)];
-  const c = calcCalories(one, { age: 30, weight_kg: 70 });
-  approx(c.kcal, 8.0, 0.1, 'one min @120 sex-avg ≈ 8.03 kcal');
+  const c = calcCalories(one, { age: 30, weight_kg: 70 }, 60);
+  approx(c.kcal, 7.73, 0.2, 'one min @120 over RHR60 sex-avg ≈ 7.7 active kcal');
   assert(c.tier === 'ESTIMATE' && c.label.includes('est.'), 'calories ESTIMATE + est. label');
-  // negative per-min clamped at 0 (very low HR)
-  const low = calcCalories([min(0, 40)], { age: 30, weight_kg: 70 });
-  assert(low.kcal >= 0, 'low-HR calories never negative');
-  // sex specified changes value
-  const cm = calcCalories(one, { age: 30, weight_kg: 70, sex: 'm' });
+  // a minute AT resting HR contributes ≈0 active calories (the key fix).
+  const atRest = calcCalories([min(0, 60)], { age: 30, weight_kg: 70 }, 60);
+  assert(atRest.kcal < 0.01, 'minutes at resting HR → ~0 active calories (no BMR over-count)');
+  // below resting clamped at 0.
+  const low = calcCalories([min(0, 40)], { age: 30, weight_kg: 70 }, 60);
+  assert(low.kcal >= 0, 'below-resting calories never negative');
+  // sex specified changes the active value (HR coefficient differs).
+  const cm = calcCalories(one, { age: 30, weight_kg: 70, sex: 'm' }, 60);
   assert(cm.kcal !== c.kcal, 'male coeff differs from sex-avg');
+  // a full day spent AT resting HR must contribute ≈0 active kcal — the bug fix
+  // (pre-fix this summed Keytel's BMR constant → ~5884 "active" kcal on a full day).
+  const fullRestDay: Minute[] = Array.from({ length: 1440 }, (_, i) => min(i * 60, 58));
+  const fr = calcCalories(fullRestDay, { age: 29, weight_kg: 75, sex: 'm' }, 58);
+  assert(fr.kcal < 20, `full resting-HR day → ~0 active kcal (got ${fr.kcal}, was ~5884 pre-fix)`);
 }
 
 // ── §5 calcSleep ─────────────────────────────────────────────────────────────
