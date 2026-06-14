@@ -14,7 +14,8 @@
 // RR is decoded from type-24 records (parse_r24 rr_intervals_ms) and validated on
 // real hardware (99.7% physiological; p50≈860 ms ≈ 70 bpm). This is NOT the parked
 // R17/R11 live-optical path — it's the historical RR that ships in every record.
-import { round } from './util';
+import { round, mean, stddev } from './util';
+import type { Metric, HrvStabilityValue, IrregularValue } from './types';
 
 /** Standard frequency bands (Hz) per the HRV Task Force (1996). */
 export const VLF_BAND: [number, number] = [0.0033, 0.04];
@@ -179,4 +180,60 @@ export function baevskyStressIndex(rrRaw: number[]): { si: number | null; sqrt_s
   if (Mo <= 0 || MxDMn <= 0) return { si: null, sqrt_si: null, n_beats: rr.length };
   const si = AMo / (2 * Mo * MxDMn);
   return { si: round(si, 1), sqrt_si: round(Math.sqrt(si), 2), n_beats: rr.length };
+}
+
+/**
+ * calcHrvStability(rmssdSeries) — coefficient of variation of nocturnal RMSSD over
+ * a window (SD/mean × 100). A low, stable CV tracks consistent autonomic balance;
+ * a rising CV flags instability. Needs ≥5 nights. Tier HIGH.
+ */
+export function calcHrvStability(rmssdSeries: number[]): Metric<HrvStabilityValue> {
+  const xs = rmssdSeries.filter((x) => x != null && x > 0);
+  if (xs.length < 5) {
+    return { cv: null, mean_rmssd: null, n: xs.length, confidence: round(xs.length / 7, 3), tier: 'HIGH', inputs_used: ['hrv_rmssd'] };
+  }
+  const m = mean(xs), sd = stddev(xs);
+  return {
+    cv: m > 0 ? round((sd / m) * 100, 1) : null,
+    mean_rmssd: round(m, 1),
+    n: xs.length,
+    confidence: round(Math.min(1, xs.length / 14), 3),
+    tier: 'HIGH',
+    inputs_used: ['hrv_rmssd'],
+  };
+}
+
+/**
+ * calcIrregular(rrRaw) — irregular-rhythm SCREEN (NOT a diagnosis). From nocturnal
+ * RR we compute the Poincaré descriptors (SD1 = RMSSD/√2, SD2 = √(2·SDNN² − ½·RMSSD²))
+ * and the fraction of beats the artifact filter rejects as ectopic/irregular. A
+ * sustained high ectopic fraction together with very high short-term variability
+ * (pNN50) is the AF-like pattern. Deliberately conservative; surfaced like the
+ * illness watch ("a screen, not a diagnosis — see a clinician").
+ */
+export function calcIrregular(rrRaw: number[]): Metric<IrregularValue> {
+  const NOTE = 'a screen, not a diagnosis';
+  const physio = rrRaw.filter((x) => x >= 300 && x <= 2000);
+  const cleaned = cleanRr(rrRaw);
+  const td = timeDomainHrv(rrRaw);
+  if (physio.length < 100 || td.rmssd == null || td.sdnn == null || td.pnn50 == null) {
+    return { flag: false, sd1: null, sd2: null, ratio: null, pnn50: td.pnn50, ectopic_frac: null, note: NOTE, confidence: 0, tier: 'ESTIMATE', inputs_used: [] };
+  }
+  const sd1 = td.rmssd / Math.SQRT2;
+  const sd2 = Math.sqrt(Math.max(0, 2 * td.sdnn * td.sdnn - 0.5 * td.rmssd * td.rmssd));
+  const ratio = sd2 > 0 ? sd1 / sd2 : null;
+  const ectopicFrac = physio.length > 0 ? 1 - cleaned.length / physio.length : 0;
+  // Conservative AF-like pattern: a fifth+ of beats irregular AND very high pNN50.
+  const flag = ectopicFrac > 0.20 && td.pnn50 > 30 && sd1 > 60;
+  return {
+    flag,
+    sd1: round(sd1, 1), sd2: round(sd2, 1),
+    ratio: ratio == null ? null : round(ratio, 2),
+    pnn50: td.pnn50,
+    ectopic_frac: round(ectopicFrac, 3),
+    note: NOTE,
+    confidence: round(Math.min(1, physio.length / 300), 3),
+    tier: 'ESTIMATE',
+    inputs_used: ['rr_intervals'],
+  };
 }
