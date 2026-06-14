@@ -46,6 +46,9 @@ export { calcLoad, calcFitnessTrend } from './trends';
 // §Fitness — VO₂max (Uth–Sørensen), Banister fitness/fatigue/form, Foster monotony
 export { calcVo2Max, calcFitnessModel, calcMonotony } from './fitness';
 
+// §Steps — AN-2554 wrist pedometer (pure math; backend re-decodes the IMU + runs it)
+export { calcSteps, pedometer, STEP_PARAMS } from './steps';
+
 // §Composite Readiness — weighted HRV + sleep blend (abstains without HRV)
 export { calcReadinessIndex } from './readiness_index';
 export type { ReadinessInputs } from './readiness_index';
