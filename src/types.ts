@@ -188,6 +188,59 @@ export interface FitnessTrendValue {
   days_used: number;
 }
 
+// VO₂max — Uth–Sørensen (2004), HR-ratio estimate. Tier ESTIMATE.
+export interface Vo2MaxValue {
+  vo2max: number | null; // ml/kg/min
+  method: string;
+}
+
+// Banister impulse-response: Fitness (CTL, slow EWMA of strain), Fatigue (ATL,
+// fast EWMA), Form/TSB = Fitness − Fatigue. Tier ESTIMATE.
+export interface FitnessModelValue {
+  fitness: number | null; // chronic training load (slow)
+  fatigue: number | null; // acute training load (fast)
+  form: number | null;    // fitness − fatigue (freshness)
+}
+
+// Foster training monotony + strain (7-day mean/SD of daily strain).
+export interface MonotonyValue {
+  monotony: number | null;       // mean/SD of last-7-day strain
+  training_strain: number | null; // weekly_load × monotony
+  weekly_load: number;
+}
+
+// HRV stability — coefficient of variation of nocturnal RMSSD over a window.
+export interface HrvStabilityValue {
+  cv: number | null;        // % (SD/mean × 100)
+  mean_rmssd: number | null;
+  n: number;
+}
+
+// Irregular-rhythm SCREEN (not a diagnosis): Poincaré SD1/SD2 + high ectopic/
+// successive-difference fraction from nocturnal RR.
+export interface IrregularValue {
+  flag: boolean;
+  sd1: number | null;
+  sd2: number | null;
+  ratio: number | null;     // sd1/sd2
+  pnn50: number | null;
+  ectopic_frac: number | null; // share of beats rejected as ectopic/irregular
+  note: string;
+}
+
+// Composite Readiness — transparent weighted blend (recovery + sleep + dip +
+// arousal). Abstains (null) until HRV-recovery exists. Tier ESTIMATE.
+export interface ReadinessIndexValue {
+  score: number | null; // 0..100
+  components: {
+    recovery: number | null;
+    sleep: number | null;
+    dip: number | null;
+    arousal: number | null;
+  };
+  note: string;
+}
+
 export interface ReadinessComponents {
   rhr: number; // 0..1
   sleep_debt: number; // 0..1
