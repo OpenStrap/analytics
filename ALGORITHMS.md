@@ -45,6 +45,12 @@ Every metric in this package is a **published, peer-reviewed algorithm** compute
 | 18 | Nocturnal heart | `calcNocturnalHeart` | Sleeping-HR mean/nadir + autonomic dip % | Nocturnal HR-dipping literature | sleep HR vs waking HR → dip %, flag (HIGH) |
 | 19 | Sleep stress | `calcSleepStress` | Nocturnal arousal: HR-surge + motion events | Cardiac-activation arousal proxy | sleep HR+activity → arousal count/score (ESTIMATE) |
 | 20 | RHR anomaly | `calcAnomaly` | RHR ≥ baseline+7% for ≥2 consecutive days | Radin et al., *Lancet Digit Health* 2020 | recent RHR → boolean signal (ESTIMATE) |
+| 21 | VO₂max | `calcVo2Max` | **Uth–Sørensen** `15.3 · HRmax/HRrest` | Uth et al., *Eur J Appl Physiol* 2004 | HRmax + RHR → ml·kg⁻¹·min⁻¹ (ESTIMATE) |
+| 22 | Fitness / Fatigue / Form | `calcFitnessModel` | **Banister** impulse-response: Fitness=EWMA(τ42), Fatigue=EWMA(τ7), Form=Fitness−Fatigue | Banister 1975/1991; Coggan CTL/ATL/TSB | daily strain → fitness/fatigue/form (ESTIMATE) |
+| 23 | Training monotony | `calcMonotony` | **Foster** monotony = mean/SD of 7-day strain; strain = load×monotony | Foster, *Med Sci Sports Exerc* 1998 | daily strain → monotony + training strain (HIGH) |
+| 24 | HRV stability | `calcHrvStability` | **CV** = SD/mean of nightly RMSSD over a window | HRV reliability/CV (Plews/Flatt) | RMSSD series → CV % (HIGH) |
+| 25 | Irregular-beat screen | `calcIrregular` | **Poincaré** SD1/SD2 + ectopic-rejection fraction + pNN50 | Brennan et al., *IEEE TBME* 2001; AF-screening literature | RR stream → flag + SD1/SD2 (ESTIMATE) |
+| 26 | Readiness (composite) | `calcReadinessIndex` | Transparent weighted blend: recovery·0.5 + sleep·0.2 + dip·0.15 + calm·0.15 | Composite (documented weights; abstains w/o HRV) | recovery/sleep/dip/arousal → 0–100 (ESTIMATE) |
 | – | Max HR helper | `resolveMaxHr` | measured session max → 220−age → observed → 190 | Fox 1971 (age fallback) | minutes/baseline/age → HRmax + source |
 
 > `buildCoach` (deterministic plan) and `buildNotifications` (nudges) are rule engines over
@@ -177,14 +183,72 @@ consecutive surges collapse to one event. Score scales with events/hour + restle
 **How:** fires when RHR ≥ baseline×1.07 for ≥2 consecutive trailing days, or (RHR↑ AND
 temp Δ>+0.5 AND sleep-efficiency↓). Confidence ≤0.5. "Signal, not a diagnosis."
 
+### 21. VO₂max — `calcVo2Max`
+**Why:** a single, glanceable cardiorespiratory-fitness number. The Uth–Sørensen ratio is a
+whole-population estimate from the simplest robust inputs we already have.
+**How:** `VO₂max ≈ 15.3 · (HRmax / HRrest)` ml·kg⁻¹·min⁻¹, using the **measured** HRmax
+(baseline) and resting HR. Abstains (`null`) unless a real HRmax exists and HRmax > HRrest —
+the age-predicted 220−age would just re-encode age, so we don't fake it. ESTIMATE (conf 0.5).
+
+### 22. Fitness / Fatigue / Form — `calcFitnessModel`
+**Why:** the Banister impulse-response model is the standard "fitness vs fatigue" framing
+(CTL/ATL/TSB in TrainingPeaks terms) — it turns the daily strain stream into where your form is.
+**How:** two exponentially-weighted moving averages of daily strain — **Fitness (CTL)** with
+time-constant τ≈42 d (`α=2/43`), **Fatigue (ATL)** with τ≈7 d (`α=2/8`); **Form = Fitness −
+Fatigue** measured *before* today's strain (freshness coming into the day). Needs ≥7 days;
+confidence ramps to full at ~42 days. ESTIMATE.
+
+### 23. Training monotony — `calcMonotony`
+**Why:** Foster showed that *sameness* of daily load (not just total) predicts overtraining/
+illness — a companion to ACWR.
+**How:** over the last 7 days, `monotony = mean(strain) / SD(strain)`; `training_strain =
+weekly_load × monotony`. Needs ≥4 of 7 days. HIGH (deterministic from strain).
+
+### 24. HRV stability — `calcHrvStability`
+**Why:** a steady night-to-night RMSSD is itself a recovery signal; a rising spread flags
+instability even when the mean looks fine.
+**How:** coefficient of variation `CV = SD/mean × 100` of the recent nightly RMSSD series
+(up to ~14 nights). Needs ≥5 nights. HIGH.
+
+### 25. Irregular-beat screen — `calcIrregular`
+**Why:** atrial-fibrillation-like irregularity shows up as very high beat-to-beat scatter and
+a flood of ectopic/large successive differences. **A screen, not a diagnosis** — there's no
+ECG here, so it's deliberately conservative and heavily caveated.
+**How:** from the nocturnal RR, the **Poincaré** descriptors `SD1 = RMSSD/√2` and
+`SD2 = √(2·SDNN² − ½·RMSSD²)`, plus the fraction of beats the artifact filter rejects as
+ectopic/irregular. Flags only when that ectopic fraction > 0.20 **and** pNN50 > 30% **and**
+SD1 > 60 ms, with ≥100 beats. ESTIMATE.
+
+### 26. Readiness (composite) — `calcReadinessIndex`
+**Why:** one morning number, but **transparent** — not a black box and not claiming to be
+WHOOP's score. It blends the autonomic + sleep signals we already compute and ships its
+component breakdown as drivers so the user sees exactly what moved it.
+**How:** weighted mean (renormalized over present components) of **HRV recovery (0.5)** +
+**sleep vs need (0.2)** + **nocturnal-dip→0..100 (0.15)** + **sleep-calmness = 100−arousal
+(0.15)**. **Abstains (`null`) if HRV recovery is absent** — without the autonomic anchor the
+rest is just sleep accounting. ESTIMATE. (Stored in the repurposed `daily.readiness` column;
+the old heuristic readiness was retired.)
+
+> **Workout breakdown extras** (HR drift, time-to-peak, the HR-recovery curve, cadence,
+> wrist coverage, per-zone bpm bands) are derived on read in the **backend** (`workouts.ts`)
+> from the session's minute window, not in this package — they're descriptive aggregates of
+> the same inputs, not new physiology.
+
 ---
 
 ## What we deliberately do **not** do
-- **No VO₂max number** — only a fitness *direction* (RHR/HRR slopes).
+- **VO₂max is an ESTIMATE, clearly labelled** — the Uth–Sørensen HR-ratio (`calcVo2Max`),
+  not a measured lab value, and it abstains without a real measured HRmax. We still never
+  emit a *measured/lab* VO₂max claim.
 - **No absolute skin-temp / SpO₂** — the band sends raw ADCs; we only ever show a deviation
   from the user's own baseline (`RELATIVE` tier).
+- **Irregular-beat is a SCREEN, not a diagnosis** — no ECG; conservative thresholds, no
+  medical claim.
+- **Readiness is a transparent composite, not a black box** — documented weights, ships its
+  drivers, and abstains without nocturnal HRV.
 - **No fabricated values** — any metric without enough real data returns `null` + confidence
-  `0`. Recovery/stress scores stay `null` until ≥5 nights of RR; SRI until ≥3 nights.
+  `0`. Recovery/stress stay `null` until ≥5 nights of RR; Readiness/HRV-CV until HRV exists;
+  fitness model until ≥7 days of strain; SRI until ≥3 nights.
 
 ## References
 Banister 1991 · Morton/Fitz-Clarke/Banister, *J Appl Physiol* 1990 · Cole & Kripke, *Sleep*
@@ -193,4 +257,5 @@ Banister 1991 · Morton/Fitz-Clarke/Banister, *J Appl Physiol* 1990 · Cole & Kr
 1996 · Laguna/Moody/Mark, *IEEE TBME* 1998 · Charlton et al., *Physiol Meas* 2016 · Plews
 et al., *Sports Med* 2013 · Baevsky & Berseneva 2008 · Mahalanobis 1936 · Mishra et al.,
 *Nat Biomed Eng* 2020 · Smarr et al., *Sci Rep* 2020 · Radin et al., *Lancet Digit Health*
-2020 · Fox 1971.
+2020 · Fox 1971 · Uth, Sørensen, Overgaard & Pedersen, *Eur J Appl Physiol* 2004 · Foster,
+*Med Sci Sports Exerc* 1998 · Brennan, Palaniswami & Kamen (Poincaré HRV), *IEEE TBME* 2001.
