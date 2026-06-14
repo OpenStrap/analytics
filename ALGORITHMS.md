@@ -51,7 +51,7 @@ Every metric in this package is a **published, peer-reviewed algorithm** compute
 | 24 | HRV stability | `calcHrvStability` | **CV** = SD/mean of nightly RMSSD over a window | HRV reliability/CV (Plews/Flatt) | RMSSD series → CV % (HIGH) |
 | 25 | Irregular-beat screen | `calcIrregular` | **Poincaré** SD1/SD2 + ectopic-rejection fraction + pNN50 | Brennan et al., *IEEE TBME* 2001; AF-screening literature | RR stream → flag + SD1/SD2 (ESTIMATE) |
 | 26 | Readiness (composite) | `calcReadinessIndex` | Transparent weighted blend: recovery·0.5 + sleep·0.2 + dip·0.15 + calm·0.15 | Composite (documented weights; abstains w/o HRV) | recovery/sleep/dip/arousal → 0–100 (ESTIMATE) |
-| 27 | Steps | `runStepsImu` (backend `steps_imu.ts`) | **AN-2554** wrist pedometer: dynamic-threshold peak pairs + 8-step confirm, ×gain | Analog Devices AN-2554 (2023); Zhao, *Analog Dialogue* 2010 | wrist IMU accel (R10+0x33, ~100 Hz) → steps (ESTIMATE) |
+| 27 | Steps | `calcSteps` / `pedometer` (`steps.ts`); runner `runStepsImu` (backend) | **AN-2554** wrist pedometer: dynamic-threshold peak pairs + 8-step confirm, ×gain | Analog Devices AN-2554 (2023); Zhao, *Analog Dialogue* 2010 | wrist IMU accel (R10+0x33, ~100 Hz) → steps (ESTIMATE) |
 | – | Max HR helper | `resolveMaxHr` | measured session max → 220−age → observed → 190 | Fox 1971 (age fallback) | minutes/baseline/age → HRmax + source |
 
 > `buildCoach` (deterministic plan) and `buildNotifications` (nudges) are rule engines over
@@ -235,7 +235,11 @@ the old heuristic readiness was retired.)
 > from the session's minute window, not in this package — they're descriptive aggregates of
 > the same inputs, not new physiology.
 
-### 27. Steps — `runStepsImu` (backend `steps_imu.ts`)
+### 27. Steps — `calcSteps` / `pedometer` (`steps.ts`); runner `runStepsImu` (backend)
+**Where:** the pure AN-2554 math (`pedometer`, `calcSteps`, calibration gain) lives here in the
+analytics package like every other metric; the backend `steps_imu.ts` is a thin **runner** that
+re-decodes the IMU frames from R2 (`frameAccel` in `decode.ts`), dedups + groups them per minute,
+and feeds the signals to `calcSteps` — mirroring the HRV/resp runners.
 **Why:** the WHOOP 4.0 exposes **no step counter** over Bluetooth (the official app computes
 steps in the cloud from raw accelerometer + ML; even the most complete community client falls
 back to phone steps on 4.0). So we derive them ourselves from the wrist accelerometer with

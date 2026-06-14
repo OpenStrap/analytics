@@ -19,6 +19,7 @@ import { calcSleepStress } from '../arousal';
 import { calcNocturnalHeart } from '../nocturnal';
 import { calcIllness } from '../illness';
 import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hrv';
+import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
 
 const baseline: Baseline = {
@@ -614,6 +615,27 @@ console.log('--- regression: resolveMaxHr source ---');
   // Baseline max always wins (stable session max).
   const r3 = resolveMaxHr(quiet, { max_hr: 185 }, { age: 29 });
   assert(r3.source === 'measured' && r3.maxHr === 185, 'baseline max_hr wins');
+}
+
+// ── §Steps pedometer (AN-2554) ───────────────────────────────────────────────
+console.log('--- §Steps pedometer ---');
+{
+  // Rest: flat 1g magnitude → the CONFIRM gate must read exactly 0.
+  const rest: number[] = new Array(3000).fill(1.0);
+  assert(pedometer(rest) === 0, 'rest signal → 0 steps (CONFIRM gate rejects non-gait)');
+
+  // Walk: clean ~1.8 Hz cadence over 30 s @100 Hz ≈ 54 gait cycles. Magnitude
+  // swings well outside the ±SENS dead-zone, so each cycle is a step.
+  const walk: number[] = [];
+  for (let i = 0; i < 3000; i++) walk.push(1.0 + 0.3 * Math.sin(2 * Math.PI * 1.8 * (i / 100)));
+  const raw = pedometer(walk);
+  assert(raw >= 45 && raw <= 60, `walk ~54 cycles → plausible step count (got ${raw})`);
+
+  // calcSteps groups per-minute signals, sums, applies the calibration gain.
+  assert(calcSteps([rest]) === 0, 'calcSteps all-rest → 0');
+  approx(calcSteps([walk]), Math.round(raw * STEP_PARAMS.GAIN), 0.001,
+    'calcSteps applies the ×GAIN calibration to the summed raw count');
+  assert(STEP_PARAMS.GAIN === 1.11, 'locked calibration gain = 1.11');
 }
 
 summary('analytics');
