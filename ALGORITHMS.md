@@ -51,6 +51,7 @@ Every metric in this package is a **published, peer-reviewed algorithm** compute
 | 24 | HRV stability | `calcHrvStability` | **CV** = SD/mean of nightly RMSSD over a window | HRV reliability/CV (Plews/Flatt) | RMSSD series → CV % (HIGH) |
 | 25 | Irregular-beat screen | `calcIrregular` | **Poincaré** SD1/SD2 + ectopic-rejection fraction + pNN50 | Brennan et al., *IEEE TBME* 2001; AF-screening literature | RR stream → flag + SD1/SD2 (ESTIMATE) |
 | 26 | Readiness (composite) | `calcReadinessIndex` | Transparent weighted blend: recovery·0.5 + sleep·0.2 + dip·0.15 + calm·0.15 | Composite (documented weights; abstains w/o HRV) | recovery/sleep/dip/arousal → 0–100 (ESTIMATE) |
+| 27 | Steps | `runStepsImu` (backend `steps_imu.ts`) | **AN-2554** wrist pedometer: dynamic-threshold peak pairs + 8-step confirm, ×gain | Analog Devices AN-2554 (2023); Zhao, *Analog Dialogue* 2010 | wrist IMU accel (R10+0x33, ~100 Hz) → steps (ESTIMATE) |
 | – | Max HR helper | `resolveMaxHr` | measured session max → 220−age → observed → 190 | Fox 1971 (age fallback) | minutes/baseline/age → HRmax + source |
 
 > `buildCoach` (deterministic plan) and `buildNotifications` (nudges) are rule engines over
@@ -234,6 +235,27 @@ the old heuristic readiness was retired.)
 > from the session's minute window, not in this package — they're descriptive aggregates of
 > the same inputs, not new physiology.
 
+### 27. Steps — `runStepsImu` (backend `steps_imu.ts`)
+**Why:** the WHOOP 4.0 exposes **no step counter** over Bluetooth (the official app computes
+steps in the cloud from raw accelerometer + ML; even the most complete community client falls
+back to phone steps on 4.0). So we derive them ourselves from the wrist accelerometer with
+Analog Devices' **AN-2554** time-domain pedometer — ~97% accurate on steady wrist gait.
+**How:** the high-rate IMU (~100 Hz) arrives on two live channels — **R10** (pkt 0x2B, 100
+accel samples/axis) and the **0x33 IMU stream** (10 accel + 10 gyro samples/frame: X/Y/Z
+contiguous from byte 24, frame-index @14, scale 1/4096 g) — re-decoded from the raw frames in
+R2, **deduped by (ts, frame-index)** (upload windows overlap), assembled into a contiguous
+per-minute signal. Per minute: `sum(|x|+|y|+|z|)` → 4-tap low-pass → centered **33-sample
+window** max/min peak detection → a **dynamic threshold** (running mean of recent max/min
+midpoints) with a **0.1 g sensitivity** dead-zone — a `max > thr+s/2` paired with a
+`min < thr−s/2` is a *possible step*, and only after **8 consecutive** possible steps does it
+start counting (the regularity gate that rejects waving/typing/handling — verified to read 0
+at rest; lowering it re-introduces false positives). A per-device **calibration gain (×1.11)**
+corrects the typical ~10 % wrist undercount, locked against a 100-step ground-truth walk (raw
+90 → 100). ESTIMATE. **Steps only accrue while the strap is connected** (the IMU is live-only;
+the historical 1 Hz record carries no usable IMU). Owned by the cron (hourly: today+yesterday;
+nightly: 2 days), written to `daily.steps` *after* analytics so the IMU value is authoritative.
+*(Implemented in the backend, not this package, but documented here as the algorithm of record.)*
+
 ---
 
 ## What we deliberately do **not** do
@@ -258,4 +280,6 @@ Banister 1991 · Morton/Fitz-Clarke/Banister, *J Appl Physiol* 1990 · Cole & Kr
 et al., *Sports Med* 2013 · Baevsky & Berseneva 2008 · Mahalanobis 1936 · Mishra et al.,
 *Nat Biomed Eng* 2020 · Smarr et al., *Sci Rep* 2020 · Radin et al., *Lancet Digit Health*
 2020 · Fox 1971 · Uth, Sørensen, Overgaard & Pedersen, *Eur J Appl Physiol* 2004 · Foster,
-*Med Sci Sports Exerc* 1998 · Brennan, Palaniswami & Kamen (Poincaré HRV), *IEEE TBME* 2001.
+*Med Sci Sports Exerc* 1998 · Brennan, Palaniswami & Kamen (Poincaré HRV), *IEEE TBME* 2001 ·
+Analog Devices, *AN-2554: Step Counting Using the ADXL367* 2023 · Zhao, "Full-Featured
+Pedometer Design Realized with 3-Axis Digital Accelerometer," *Analog Dialogue* 2010.
