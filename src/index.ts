@@ -35,12 +35,20 @@ export { calcHrRecovery, calcRecovery } from './recovery';
 // §HRV — RMSSD/SDNN/pNN50, Lomb–Scargle LF/HF, Baevsky SI, RSA respiratory rate
 export {
   timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr,
+  calcHrvStability, calcIrregular,
   VLF_BAND, LF_BAND, HF_BAND,
 } from './hrv';
 export type { TimeDomainHrv, FreqDomainHrv } from './hrv';
 
 // §9 Training load / fitness trend
 export { calcLoad, calcFitnessTrend } from './trends';
+
+// §Fitness — VO₂max (Uth–Sørensen), Banister fitness/fatigue/form, Foster monotony
+export { calcVo2Max, calcFitnessModel, calcMonotony } from './fitness';
+
+// §Composite Readiness — weighted HRV + sleep blend (abstains without HRV)
+export { calcReadinessIndex } from './readiness_index';
+export type { ReadinessInputs } from './readiness_index';
 
 // §10 Anomaly + illness (Mahalanobis). calcReadiness REMOVED (heuristic) — use
 //     calcRecovery (HRV) instead.
