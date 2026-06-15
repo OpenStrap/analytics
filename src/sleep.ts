@@ -1,6 +1,9 @@
 // §5 Sleep — Cole-Kripke actigraphy + HR-dip fusion. Tier HIGH (duration/eff),
 // ESTIMATE (stages). One-minute epochs.
-import type { Minute, Baseline, Metric, SleepValue, SleepStages } from './types';
+import type {
+  Minute, Baseline, Metric, SleepValue, SleepStages,
+  SleepPeriod, SleepPeriodsValue,
+} from './types';
 import { isHrUsable, mean, round } from './util';
 
 // Cole-Kripke weights over window [-4..+2].
@@ -197,6 +200,140 @@ export function calcSleep(minutes: Minute[], baseline: Baseline): Metric<SleepVa
     stages,
     stages_beta: true,
     confidence: round(confidence, 4),
+    tier: 'HIGH',
+    inputs_used,
+  };
+}
+
+/**
+ * calcSleepPeriods(minutes, baseline)  —  Sleep v2 (multi-period)
+ *
+ * Same epoch scorer + consolidation as calcSleep, but instead of keeping only the
+ * single longest period we return EVERY consolidated sleep period in the window.
+ * A nap is not a special case — it's just a shorter sleep. Slept once → one
+ * period; napped twice → three periods total; the UI renders one card each.
+ *
+ * Each period carries its own full breakdown (onset/wake/duration/efficiency/
+ * stages) and its own confidence. The longest period is flagged `is_main` purely
+ * as a UI hint; the data treats all periods identically.
+ *
+ * Per-period confidence = input_completeness × clamp(in_bed_min/90, 0, 1) — a ~90
+ * min block reaches full coverage, so a genuine 40-min nap isn't unfairly crushed
+ * the way the 240-min night-coverage of calcSleep would crush it.
+ *
+ * Periods with fewer than MIN_PERIOD_MIN asleep minutes are discarded (micro-dozes
+ * aren't sleep). The top-level Metric.confidence mirrors the main period.
+ */
+export function calcSleepPeriods(minutes: Minute[], baseline: Baseline): Metric<SleepPeriodsValue> {
+  const sorted = [...minutes].sort((a, b) => a.ts - b.ts);
+  const n = sorted.length;
+  const rhr = baseline.resting_hr;
+
+  const empty = (): Metric<SleepPeriodsValue> => ({
+    periods: [],
+    total_asleep_min: 0,
+    main_idx: null,
+    stages_beta: true,
+    confidence: 0,
+    tier: 'HIGH',
+    inputs_used: [],
+  });
+  if (n === 0) return empty();
+
+  // 1. Per-epoch asleep — identical scorer to calcSleep (duplicated here on
+  //    purpose so v1 stays byte-for-byte untouched).
+  const asleep: boolean[] = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let k = 0; k < CK_W.length; k++) {
+      const off = k - 4;
+      const idx = i + off;
+      if (idx >= 0 && idx < n) s += CK_W[k] * sorted[idx].activity;
+    }
+    s *= 0.001;
+    const m = sorted[i];
+    if (!m.wrist_on) { asleep[i] = false; continue; }
+    let isAsleep = s < 1;
+    if (m.hr_avg > 0) {
+      if (m.hr_avg < 0.95 * rhr) isAsleep = true;
+      else if (m.hr_avg > 1.15 * rhr) isAsleep = false;
+    }
+    asleep[i] = isAsleep;
+  }
+
+  // 2. Collect ALL consolidated periods (same ≤20-min interior-gap rule as the
+  //    main-sleep detector). Each is trimmed to its first/last asleep epoch.
+  const MAX_GAP_MIN = 20;
+  const MAX_SLEEP_MIN = 14 * 60; // same plausibility ceiling, applied per period
+  const MIN_PERIOD_MIN = 15;     // shorter than this isn't a sleep period
+
+  const raw: { start: number; end: number; asleepN: number }[] = [];
+  let pf = -1, pl = -1, pa = 0, gap = 0;
+  const close = () => {
+    if (pf >= 0 && pa > 0) raw.push({ start: pf, end: pl, asleepN: pa });
+    pf = -1; pl = -1; pa = 0; gap = 0;
+  };
+  for (let i = 0; i < n; i++) {
+    if (asleep[i]) { if (pf < 0) pf = i; pl = i; pa++; gap = 0; }
+    else if (pf >= 0) { if (++gap > MAX_GAP_MIN) close(); }
+  }
+  close();
+
+  const periods: SleepPeriod[] = [];
+  for (const p of raw) {
+    let startIdx = p.start;
+    let endIdx = p.end;
+    if (endIdx - startIdx + 1 > MAX_SLEEP_MIN) endIdx = startIdx + MAX_SLEEP_MIN - 1;
+
+    const span = sorted.slice(startIdx, endIdx + 1);
+    const in_bed_min = span.length;
+    let duration_min = 0;
+    for (let i = startIdx; i <= endIdx; i++) if (asleep[i]) duration_min++;
+    if (duration_min < MIN_PERIOD_MIN) continue;
+
+    const efficiency = in_bed_min > 0 ? duration_min / in_bed_min : 0;
+    const sleepEpochs = span.filter((_, i) => asleep[startIdx + i]);
+    const stages = estimateStages(sleepEpochs, rhr);
+
+    const hasHr = span.some((m) => m.wrist_on && m.hr_avg > 0);
+    const hasActivity = span.some((m) => m.activity > 0);
+    const hasTemp = baseline.skin_temp != null;
+    const inputCompleteness = [hasHr, hasActivity, hasTemp].filter(Boolean).length / 3;
+    const coverage = Math.min(1, in_bed_min / 90);
+
+    periods.push({
+      onset_ts: sorted[startIdx].ts,
+      wake_ts: sorted[endIdx].ts,
+      duration_min,
+      in_bed_min,
+      efficiency: round(efficiency, 4),
+      stages,
+      is_main: false,
+      confidence: round(inputCompleteness * coverage, 4),
+    });
+  }
+
+  if (periods.length === 0) return empty();
+
+  // 3. Flag the longest period as the main one (UI hint only).
+  let main_idx = 0;
+  for (let i = 1; i < periods.length; i++) {
+    if (periods[i].duration_min > periods[main_idx].duration_min) main_idx = i;
+  }
+  periods[main_idx].is_main = true;
+
+  const total_asleep_min = periods.reduce((a, p) => a + p.duration_min, 0);
+
+  const inputs_used: string[] = ['activity'];
+  if (sorted.some((m) => m.wrist_on && m.hr_avg > 0)) inputs_used.push('hr_avg');
+  if (baseline.skin_temp != null) inputs_used.push('baseline.skin_temp');
+
+  return {
+    periods,
+    total_asleep_min,
+    main_idx,
+    stages_beta: true,
+    confidence: periods[main_idx].confidence,
     tier: 'HIGH',
     inputs_used,
   };

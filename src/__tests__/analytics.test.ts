@@ -7,7 +7,7 @@ import { calcRestingHR } from '../resting';
 import { calcStrain } from '../strain';
 import { calcHrZones } from '../zones';
 import { calcCalories } from '../calories';
-import { calcSleep } from '../sleep';
+import { calcSleep, calcSleepPeriods } from '../sleep';
 import { calcSleepRegularity } from '../regularity';
 import { detectSessions } from '../sessions';
 import { calcHrRecovery, calcRecovery } from '../recovery';
@@ -214,6 +214,49 @@ console.log('--- §5 calcSleep ---');
   const g = calcSleep(giant, baseline);
   assert(g.in_bed_min <= 14 * 60,
     `plausibility: main-sleep period capped at ~14h (got ${g.in_bed_min})`);
+}
+
+// ── §5b calcSleepPeriods (multi-period; naps = shorter sleeps) ───────────────
+console.log('--- §5b calcSleepPeriods ---');
+{
+  // A main night (200 min) + a separate afternoon nap (40 min), split by a long
+  // awake daytime stretch. v2 must return TWO periods, longest flagged is_main.
+  const day: Minute[] = [];
+  for (let i = 0; i < 5; i++) day.push(min(i * 60, 70, 2000));        // awake before
+  for (let i = 5; i < 205; i++) day.push(min(i * 60, 45, 50));        // 200-min night (asleep)
+  for (let i = 205; i < 305; i++) day.push(min(i * 60, 75, 2500));    // 100-min awake daytime (long gap)
+  for (let i = 305; i < 345; i++) day.push(min(i * 60, 48, 50));      // 40-min afternoon nap (asleep)
+  for (let i = 345; i < 350; i++) day.push(min(i * 60, 72, 2000));    // awake after
+  const v2 = calcSleepPeriods(day, baseline);
+  assert(v2.periods.length === 2, `two sleep periods detected (got ${v2.periods.length})`);
+  const mainP = v2.periods[v2.main_idx ?? -1];
+  assert(mainP != null && mainP.is_main === true, 'main period flagged is_main');
+  assert(mainP.duration_min >= 195, `main period ≈ 200 min (got ${mainP?.duration_min})`);
+  const napP = v2.periods.find((p) => !p.is_main);
+  assert(napP != null && napP.duration_min >= 30 && napP.duration_min <= 45,
+    `nap treated as a shorter sleep ≈ 40 min, edge-trimmed (got ${napP?.duration_min})`);
+  assert(v2.total_asleep_min >= 228, `total asleep sums both periods (got ${v2.total_asleep_min})`);
+  assert(v2.periods.every((p) => p.confidence >= 0 && p.confidence <= 1), 'per-period confidence in [0,1]');
+
+  // Single night → exactly one period (backward-consistent with calcSleep).
+  const oneNight: Minute[] = [];
+  for (let i = 0; i < 5; i++) oneNight.push(min(i * 60, 70, 2000));
+  for (let i = 5; i < 205; i++) oneNight.push(min(i * 60, 45, 50));
+  for (let i = 205; i < 210; i++) oneNight.push(min(i * 60, 72, 2000));
+  const one = calcSleepPeriods(oneNight, baseline);
+  assert(one.periods.length === 1 && one.periods[0].is_main, 'single night → one main period');
+
+  // Micro-doze (< 15 min) is discarded, not surfaced as a period.
+  const micro: Minute[] = [];
+  for (let i = 0; i < 5; i++) micro.push(min(i * 60, 70, 2000));
+  for (let i = 5; i < 13; i++) micro.push(min(i * 60, 45, 50));        // 8-min doze
+  for (let i = 13; i < 20; i++) micro.push(min(i * 60, 72, 2000));
+  const m2 = calcSleepPeriods(micro, baseline);
+  assert(m2.periods.length === 0 && m2.confidence === 0, 'micro-doze (<15 min) discarded');
+
+  // Empty input → no periods, conf 0.
+  const ep = calcSleepPeriods([], baseline);
+  assert(ep.periods.length === 0 && ep.confidence === 0, 'no data → no periods + conf 0');
 }
 
 // ── §6 calcSleepRegularity ───────────────────────────────────────────────────
