@@ -145,6 +145,27 @@ export interface SleepValue {
   stages_beta: boolean;
 }
 
+// ── Sleep v2 (multi-period) — naps are just shorter sleeps ───────────────────
+/** One consolidated sleep period. Same breakdown as SleepValue, per-period. */
+export interface SleepPeriod {
+  onset_ts: number;
+  wake_ts: number;
+  duration_min: number; // asleep minutes
+  in_bed_min: number;
+  efficiency: number;   // 0..1
+  stages: SleepStages | null; // BETA/ESTIMATE
+  is_main: boolean;     // longest period of the day (UI hint only; data is uniform)
+  confidence: number;   // per-period detection confidence (0..1)
+}
+
+/** All sleep periods detected in a window (one card each in the UI). */
+export interface SleepPeriodsValue {
+  periods: SleepPeriod[];     // chronological
+  total_asleep_min: number;   // sum across periods
+  main_idx: number | null;    // index of the main (longest) period, or null
+  stages_beta: boolean;
+}
+
 export interface SleepRegularityValue {
   sri: number; // 0..100
   onset_std_min: number;
