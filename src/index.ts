@@ -22,6 +22,8 @@ export { calcCalories } from './calories';
 
 // §5 Sleep
 export { calcSleep } from './sleep';
+// §5b Sleep v2 — multi-period (naps = shorter sleeps). Additive; calcSleep unchanged.
+export { calcSleepPeriods } from './sleep';
 
 // §6 Sleep regularity (SRI)
 export { calcSleepRegularity } from './regularity';
