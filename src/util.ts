@@ -92,7 +92,10 @@ export function resolveMaxHr(
 
   // 2. Age-predicted max (floor), taking a genuine above-age effort if present.
   if (profile?.age && profile.age > 0) {
-    const ageMax = 220 - profile.age;
+    // Tanaka, Monahan & Seals 2001 (JACC 37:153) — validated on 18,712 subjects,
+    // more accurate than 220−age (which over-estimates in the young, under-
+    // estimates in the old; they converge near age 40).
+    const ageMax = Math.round(208 - 0.7 * profile.age);
     if (observed > ageMax) return { maxHr: observed, source: 'measured' };
     return { maxHr: ageMax, source: 'age' };
   }

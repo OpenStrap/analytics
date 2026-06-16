@@ -21,6 +21,10 @@ export function calcHrZones(
   const { maxHr, source } = resolveMaxHr(minutes, baseline, profile);
   const worn = minutes.filter(isHrUsable);
 
+  // %HRmax zones (standard, familiar). NOTE: Karvonen %HRR is more individualized
+  // in principle, but it requires a TRUSTWORTHY measured max — here maxHR is
+  // usually age-predicted, so %HRR adds no real accuracy and makes light days
+  // read as "no zones." Validated on real data; %HRmax kept deliberately.
   const z = [0, 0, 0, 0, 0];
   for (const m of worn) {
     const pct = (m.hr_avg / maxHr) * 100;

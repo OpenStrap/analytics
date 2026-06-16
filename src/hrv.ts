@@ -126,26 +126,34 @@ export function freqDomainHrv(rrRaw: number[]): FreqDomainHrv {
   const mean = rr.reduce((a, b) => a + b, 0) / rr.length;
   const x = rr.map((r) => r - mean);
   const span = t[t.length - 1] - t[0];
-  if (span < 60) return none; // need ≥1 min of beats for stable spectral estimates
-
+  // Task Force 1996 rule: a band needs ≥10× the wavelength of its lower bound.
+  // HF lower bound 0.15 Hz → ≥~67 s; LF lower bound 0.04 Hz → ≥250 s (~4 min).
+  // So HF/resp are valid from ~1 min, but LF (and therefore LF/HF) are NOT
+  // trustworthy below ~250 s — report them null rather than ship spectral noise.
+  if (span < 60) return none;
+  const HF_MIN_SPAN = 60;
+  const LF_MIN_SPAN = 250;
   const df = 0.005; // 5 mHz grid
-  const lf = lombScargleBand(t, x, LF_BAND[0], LF_BAND[1], df).power;
+
   const hfBand = lombScargleBand(t, x, HF_BAND[0], HF_BAND[1], df);
-  const vlf = lombScargleBand(t, x, VLF_BAND[0], VLF_BAND[1], df).power;
-  const total = vlf + lf + hfBand.power;
+  const lfValid = span >= LF_MIN_SPAN;
+  const lf = lfValid ? lombScargleBand(t, x, LF_BAND[0], LF_BAND[1], df).power : null;
+  const vlf = lfValid ? lombScargleBand(t, x, VLF_BAND[0], VLF_BAND[1], df).power : null;
+  const total = lf != null && vlf != null ? vlf + lf + hfBand.power : null;
 
   // Respiratory rate = HF peak frequency × 60 (breaths/min). Confidence = how
-  // dominant that peak is vs the mean HF power (prominence).
+  // dominant that peak is vs the mean HF power (prominence). Valid from ~1 min.
+  const hfValid = span >= HF_MIN_SPAN;
   const meanHf = hfBand.power / ((HF_BAND[1] - HF_BAND[0]) / df);
   const prominence = meanHf > 0 ? hfBand.peakPower / meanHf : 0;
-  const respConf = Math.max(0, Math.min(1, (prominence - 1) / 4)); // ~1×→0, ~5×→1
+  const respConf = hfValid ? Math.max(0, Math.min(1, (prominence - 1) / 4)) : 0; // ~1×→0, ~5×→1
   const respRate = hfBand.peakFreq * 60;
 
   return {
-    lf: round(lf, 1),
+    lf: lf == null ? null : round(lf, 1),
     hf: round(hfBand.power, 1),
-    lf_hf: hfBand.power > 0 ? round(lf / hfBand.power, 3) : null,
-    total_power: round(total, 1),
+    lf_hf: lf != null && hfBand.power > 0 ? round(lf / hfBand.power, 3) : null,
+    total_power: total == null ? null : round(total, 1),
     resp_rate: respConf >= 0.3 ? round(respRate, 1) : null,
     resp_conf: round(respConf, 3),
   };
