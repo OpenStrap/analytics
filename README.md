@@ -60,9 +60,10 @@ so it just doesn't.
 | `calcSleep` | `sleep.ts` | Cole-Kripke scores each epoch awake or asleep from motion, then I nudge it with the overnight HR dip. Gives onset, wake, efficiency, and a beta stage estimate. |
 | `calcSleepRegularity` | `regularity.ts` | The Sleep Regularity Index, 0–100, from how much your bed and wake times wander night to night. |
 | `detectSessions` | `sessions.ts` | Finds workouts: sustained stretches above 40% heart-rate reserve, then classifies them roughly as cardio, strength, or a walk. |
-| `calcHrRecovery` | `recovery.ts` | HRR60, how many beats your heart drops in the minute after a peak. A real fitness signal. |
+| `timeDomainHrv`, `freqDomainHrv` | `hrv.ts` | HRV from the beat-to-beat R-R stream: RMSSD/SDNN/pNN50 and LF/HF, plus the Baevsky stress index. |
+| `calcRecovery`, `calcHrRecovery` | `recovery.ts` | Recovery from nightly HRV — ln-RMSSD z-scored against your own baseline (Plews). Plus HRR60, the beats your heart drops in the minute after a peak. |
 | `calcLoad`, `calcFitnessTrend` | `trends.ts` | ACWR (last 7 days over last 28) for load, and regression slopes on resting HR and HRR for whether you're getting fitter. |
-| `calcReadiness`, `calcAnomaly` | `readiness.ts` | Readiness from resting-HR deviation, sleep debt, and sleep quality. Plus a flag for "your resting HR has been up two days, are you getting sick?" |
+| `calcReadinessIndex`, `calcAnomaly` | `readiness_index.ts`, `readiness.ts` | An HRV-led readiness composite: recovery blended with sleep, the nocturnal dip, and arousal (abstains until there's HRV). Plus a flag for "your resting HR has been up two days, are you getting sick?" |
 | `calcBaselines` | `baselines.ts` | Rolling 30-day medians, the anchors everything else compares against. |
 | `calcStress`, `classifyArousal` | `stress.ts` | Arousal from heart rate sitting above resting while you're not moving. If you're moving it's exercise, not stress, so it's gated out. |
 | `calcNocturnalHeart` | `nocturnal.ts` | Your sleeping HR, its low point, how far it dipped from daytime, and a flag if it's running high. |
@@ -71,11 +72,15 @@ so it just doesn't.
 
 A couple of things worth calling out so you don't go looking for them:
 
-**There's no HRV in here, and there won't be.** WHOOP builds recovery on heart-rate
-variability, the beat-to-beat timing. The band doesn't hand that to us over the wire, at
-least not in any form I've been able to recover. So readiness here is built from resting
-HR, sleep debt, and sleep quality instead, and it says so right on the label. The
-`hrv.ts` file is empty on purpose, as a reminder of what we don't have.
+**HRV is in now** — this section used to say it never would be. WHOOP builds recovery on
+heart-rate variability, the beat-to-beat timing, and for a long time it looked like the
+band never handed that over. It turns out the R-R intervals are sitting right there in the
+1 Hz historical (V24) records; they just don't ride the live stream, so the
+[backend](https://github.com/OpenStrap/backend) re-decodes them from the raw bytes off the
+request path and feeds them in. `hrv.ts` does the time- and frequency-domain measures,
+`recovery.ts` turns nightly ln-RMSSD into a recovery z-score, and readiness is now an
+HRV-led composite. It's labelled beta because recovering the field from the bytes is
+empirical — but it's the real beat-to-beat signal, the same substrate WHOOP uses.
 
 **Max heart rate** falls back gracefully: a real measured peak from your workouts if I've
 seen one, otherwise the highest I've observed, otherwise `220 − age`, otherwise 190. The
@@ -98,5 +103,5 @@ Write a function that takes minutes (or history) plus the baseline and profile, 
 returns a `Metric<YourThing>`. Keep it pure, no side effects. Derive the confidence from
 coverage and completeness like the others do, and return `null` with `0` confidence when
 you don't have the inputs. Put the name of the method you used in a comment so the next
-person can check your work. And if your idea needs HRV or some signal the band doesn't
+person can check your work. And if your idea needs a signal the band genuinely doesn't
 expose, it doesn't belong here, that's the line.
