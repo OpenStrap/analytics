@@ -50,6 +50,10 @@ export function calcSleep(minutes: Minute[], baseline: Baseline): Metric<SleepVa
   if (n === 0) return empty();
 
   const rhr = baseline.resting_hr;
+  // Cole–Kripke + HR-dip fusion is anchored on resting HR; without a real
+  // baseline (null/0 for a brand-new user) the dip comparisons degrade to
+  // garbage (everything reads "awake"). Abstain until we have one.
+  if (rhr == null || rhr <= 0) return empty();
 
   // 1. Cole-Kripke score + HR-dip fusion → boolean asleep per epoch.
   const asleep: boolean[] = new Array(n).fill(false);
@@ -239,6 +243,7 @@ export function calcSleepPeriods(minutes: Minute[], baseline: Baseline): Metric<
     inputs_used: [],
   });
   if (n === 0) return empty();
+  if (rhr == null || rhr <= 0) return empty(); // need a resting-HR baseline (see calcSleep)
 
   // 1. Per-epoch asleep — identical scorer to calcSleep (duplicated here on
   //    purpose so v1 stays byte-for-byte untouched).
