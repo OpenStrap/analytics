@@ -55,18 +55,34 @@ export function calcBaselines(
     ? (zoneCols.map((c) => median(c) ?? 0) as [number, number, number, number, number])
     : null;
 
-  // maxHR = max observed session hr_max; else Tanaka 208−0.7·age (JACC 2001,
-  // more accurate than 220−age).
+  // maxHR: the highest per-day peak observed across the window. BUT a daily peak
+  // on a sedentary day is just a quiet high (e.g. 120 bpm), NOT a true HRmax —
+  // trusting it as the zone/strain denominator under-states the scale and inflates
+  // those metrics. So we only treat the observed peak as a real 'measured' max when
+  // it EXCEEDS the age-predicted Tanaka floor (208−0.7·age, JACC 2001 — a genuine
+  // hard effort); otherwise the age floor wins. Mirrors resolveMaxHr (util.ts) so
+  // the baseline and the per-day denominator agree.
   const observedMax = window
     .map((d) => d.session_hr_max)
     .filter((x): x is number => x != null);
-  let maxHr: number | null = null;
-  let maxHrSource: 'measured' | 'age' = 'measured';
-  if (observedMax.length > 0) {
-    maxHr = Math.max(...observedMax);
-    maxHrSource = 'measured';
-  } else if (profile?.age && profile.age > 0) {
-    maxHr = Math.round(208 - 0.7 * profile.age);
+  const observedPeak = observedMax.length > 0 ? Math.max(...observedMax) : 0;
+  const ageMax =
+    profile?.age && profile.age > 0 ? Math.round(208 - 0.7 * profile.age) : null;
+  let maxHr: number | null;
+  let maxHrSource: 'measured' | 'age';
+  if (ageMax != null) {
+    if (observedPeak > ageMax) {
+      maxHr = observedPeak; // genuine above-age effort → trust it
+      maxHrSource = 'measured';
+    } else {
+      maxHr = ageMax; // a quiet daily peak can't shrink the scale
+      maxHrSource = 'age';
+    }
+  } else if (observedPeak > 0) {
+    // No age to floor against: the observed peak is the best available, but flag it
+    // 'age' (an unverified within-window peak, not a true measured HRmax) so callers
+    // down-weight confidence.
+    maxHr = observedPeak;
     maxHrSource = 'age';
   } else {
     maxHr = null; // honest: no measured max, no age → cannot derive
@@ -80,7 +96,7 @@ export function calcBaselines(
   if (sleeps.length) inputs_used.push('sleep_duration_min');
   if (temps.length) inputs_used.push('skin_temp');
   if (strains.length) inputs_used.push('daily_strain');
-  if (observedMax.length) inputs_used.push('session_hr_max');
+  if (maxHrSource === 'measured') inputs_used.push('session_hr_max');
   else if (profile?.age) inputs_used.push('profile.age');
 
   return {
