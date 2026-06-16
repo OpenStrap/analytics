@@ -55,14 +55,14 @@ so it just doesn't.
 |----------|------|--------------|
 | `calcRestingHR` | `resting.ts` | 5th percentile of heart rate across your sleep window. Falls back to your quietest 30 minutes if there's no sleep yet. |
 | `calcStrain` | `strain.ts` | Banister TRIMP over heart-rate reserve, `ratio·0.64·e^(1.92·ratio)` summed per minute, squashed onto a 0–21 scale. |
-| `calcHrZones` | `zones.ts` | Minutes spent in five zones by percent of max HR. |
+| `calcHrZones` | `zones.ts` | Minutes spent in five zones by % of max HR. (Karvonen %HRR is more individualized in theory, but with an age-predicted max it adds no real accuracy and empties light-day zones, so %HRmax is kept deliberately.) |
 | `calcCalories` | `calories.ts` | Keytel (2005), the active-kcal-per-minute equation, summed. Different formula for men and women; averages the two if it doesn't know. |
 | `calcSleep` | `sleep.ts` | Cole-Kripke scores each epoch awake or asleep from motion, then I nudge it with the overnight HR dip. Gives onset, wake, efficiency, and a beta stage estimate. |
 | `calcSleepRegularity` | `regularity.ts` | The Sleep Regularity Index, 0–100, from how much your bed and wake times wander night to night. |
 | `detectSessions` | `sessions.ts` | Finds workouts: sustained stretches above 40% heart-rate reserve, then classifies them roughly as cardio, strength, or a walk. |
-| `timeDomainHrv`, `freqDomainHrv` | `hrv.ts` | HRV from the beat-to-beat R-R stream: RMSSD/SDNN/pNN50 and LF/HF, plus the Baevsky stress index. |
+| `timeDomainHrv`, `freqDomainHrv` | `hrv.ts` | HRV from the beat-to-beat R-R stream: RMSSD/SDNN/pNN50 and LF/HF (Lomb–Scargle, gated to the Task Force 1996 window minimums — HF ≥~60 s, LF ≥~250 s — so short windows don't report spectral noise), plus the Baevsky stress index. |
 | `calcRecovery`, `calcHrRecovery` | `recovery.ts` | Recovery from nightly HRV — ln-RMSSD z-scored against your own baseline (Plews). Plus HRR60, the beats your heart drops in the minute after a peak. |
-| `calcLoad`, `calcFitnessTrend` | `trends.ts` | ACWR (last 7 days over last 28) for load, and regression slopes on resting HR and HRR for whether you're getting fitter. |
+| `calcLoad`, `calcFitnessTrend` | `trends.ts` | EWMA acute:chronic workload ratio (Williams 2017 — 7/28-day exponentially-weighted, fixes the rolling-average coupling), and regression slopes on resting HR and HRR for whether you're getting fitter. |
 | `calcReadinessIndex`, `calcAnomaly` | `readiness_index.ts`, `readiness.ts` | An HRV-led readiness composite: recovery blended with sleep, the nocturnal dip, and arousal (abstains until there's HRV). Plus a flag for "your resting HR has been up two days, are you getting sick?" |
 | `calcBaselines` | `baselines.ts` | Rolling 30-day medians, the anchors everything else compares against. |
 | `calcStress`, `classifyArousal` | `stress.ts` | Arousal from heart rate sitting above resting while you're not moving. If you're moving it's exercise, not stress, so it's gated out. |
@@ -83,8 +83,9 @@ HRV-led composite. It's labelled beta because recovering the field from the byte
 empirical — but it's the real beat-to-beat signal, the same substrate WHOOP uses.
 
 **Max heart rate** falls back gracefully: a real measured peak from your workouts if I've
-seen one, otherwise the highest I've observed, otherwise `220 − age`, otherwise 190. The
-worse the source, the lower the confidence on anything that depends on it.
+seen one, otherwise the highest I've observed, otherwise Tanaka `208 − 0.7·age` (more
+accurate than the old `220 − age`), otherwise 190. The worse the source, the lower the
+confidence on anything that depends on it.
 
 ## Tests
 
