@@ -409,12 +409,20 @@ console.log('--- §11 calcBaselines ---');
     session_hr_max: 180 + (i % 10),
     zone_min: [10, 20, 15, 5, 2] as [number, number, number, number, number],
   }));
-  const bl = calcBaselines(hist);
+  // Observed daily peak (189) CLEARS the age-predicted floor (age 40 → Tanaka 180),
+  // so it's a genuine effort → trusted as the measured max.
+  const bl = calcBaselines(hist, { age: 40 });
   assert(bl.resting_hr !== null && bl.resting_hr! >= 50 && bl.resting_hr! <= 52, 'RHR median in range');
-  assert(bl.max_hr === 189 && bl.max_hr_source === 'measured', 'maxHR = max observed session');
+  assert(bl.max_hr === 189 && bl.max_hr_source === 'measured', 'observed peak above age floor → measured');
   assert(bl.chronic_strain !== null, 'chronic strain computed');
   assert(bl.zone_min !== null && bl.zone_min![0] === 10, 'per-zone medians present');
   approx(bl.confidence, 1, 1e-9, '30 days → confidence 1');
+
+  // Guard: a quiet daily peak (≤ age floor) must NOT be promoted to a measured max —
+  // it would under-state HRmax and inflate zones/strain. Age floor wins instead.
+  const quiet = hist.map((d) => ({ ...d, session_hr_max: 150 }));
+  const blQuiet = calcBaselines(quiet, { age: 30 }); // Tanaka 187 > 150
+  assert(blQuiet.max_hr === 187 && blQuiet.max_hr_source === 'age', 'quiet daily peak → age floor, not measured');
 
   // age fallback for maxHR when no sessions
   const noSess = hist.map((d) => ({ ...d, session_hr_max: undefined }));

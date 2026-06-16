@@ -58,7 +58,7 @@ so it just doesn't.
 | `calcHrZones` | `zones.ts` | Minutes spent in five zones by % of max HR. (Karvonen %HRR is more individualized in theory, but with an age-predicted max it adds no real accuracy and empties light-day zones, so %HRmax is kept deliberately.) |
 | `calcCalories` | `calories.ts` | Keytel (2005), the active-kcal-per-minute equation, summed. Different formula for men and women; averages the two if it doesn't know. |
 | `calcSleep` | `sleep.ts` | Cole-Kripke scores each epoch awake or asleep from motion, then I nudge it with the overnight HR dip. Gives onset, wake, efficiency, and a beta stage estimate. |
-| `calcSleepRegularity` | `regularity.ts` | The Sleep Regularity Index, 0–100, from how much your bed and wake times wander night to night. |
+| `calcSleepRegularity` | `regularity.ts` | Sleep-timing regularity, 0–100, from how much your bed and wake times wander night to night (circular variance of onset/wake clock-times). Honest scope: this is *not* the Phillips epoch-agreement Sleep Regularity Index — we don't plumb minute-level sleep/wake state across days, so we don't claim that name. |
 | `detectSessions` | `sessions.ts` | Finds workouts: sustained stretches above 40% heart-rate reserve, then classifies them roughly as cardio, strength, or a walk. |
 | `timeDomainHrv`, `freqDomainHrv` | `hrv.ts` | HRV from the beat-to-beat R-R stream: RMSSD/SDNN/pNN50 and LF/HF (Lomb–Scargle, gated to the Task Force 1996 window minimums — HF ≥~60 s, LF ≥~250 s — so short windows don't report spectral noise), plus the Baevsky stress index. |
 | `calcRecovery`, `calcHrRecovery` | `recovery.ts` | Recovery from nightly HRV — ln-RMSSD z-scored against your own baseline (Plews). Plus HRR60, the beats your heart drops in the minute after a peak. |

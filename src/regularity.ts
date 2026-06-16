@@ -1,4 +1,12 @@
-// §6 Sleep regularity (SRI). Tier HIGH (≥3 nights).
+// §6 Sleep timing regularity. Tier HIGH (≥3 nights).
+//
+// HONEST SCOPE: this is the circular variability of sleep-ONSET and WAKE clock-times
+// (how much your bed/wake times wander night to night), scaled 0–100. It is a
+// legitimate, useful regularity measure — but it is NOT the Phillips et al. 2017
+// Sleep Regularity Index (Sci Rep 7:3216), which is an epoch-by-epoch probability
+// that two time points 24 h apart are in the same sleep/wake state. We don't plumb
+// minute-level sleep/wake state across consecutive days, so we don't claim the SRI
+// name. If that state is ever wired in, implement the real SRI and relabel.
 import type { NightSummary, Metric, SleepRegularityValue } from './types';
 import { round } from './util';
 
@@ -41,9 +49,12 @@ function circularStdMin(minutesOfDay: number[]): number {
  * calcSleepRegularity(nights[])
  *
  * For each night compute onset/wake minute-of-day.
- *   SRI = max(0, 100 − (avg(circ_std_onset, circ_std_wake)/120)*100).
+ *   score = max(0, 100 − (avg(circ_std_onset, circ_std_wake)/120)*100).
  * Uses CIRCULAR std (see circularStdMin) so midnight-straddling bedtimes don't
  * spuriously read as irregular. confidence = 0 if <3 nights, else 0.7.
+ *
+ * NOTE: the returned `sri` field is this onset/wake timing-regularity score, NOT
+ * the Phillips epoch-agreement Sleep Regularity Index — see the file header.
  *
  * Confidence formula: pinned 0.7 once ≥3 nights with both onset & wake present;
  *   0 below that threshold (input incompleteness).
