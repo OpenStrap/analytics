@@ -55,7 +55,8 @@ export function calcBaselines(
     ? (zoneCols.map((c) => median(c) ?? 0) as [number, number, number, number, number])
     : null;
 
-  // maxHR = max observed session hr_max; else 220−age.
+  // maxHR = max observed session hr_max; else Tanaka 208−0.7·age (JACC 2001,
+  // more accurate than 220−age).
   const observedMax = window
     .map((d) => d.session_hr_max)
     .filter((x): x is number => x != null);
@@ -65,7 +66,7 @@ export function calcBaselines(
     maxHr = Math.max(...observedMax);
     maxHrSource = 'measured';
   } else if (profile?.age && profile.age > 0) {
-    maxHr = 220 - profile.age;
+    maxHr = Math.round(208 - 0.7 * profile.age);
     maxHrSource = 'age';
   } else {
     maxHr = null; // honest: no measured max, no age → cannot derive

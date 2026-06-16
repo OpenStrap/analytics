@@ -85,7 +85,7 @@ console.log('--- §2 calcStrain ---');
 // ── §3 calcHrZones ───────────────────────────────────────────────────────────
 console.log('--- §3 calcHrZones ---');
 {
-  // maxHR 190: 100bpm=52.6%→z1, 120=63%→z2, 150=78.9%→z3, 160=84%→z4, 175=92%→z5
+  // maxHR 190 (%HRmax): 100bpm=52.6%→z1, 120=63%→z2, 150=78.9%→z3, 160=84%→z4, 175=92%→z5
   const mins: Minute[] = [100, 120, 150, 160, 175].map((h, i) => min(i * 60, h));
   const z = calcHrZones(mins, baseline);
   assert(z.zone1_min === 1, '100bpm → z1');
@@ -107,7 +107,7 @@ console.log('--- §3 calcHrZones ---');
     { age: 40 }
   );
   assert(ageOnly.max_hr_source === 'age' && ageOnly.max_hr_used === 180,
-    'age fallback maxHR = 220−age when no measured HR');
+    'age fallback maxHR = Tanaka 208−0.7·age (=180 at age 40) when no measured HR');
 }
 
 // ── §4 calcCalories ──────────────────────────────────────────────────────────
@@ -337,13 +337,16 @@ console.log('--- §9 calcLoad / calcFitnessTrend ---');
   approx(load.acwr ?? -1, 1.0, 1e-9, 'steady strain → ACWR 1.0');
   assert(load.band === 'optimal', 'ACWR 1.0 → optimal band');
 
-  // acute spike: last 7 days at 20, prior 21 at 10 → acute 20, chronic ~12.5 → acwr 1.6
+  // acute spike (EWMA, Williams 2017): prior 21 days at 10, last 7 at 20.
+  // EWMA acute (λ=0.25) rises to ~18.7, chronic (λ≈0.069) to ~13.9 → acwr ~1.34
+  // (caution). EWMA is deliberately smoother than the rolling-average ratio.
   const spike = Array.from({ length: 28 }, (_, i) => ({
     ts: i * 86400,
     strain: i >= 21 ? 20 : 10,
   }));
   const sl = calcLoad(spike);
-  assert(sl.band === 'high-risk', `acute spike → high-risk (acwr ${sl.acwr})`);
+  assert(sl.band === 'caution' && (sl.acwr ?? 0) > 1.3,
+    `acute spike → caution (acwr ${sl.acwr})`);
 
   // <7 days → unknown
   assert(calcLoad(steady.slice(0, 5)).band === 'unknown', '<7 days → unknown band');
@@ -416,7 +419,7 @@ console.log('--- §11 calcBaselines ---');
   // age fallback for maxHR when no sessions
   const noSess = hist.map((d) => ({ ...d, session_hr_max: undefined }));
   const bl2 = calcBaselines(noSess, { age: 30 });
-  assert(bl2.max_hr === 190 && bl2.max_hr_source === 'age', 'no sessions + age → 220−age maxHR');
+  assert(bl2.max_hr === 187 && bl2.max_hr_source === 'age', 'no sessions + age → Tanaka 208−0.7·age maxHR');
 
   // seed period (3 days) → low confidence
   const seed = calcBaselines(hist.slice(0, 3));
@@ -485,7 +488,7 @@ console.log('--- §HRV time/freq/SI ---');
   // Respiratory peak: RR modulated at 0.25 Hz (15 brpm) → resp_rate ≈ 15.
   const t: number[] = []; let acc = 0;
   const resp: number[] = [];
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 320; i++) { // ≥250 s span so LF (and LF/HF) are valid per Task Force 1996
     const rr = 900 + 60 * Math.sin(2 * Math.PI * 0.25 * (acc / 1000));
     resp.push(Math.round(rr)); acc += rr;
   }
@@ -643,11 +646,12 @@ console.log('--- regression: sleep stage proportions ---');
 console.log('--- regression: resolveMaxHr source ---');
 {
   // No baseline max, age present, day peaks only at 110 bpm (a quiet day). Must
-  // use the age-predicted max (191) as the denominator, NOT call 110 "measured".
+  // use the age-predicted max (Tanaka: 208−0.7·29 ≈ 188) as the denominator,
+  // NOT call 110 "measured".
   const quiet: Minute[] = [];
   for (let i = 0; i < 60; i++) quiet.push(min(i * 60, 95 + (i % 5), 100, { hr_max: 110 }));
   const r1 = resolveMaxHr(quiet, { max_hr: 0 }, { age: 29 });
-  assert(r1.source === 'age' && r1.maxHr === 191,
+  assert(r1.source === 'age' && r1.maxHr === 188,
     `quiet-day peak not promoted to measured (got ${r1.maxHr}/${r1.source})`);
   // A genuine hard effort above age-max IS taken as measured.
   const effort: Minute[] = [];

@@ -34,10 +34,18 @@ export function calcLoad(dailyStrain: DailyStrain[]): Metric<LoadValue> {
     };
   }
 
-  const last7 = sorted.slice(-7).map((d) => d.strain);
-  const last28 = sorted.slice(-28).map((d) => d.strain);
-  const acute = mean(last7);
-  const chronic = mean(last28);
+  // EWMA acute/chronic (Williams et al. 2017, BJSM 51:209) — exponentially-
+  // weighted, λ = 2/(N+1) with N=7 (acute) / N=28 (chronic). Decays older load
+  // smoothly instead of the rolling-average "cliff", and is more sensitive to
+  // when load actually occurred. Seed both at the first day's strain.
+  const LAMBDA_ACUTE = 2 / (7 + 1); // 0.25
+  const LAMBDA_CHRONIC = 2 / (28 + 1); // ≈0.069
+  let acute = sorted[0].strain;
+  let chronic = sorted[0].strain;
+  for (let i = 1; i < sorted.length; i++) {
+    acute = sorted[i].strain * LAMBDA_ACUTE + acute * (1 - LAMBDA_ACUTE);
+    chronic = sorted[i].strain * LAMBDA_CHRONIC + chronic * (1 - LAMBDA_CHRONIC);
+  }
   const acwr = chronic > 0 ? acute / chronic : null;
 
   let band: LoadValue['band'] = 'unknown';
