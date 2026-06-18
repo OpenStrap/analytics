@@ -21,6 +21,7 @@ import { calcIllness } from '../illness';
 import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hrv';
 import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
+import { calcCircadian } from '../circadian';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -691,6 +692,34 @@ console.log('--- §Steps pedometer ---');
   approx(calcSteps([walk]), Math.round(raw * STEP_PARAMS.GAIN), 0.001,
     'calcSteps applies the ×GAIN calibration to the summed raw count');
   assert(STEP_PARAMS.GAIN === 1.11, 'locked calibration gain = 1.11');
+}
+
+// ── §Circadian — CircaCP cosinor + bounded change-point ──────────────────────
+console.log('--- §Circadian calcCircadian ---');
+{
+  // 2 days of 1-min HR: asleep (hr≈55) hours [1,8), awake (hr≈80) otherwise.
+  // Onset ≈ 01:00, wake ≈ 08:00 each day; sharp transitions.
+  const mins: Minute[] = [];
+  for (let i = 0; i < 2 * 1440; i++) {
+    const ts = i * 60;
+    const hod = Math.floor(ts / 3600) % 24;
+    const asleep = hod >= 1 && hod < 8;
+    const hr = (asleep ? 55 : 80) + (i % 5) - 2; // tiny deterministic jitter
+    mins.push(min(ts, hr));
+  }
+  const c = calcCircadian(mins);
+  assert(c.amplitude !== null && c.amplitude > 5, `circadian amplitude detected (got ${c.amplitude})`);
+  // day-2 onset ≈ 90000s (25:00 → 01:00 day 2), wake ≈ 115200s (32:00 → 08:00 day 2)
+  assert(c.onset_ts !== null && Math.abs(c.onset_ts - 90000) <= 1800, `onset ≈ 01:00 day2 (got ${c.onset_ts})`);
+  assert(c.wake_ts !== null && Math.abs(c.wake_ts - 115200) <= 1800, `wake ≈ 08:00 day2 (got ${c.wake_ts})`);
+  assert(c.settled === true, 'completed night marked settled');
+  assert(c.confidence > 0.5, `confidence high on clean rhythm (got ${c.confidence})`);
+
+  // flat HR (no rhythm) → abstain
+  const flat: Minute[] = [];
+  for (let i = 0; i < 2 * 1440; i++) flat.push(min(i * 60, 70));
+  const cf = calcCircadian(flat);
+  assert(cf.onset_ts === null && cf.confidence < 0.3, 'flat HR → abstains (no fabricated boundary)');
 }
 
 summary('analytics');
