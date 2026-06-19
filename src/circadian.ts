@@ -158,40 +158,73 @@ function mainSleepPeriod(pts: Pt[], bath: number, mesor: number): { onset: numbe
   return { onset, wake: pts[end].t };
 }
 
+export interface SleepStaging {
+  in_bed_min: number; asleep_min: number; efficiency: number;
+  awake_min: number; light_min: number; deep_min: number; rem_min: number;
+  hypnogram: { t: number; stage: 'awake' | 'light' | 'deep' | 'rem' }[];
+}
+
 /**
- * Sleep efficiency / WASO over a fixed [onset, wake] window, HR-only (ESTIMATE).
- * WASO = minutes in SUSTAINED elevations (≥15 min) above a threshold set partway
- * between the night's sleeping floor (20th-pctile HR) and the cosinor mesor — so
- * brief REM/arousal bumps don't count, but prolonged wakefulness does. asleep =
- * worn − WASO; efficiency = asleep / in-bed. Honest middle ground for HR-only: it
- * neither pins efficiency at 1.0 (mesor-only) nor calls every REM bump "awake".
+ * The ONE sleep stager (HR-only, ESTIMATE/beta). Classifies every minute in
+ * [onset, wake] into awake / light / deep / rem off thresholds anchored between the
+ * night's sleeping floor (10th-pctile HR) and the cosinor mesor, then returns BOTH
+ * the per-minute hypnogram AND the reconciled totals — so the graph and the stage
+ * breakdown can never disagree (the previous bug: two different classifiers).
+ *
+ *   awake = SUSTAINED (≥20 min) HR ≥ floor+0.70·(mesor−floor), or off-wrist — only
+ *           clear near-wake elevations, never normal light/REM HR.
+ *   deep  = HR < floor+0.20·(mesor−floor)         (lowest)
+ *   rem   = floor+0.45·(mesor−floor) ≤ HR < awake (elevated but asleep)
+ *   light = everything else.
+ * asleep = light+deep+rem; efficiency = asleep / in-bed.
  */
-export function sleepEfficiency(
+export function stageSleep(
   minutes: { ts: number; hr_avg: number }[], onset: number, wake: number, mesor: number,
-): { in_bed_min: number; asleep_min: number; efficiency: number; waso_min: number } {
+): SleepStaging {
   const inBed = Math.max(1, Math.round((wake - onset) / 60));
-  const win = minutes.filter((m) => m.ts >= onset && m.ts <= wake && m.hr_avg > 0)
-    .sort((a, b) => a.ts - b.ts);
-  const worn = win.length;
-  if (worn < 5) return { in_bed_min: inBed, asleep_min: worn, efficiency: clamp(worn / inBed, 0, 1), waso_min: 0 };
-  const hrs = win.map((m) => m.hr_avg);
-  // WASO threshold sits HIGH — 0.70 of the way from the sleeping floor to the mesor —
-  // so only clear, near-wake elevations count as awake, not normal light/REM sleep HR
-  // (which for high-sleeping-HR users sits well above the floor). Sustained ≥20 min.
+  const win = minutes.filter((m) => m.ts >= onset && m.ts <= wake).sort((a, b) => a.ts - b.ts);
+  const empty: SleepStaging = {
+    in_bed_min: inBed, asleep_min: 0, efficiency: 0, awake_min: inBed,
+    light_min: 0, deep_min: 0, rem_min: 0, hypnogram: [],
+  };
+  const worn = win.filter((m) => m.hr_avg > 0);
+  if (worn.length < 5) return empty;
+  const hrs = worn.map((m) => m.hr_avg);
   const floor = percentile(hrs, 10) ?? Math.min(...hrs);
-  const threshold = Math.max(floor + 10, floor + 0.70 * (mesor - floor));
-  const ys = smooth(hrs, 5);
-  let waso = 0, i = 0;
-  while (i < ys.length) {
-    if (ys[i] >= threshold) {
-      let j = i;
-      while (j < ys.length && ys[j] >= threshold) j++;
-      if ((win[j - 1].ts - win[i].ts) / 60 >= 20) waso += j - i; // sustained → count as awake
-      i = j;
-    } else i++;
+  const span = Math.max(1, mesor - floor);
+  // Light-dominant bands (HR-only stages_beta): deep = only the lowest HR, rem = a
+  // narrow elevated band just below wake, light = the broad middle (most of sleep).
+  const tAwake = Math.max(floor + 10, floor + 0.70 * span);
+  const tRem = floor + 0.60 * span;
+  const tDeep = floor + 0.12 * span;
+
+  // smoothed HR aligned to `win` (off-wrist minutes carry hr 0 → forced awake)
+  const ys = smooth(win.map((m) => (m.hr_avg > 0 ? m.hr_avg : tAwake + 50)), 5);
+  const stage: ('awake' | 'light' | 'deep' | 'rem')[] = new Array(win.length).fill('light');
+  // pass 1: provisional per-minute classes
+  for (let k = 0; k < win.length; k++) {
+    if (win[k].hr_avg <= 0) { stage[k] = 'awake'; continue; }
+    const v = ys[k];
+    stage[k] = v >= tAwake ? 'awake' : v < tDeep ? 'deep' : v >= tRem ? 'rem' : 'light';
   }
-  const asleep = Math.max(0, worn - waso);
-  return { in_bed_min: inBed, asleep_min: asleep, efficiency: clamp(asleep / inBed, 0, 1), waso_min: waso };
+  // pass 2: an "awake" minute only counts as awake if part of a SUSTAINED (≥20 min)
+  // run; otherwise it's a brief REM/arousal bump → reclassify as rem.
+  let k = 0;
+  while (k < win.length) {
+    if (stage[k] === 'awake' && win[k].hr_avg > 0) {
+      let j = k; while (j < win.length && stage[j] === 'awake' && win[j].hr_avg > 0) j++;
+      if ((win[j - 1].ts - win[k].ts) / 60 < 20) for (let x = k; x < j; x++) stage[x] = 'rem';
+      k = j;
+    } else k++;
+  }
+  let light = 0, deep = 0, rem = 0, awake = 0;
+  for (const s of stage) { if (s === 'awake') awake++; else if (s === 'deep') deep++; else if (s === 'rem') rem++; else light++; }
+  const asleep = light + deep + rem;
+  return {
+    in_bed_min: inBed, asleep_min: asleep, efficiency: clamp(asleep / inBed, 0, 1),
+    awake_min: awake, light_min: light, deep_min: deep, rem_min: rem,
+    hypnogram: win.map((m, idx) => ({ t: m.ts, stage: stage[idx] })),
+  };
 }
 
 export interface CircadianOpts {

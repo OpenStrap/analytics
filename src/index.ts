@@ -52,8 +52,8 @@ export { calcVo2Max, calcFitnessModel, calcMonotony } from './fitness';
 export { calcSteps, pedometer, STEP_PARAMS } from './steps';
 
 // §Circadian — CircaCP cosinor + bounded change-point (physiological-day anchor)
-export { calcCircadian, sleepEfficiency } from './circadian';
-export type { CircadianOpts } from './circadian';
+export { calcCircadian, stageSleep } from './circadian';
+export type { CircadianOpts, SleepStaging } from './circadian';
 
 // §Composite Readiness — weighted HRV + sleep blend (abstains without HRV)
 export { calcReadinessIndex } from './readiness_index';
