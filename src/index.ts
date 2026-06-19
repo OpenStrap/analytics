@@ -55,6 +55,11 @@ export { calcSteps, pedometer, STEP_PARAMS } from './steps';
 export { calcCircadian, stageSleep } from './circadian';
 export type { CircadianOpts, SleepStaging } from './circadian';
 
+// §Sleep/wake ENSEMBLE — pluggable voters (Cole-Kripke + cardiac/CPD + van Hees);
+// drives the demand-driven day-close trigger. detectWakeState + cheap peekRecentState.
+export { detectWakeState, peekRecentState, coleKripke, cardiac, inactivity, DEFAULT_VOTERS } from './wake';
+export type { WakeContext, WakeState, WakeLabel, Voter } from './wake';
+
 // §Composite Readiness — weighted HRV + sleep blend (abstains without HRV)
 export { calcReadinessIndex } from './readiness_index';
 export type { ReadinessInputs } from './readiness_index';

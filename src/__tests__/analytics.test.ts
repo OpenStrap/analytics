@@ -22,6 +22,7 @@ import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hr
 import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
 import { calcCircadian } from '../circadian';
+import { detectWakeState, peekRecentState } from '../wake';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -720,6 +721,34 @@ console.log('--- §Circadian calcCircadian ---');
   for (let i = 0; i < 2 * 1440; i++) flat.push(min(i * 60, 70));
   const cf = calcCircadian(flat);
   assert(cf.onset_ts === null && cf.confidence < 0.3, 'flat HR → abstains (no fabricated boundary)');
+}
+
+// ── detectWakeState (sleep/wake ensemble) ─────────────────────────────────────
+{
+  const bl: Baseline = { resting_hr: 50, max_hr: 190, sleep_need_min: 480 };
+  // 8h sleep (low HR, still) then N min awake (elevated HR, moving + steps).
+  const build = (awakeMin: number): Minute[] => {
+    const out: Minute[] = [];
+    let t = 0;
+    for (let i = 0; i < 480; i++, t += 60) out.push(min(t, 50, 0.01, { wrist_on: true }));
+    for (let i = 0; i < awakeMin; i++, t += 60) out.push(min(t, 72, 0.4, { steps: 20, wrist_on: true }));
+    return out;
+  };
+
+  const woke = detectWakeState({ minutes: build(15), baseline: bl });
+  assert(woke.state === 'awake', `ensemble: state awake after waking (got ${woke.state})`);
+  assert(woke.wake_ts != null && Math.abs(woke.wake_ts - 480 * 60) <= 180, `ensemble: wake_ts ≈ sleep→wake boundary ±3min (got ${woke.wake_ts})`);
+  assert(woke.awake_min >= 12 && woke.awake_min <= 19, `ensemble: sustained awake ~15 min ±detector fuzz (got ${woke.awake_min})`);
+  assert(woke.asleep_min >= 90, `ensemble: main sleep ≥90 min (got ${woke.asleep_min})`);
+
+  const tooSoon = detectWakeState({ minutes: build(5), baseline: bl });
+  assert(tooSoon.wake_ts === null, 'ensemble: <10 min awake → no premature wake fire');
+
+  const stillAsleep = detectWakeState({ minutes: build(0), baseline: bl });
+  assert(stillAsleep.state === 'asleep' && stillAsleep.wake_ts === null, 'ensemble: mid-sleep → asleep, no wake_ts');
+
+  const movingTail = [min(0, 72, 0.4, { steps: 20, wrist_on: true }), min(60, 73, 0.5, { steps: 25, wrist_on: true }), min(120, 71, 0.3, { steps: 10, wrist_on: true })];
+  assert(peekRecentState(movingTail, bl) === 'awake', 'peek: moving + HR up → awake');
 }
 
 summary('analytics');
