@@ -122,6 +122,30 @@ function changePoint(pts: Pt[], want: 'drop' | 'rise'): { ts: number; before: nu
   return { ts: pts[best.tau].t, before: best.ml, after: best.mr };
 }
 
+/**
+ * Wake = the START of the LAST sustained HR elevation (≥ `threshold` for ≥ `minRunMin`
+ * minutes) in the window. A single change-point picks the most prominent mean-shift,
+ * which for a night with REM/arousal bumps lands mid-sleep, not at the morning rise —
+ * so we instead take the final sustained climb above the cosinor mesor (the awakening
+ * that doesn't come back down). null if HR never sustains above threshold (still asleep).
+ */
+function sustainedWake(pts: Pt[], threshold: number, minRunMin: number): number | null {
+  if (pts.length < 10) return null;
+  const ys = smooth(pts.map((p) => p.y), 5);
+  let wakeIdx = -1;
+  let i = 0;
+  while (i < ys.length) {
+    if (ys[i] >= threshold) {
+      let j = i;
+      while (j < ys.length && ys[j] >= threshold) j++;
+      const runMin = (pts[j - 1].t - pts[i].t) / 60;
+      if (runMin >= minRunMin) wakeIdx = i; // keep the LAST qualifying run
+      i = j;
+    } else i++;
+  }
+  return wakeIdx >= 0 ? pts[wakeIdx].t : null;
+}
+
 export interface CircadianOpts {
   now?: number;       // unix s "now" (default = latest minute ts); for determinism
   settleSec?: number; // a wake older than this = night complete (default 600s)
@@ -161,20 +185,21 @@ export function calcCircadian(minutes: Minute[], opts: CircadianOpts = {}): Metr
   const acroBase = fit.phi / W;
   const nearest = (base: number, ref: number) => base + Math.round((ref - base) / DAY) * DAY;
 
-  // Pick the cycle: target anchor, else the most-recent bathyphase whose +8h wake
-  // window has settled (so we close completed nights, not the one in progress).
-  const anchor = opts.anchorTs ?? now - settle;
-  let bath = nearest(bathBase, anchor);
-  // If that cycle's wake window hasn't settled yet, step back one cycle.
-  if (bath + 8 * 3600 > now - settle) bath -= DAY;
+  // Pick the cycle: the most-recent bathyphase IN THE PAST. The wake is found within
+  // [bath, bath+8h] clipped to available data, and `settled` (wake older than the
+  // settle window) decides whether the night is complete. We deliberately do NOT
+  // require bath+8h to be in the past — that wrongly stepped back a whole night for
+  // an early riser checking soon after waking (the "previous night / short sleep" bug).
+  let bath = nearest(bathBase, opts.anchorTs ?? now);
+  if (bath > now - 3600) bath -= DAY;   // bathyphase must be ~in the past
   const acro = nearest(acroBase, now);
 
   const inWin = (lo: number, hi: number) => usable.filter((p) => p.t >= lo && p.t <= hi);
   const onset = changePoint(inWin(bath - 8 * 3600, bath), 'drop');
-  const wake = changePoint(inWin(bath, bath + 8 * 3600), 'rise');
+  // Wake = final sustained rise above the cosinor mesor (robust to REM/arousal bumps).
+  const wake_ts = sustainedWake(inWin(bath, bath + 8 * 3600), fit.mesor, 12);
 
   const onset_ts = onset ? onset.ts : null;
-  const wake_ts = wake ? wake.ts : null;
   const in_bed_min = onset_ts != null && wake_ts != null ? Math.round((wake_ts - onset_ts) / 60) : 0;
   const settled = wake_ts != null && wake_ts <= now - settle;
 
