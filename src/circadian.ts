@@ -13,7 +13,7 @@
 // onset/wake boundary of the most-recent completed cycle. In-sleep staging,
 // efficiency and naps stay with calcSleep / calcSleepPeriods over that window.
 import type { Minute, Metric, CircadianValue } from './types';
-import { isHrUsable, clamp, round } from './util';
+import { isHrUsable, clamp, round, percentile } from './util';
 
 const DAY = 86400;
 const W = (2 * Math.PI) / DAY; // circadian angular frequency (rad/sec)
@@ -89,12 +89,12 @@ function smooth(ys: number[], k: number): number[] {
 }
 
 /**
- * Single mean-shift change-point within a bounded window, constrained to a
- * direction ('drop' = onset, HR falls; 'rise' = wake, HR climbs). Maximises the
- * SSE reduction of a 2-segment split (binary-segmentation cost). null if the
- * window is too thin or no shift of the wanted sign exists.
+ * Single mean-shift change-point in a window, constrained to a direction ('drop' =
+ * onset, HR falls). Maximises the SSE reduction of a 2-segment split — i.e. the
+ * STRONGEST drop, which for the pre-bathyphase window is the evening→sleep onset
+ * (bigger than any quiet-evening dip). null if the window is too thin.
  */
-function changePoint(pts: Pt[], want: 'drop' | 'rise'): { ts: number; before: number; after: number } | null {
+function changePoint(pts: Pt[], want: 'drop' | 'rise'): number | null {
   const MIN = 15;
   if (pts.length < 2 * MIN) return null;
   const ys = smooth(pts.map((p) => p.y), 5);
@@ -108,42 +108,90 @@ function changePoint(pts: Pt[], want: 'drop' | 'rise'): { ts: number; before: nu
     return (pre2[b] - pre2[a]) - (sum * sum) / cnt;
   };
   const total = sse(0, n);
-  let best: { gain: number; tau: number; ml: number; mr: number } | null = null;
+  let best: { gain: number; tau: number } | null = null;
   for (let tau = MIN; tau < n - MIN; tau++) {
-    const ml = pre[tau] / tau;
-    const mr = (pre[n] - pre[tau]) / (n - tau);
-    const d = mr - ml; // +ve = rise
+    const d = (pre[n] - pre[tau]) / (n - tau) - pre[tau] / tau; // +ve = rise
     if (want === 'rise' && d <= 0) continue;
     if (want === 'drop' && d >= 0) continue;
     const gain = total - (sse(0, tau) + sse(tau, n));
-    if (!best || gain > best.gain) best = { gain, tau, ml, mr };
+    if (!best || gain > best.gain) best = { gain, tau };
   }
-  if (!best) return null;
-  return { ts: pts[best.tau].t, before: best.ml, after: best.mr };
+  return best ? pts[best.tau].t : null;
 }
 
 /**
- * Wake = the START of the LAST sustained HR elevation (≥ `threshold` for ≥ `minRunMin`
- * minutes) in the window. A single change-point picks the most prominent mean-shift,
- * which for a night with REM/arousal bumps lands mid-sleep, not at the morning rise —
- * so we instead take the final sustained climb above the cosinor mesor (the awakening
- * that doesn't come back down). null if HR never sustains above threshold (still asleep).
+ * Main sleep period. ONSET = the strongest HR drop in [bath−8h, bath] (the
+ * evening→sleep fall; robust to quiet sedentary evenings that a below-mesor run
+ * would wrongly absorb). WAKE = the end of the consolidated below-MESOR run
+ * extending forward from the bathyphase, bridging interior >mesor bumps ≤ BRIDGE
+ * min (REM/arousal) and ending at the morning rise that persists (daytime). Mesor
+ * is the cosinor midline — sleep below, wake above — so it doesn't cut through
+ * high-sleeping-HR users' light sleep. Returns onset/wake, or null.
  */
-function sustainedWake(pts: Pt[], threshold: number, minRunMin: number): number | null {
-  if (pts.length < 10) return null;
+function mainSleepPeriod(pts: Pt[], bath: number, mesor: number): { onset: number; wake: number } | null {
+  const n = pts.length;
+  if (n < 30) return null;
   const ys = smooth(pts.map((p) => p.y), 5);
-  let wakeIdx = -1;
-  let i = 0;
+  const asleep = ys.map((v) => v < mesor);
+  // anchor = index nearest the bathyphase
+  let a = 0;
+  for (let i = 1; i < n; i++) if (Math.abs(pts[i].t - bath) < Math.abs(pts[a].t - bath)) a = i;
+  const BRIDGE = 60 * 60;
+  // wake: walk forward from anchor, bridging >mesor gaps ≤ BRIDGE; stop at a long one.
+  let end = a;
+  for (let i = a + 1; i < n;) {
+    if (asleep[i]) { end = i; i++; continue; }
+    let k = i; while (k < n && !asleep[k]) k++;
+    if (pts[(k < n ? k : n) - 1].t - pts[i].t > BRIDGE) break;
+    i = k;
+  }
+  // onset: strongest evening→sleep drop; fall back to the below-mesor run start.
+  let start = a;
+  for (let i = a - 1; i >= 0;) {
+    if (asleep[i]) { start = i; i--; continue; }
+    let k = i; while (k >= 0 && !asleep[k]) k--;
+    if (pts[i].t - pts[k + 1].t > BRIDGE) break;
+    i = k;
+  }
+  const onsetCp = changePoint(pts.filter((p) => p.t >= bath - 8 * 3600 && p.t <= bath), 'drop');
+  const onset = onsetCp != null && onsetCp >= pts[start].t ? onsetCp : pts[start].t;
+  return { onset, wake: pts[end].t };
+}
+
+/**
+ * Sleep efficiency / WASO over a fixed [onset, wake] window, HR-only (ESTIMATE).
+ * WASO = minutes in SUSTAINED elevations (≥15 min) above a threshold set partway
+ * between the night's sleeping floor (20th-pctile HR) and the cosinor mesor — so
+ * brief REM/arousal bumps don't count, but prolonged wakefulness does. asleep =
+ * worn − WASO; efficiency = asleep / in-bed. Honest middle ground for HR-only: it
+ * neither pins efficiency at 1.0 (mesor-only) nor calls every REM bump "awake".
+ */
+export function sleepEfficiency(
+  minutes: { ts: number; hr_avg: number }[], onset: number, wake: number, mesor: number,
+): { in_bed_min: number; asleep_min: number; efficiency: number; waso_min: number } {
+  const inBed = Math.max(1, Math.round((wake - onset) / 60));
+  const win = minutes.filter((m) => m.ts >= onset && m.ts <= wake && m.hr_avg > 0)
+    .sort((a, b) => a.ts - b.ts);
+  const worn = win.length;
+  if (worn < 5) return { in_bed_min: inBed, asleep_min: worn, efficiency: clamp(worn / inBed, 0, 1), waso_min: 0 };
+  const hrs = win.map((m) => m.hr_avg);
+  // WASO threshold sits HIGH — 0.70 of the way from the sleeping floor to the mesor —
+  // so only clear, near-wake elevations count as awake, not normal light/REM sleep HR
+  // (which for high-sleeping-HR users sits well above the floor). Sustained ≥20 min.
+  const floor = percentile(hrs, 10) ?? Math.min(...hrs);
+  const threshold = Math.max(floor + 10, floor + 0.70 * (mesor - floor));
+  const ys = smooth(hrs, 5);
+  let waso = 0, i = 0;
   while (i < ys.length) {
     if (ys[i] >= threshold) {
       let j = i;
       while (j < ys.length && ys[j] >= threshold) j++;
-      const runMin = (pts[j - 1].t - pts[i].t) / 60;
-      if (runMin >= minRunMin) wakeIdx = i; // keep the LAST qualifying run
+      if ((win[j - 1].ts - win[i].ts) / 60 >= 20) waso += j - i; // sustained → count as awake
       i = j;
     } else i++;
   }
-  return wakeIdx >= 0 ? pts[wakeIdx].t : null;
+  const asleep = Math.max(0, worn - waso);
+  return { in_bed_min: inBed, asleep_min: asleep, efficiency: clamp(asleep / inBed, 0, 1), waso_min: waso };
 }
 
 export interface CircadianOpts {
@@ -178,6 +226,8 @@ export function calcCircadian(minutes: Minute[], opts: CircadianOpts = {}): Metr
   const now = opts.now ?? usable[usable.length - 1].t;
   const fit = fitCosinor(usable);
   if (!fit) return empty();
+  // No detectable circadian rhythm (flat HR) → abstain, never fabricate a boundary.
+  if (fit.amp < 3) return empty();
 
   // bathyphase (HR trough): amp·cos(ωt − φ) minimal → ωt − φ = π.
   const bathBase = (fit.phi + Math.PI) / W;
@@ -195,11 +245,10 @@ export function calcCircadian(minutes: Minute[], opts: CircadianOpts = {}): Metr
   const acro = nearest(acroBase, now);
 
   const inWin = (lo: number, hi: number) => usable.filter((p) => p.t >= lo && p.t <= hi);
-  const onset = changePoint(inWin(bath - 8 * 3600, bath), 'drop');
-  // Wake = final sustained rise above the cosinor mesor (robust to REM/arousal bumps).
-  const wake_ts = sustainedWake(inWin(bath, bath + 8 * 3600), fit.mesor, 12);
-
-  const onset_ts = onset ? onset.ts : null;
+  // Consolidated main-sleep period around the bathyphase (handles REM bumps + daytime).
+  const period = mainSleepPeriod(inWin(bath - 8 * 3600, bath + 10 * 3600), bath, fit.mesor);
+  const onset_ts = period ? period.onset : null;
+  const wake_ts = period ? period.wake : null;
   const in_bed_min = onset_ts != null && wake_ts != null ? Math.round((wake_ts - onset_ts) / 60) : 0;
   const settled = wake_ts != null && wake_ts <= now - settle;
 
