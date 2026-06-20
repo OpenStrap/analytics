@@ -33,6 +33,10 @@ export type { NightHypnogram } from './sleep';
 export { detectSleepCycles } from './cycles';
 export type { SleepCycle, SleepCyclesValue } from './cycles';
 
+// §Menstrual cycle — log-anchored calendar method + fertile window (Wilcox 2000).
+export { calcCycle } from './cycle';
+export type { CycleValue, CyclePhase } from './cycle';
+
 // §6 Sleep regularity (SRI)
 export { calcSleepRegularity } from './regularity';
 
