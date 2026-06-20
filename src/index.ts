@@ -24,6 +24,14 @@ export { calcCalories } from './calories';
 export { calcSleep } from './sleep';
 // §5b Sleep v2 — multi-period (naps = shorter sleeps). Additive; calcSleep unchanged.
 export { calcSleepPeriods } from './sleep';
+// Per-minute asleep/awake mask (calcSleep's boundary) — reconciles the hypnogram's awake.
+export { sleepAwakeMask } from './sleep';
+// v1-method per-minute hypnogram (Cole-Kripke + HR-percentile bands) — single source.
+export { stageHypnogram } from './sleep';
+export type { NightHypnogram } from './sleep';
+// §Sleep cycles — ultradian NREM↔REM cycles (Rosenblum 2024 fractal-cycle method, HRV-adapted).
+export { detectSleepCycles } from './cycles';
+export type { SleepCycle, SleepCyclesValue } from './cycles';
 
 // §6 Sleep regularity (SRI)
 export { calcSleepRegularity } from './regularity';
