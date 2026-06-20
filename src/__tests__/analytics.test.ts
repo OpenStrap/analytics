@@ -801,4 +801,30 @@ console.log('--- §Circadian calcCircadian ---');
   assert(peekRecentState(movingTail, bl) === 'awake', 'peek: moving + HR up → awake');
 }
 
+// ── regression: QUIET sedentary wake (HR up, NO motion, RR present) must fire ──
+// The real-world bug: a user awake but still (on the phone in bed) has elevated HR
+// and RR but ~zero motion. The OLD flat 2-of-3 majority let the two motion voters
+// (blind to quiet wake) outvote cardiac → "asleep" → close never fired → no recovery.
+// The ≥2 consensus must let the autonomic pair (cardiac + hrvArousal) carry the wake.
+{
+  const bl: Baseline = { resting_hr: 55, max_hr: 190, sleep_need_min: 480 };
+  const minutes: Minute[] = [];
+  const rrByMin = new Map<number, number[]>();
+  let t = 0;
+  const rr = (meanMs: number, sd: number, n = 40) => Array.from({ length: n }, (_, j) => meanMs + (j % 2 ? sd : -sd));
+  for (let i = 0; i < 480; i++, t += 60) { minutes.push(min(t, 52, 0.01, { wrist_on: true })); rrByMin.set(t, rr(1150, 12)); } // sleep: low HR, still, low RR-SD
+  for (let i = 0; i < 30; i++, t += 60) { minutes.push(min(t, 74, 0.01, { wrist_on: true })); rrByMin.set(t, rr(810, 60)); }   // QUIET wake: HR up, NO motion, high RR-SD
+
+  const ws = detectWakeState({ minutes, baseline: bl, rrByMin });
+  assert(ws.state === 'awake', `quiet sedentary wake detected without motion (got ${ws.state})`);
+  assert(ws.wake_ts != null && Math.abs(ws.wake_ts - 480 * 60) <= 180, `quiet wake_ts at the boundary (got ${ws.wake_ts})`);
+  assert(ws.asleep_min >= 90, `main sleep preserved (got ${ws.asleep_min})`);
+  assert(ws.votes.cardiac === 'awake' && ws.votes.hrvArousal === 'awake', 'autonomic pair both vote awake at wake');
+
+  // Honest degradation: same still-but-awake tail with NO RR → only 1 signal (cardiac)
+  // → below the ≥2 bar → stays asleep rather than guess.
+  const noRr = detectWakeState({ minutes, baseline: bl });
+  assert(noRr.wake_ts === null, `no-RR + no-motion quiet wake cannot be confirmed (honest) (got ${noRr.wake_ts})`);
+}
+
 summary('analytics');

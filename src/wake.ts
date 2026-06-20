@@ -85,27 +85,28 @@ export const coleKripke: Voter = ({ minutes }) => {
 };
 
 // ── Voter 2: Cardiac (CPD core — the wake signal actigraphy misses) ───────────
-// Awake when HR sits above the night's cardiac trough by a margin, OR a sustained
-// upward HR change-point fires. When RR is supplied, a rise in short-window RR-SD
-// (HRV climbs toward/at wake) reinforces 'awake'. Self-calibrating off the window.
-export const cardiac: Voter = ({ minutes, baseline, rrByMin }) => {
+// Awake when SMOOTHED HR sits above the night's cardiac trough by a margin. This is
+// the band's single most reliable wake signal (quiet wake has elevated HR but no
+// motion — exactly where the actigraphy voters go blind). Smoothing (±2 min) means a
+// single REM/arousal HR spike can't flip a minute to 'awake'; only a sustained rise
+// does. The RR/HRV arm now lives in its OWN voter (hrvArousal) so it isn't
+// double-counted. Trough is self-calibrating off the window, floored by RHR.
+export const cardiac: Voter = ({ minutes, baseline }) => {
   const usable = minutes.filter(isHrUsable).map((m) => m.hr_avg);
-  // cardiac trough: low percentile of the window's HR (sleeping HR), floored by RHR.
   const sorted = [...usable].sort((a, b) => a - b);
   const p10 = sorted.length ? sorted[Math.floor(sorted.length * 0.1)] : baseline.resting_hr;
   const trough = Math.max(baseline.resting_hr || 0, p10 || 0) || (sorted[0] ?? 0);
-  const wakeMargin = 6; // bpm above the sleeping trough → cardiac wake
-  return minutes.map((m) => {
-    if (!isHrUsable(m)) return 'unknown';
-    let vote: WakeLabel = m.hr_avg > trough + wakeMargin ? 'awake' : 'asleep';
-    // RR/HRV arm: a populated, healthy RR-SD that's elevated supports 'awake'.
-    const rr = rrByMin?.get(Math.floor(m.ts / MIN) * MIN);
-    if (rr && rr.length >= 4) {
-      const mean = rr.reduce((s, v) => s + v, 0) / rr.length;
-      const sd = Math.sqrt(rr.reduce((s, v) => s + (v - mean) ** 2, 0) / rr.length);
-      if (sd > 80 && m.hr_avg > trough) vote = 'awake'; // high beat-to-beat variability + above trough
-    }
-    return vote;
+  const wakeMargin = 8; // bpm above the sleeping trough → cardiac wake (separates wake from REM)
+  // ±2-min median-smoothed HR (NaN where unusable) so spikes don't fragment the vote.
+  const hr = minutes.map((m) => (isHrUsable(m) ? m.hr_avg : NaN));
+  const hs = hr.map((_, i) => {
+    const seg = hr.slice(Math.max(0, i - 2), Math.min(hr.length, i + 3))
+      .filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+    return seg.length ? seg[seg.length >> 1] : NaN;
+  });
+  return minutes.map((_, i) => {
+    if (!Number.isFinite(hs[i])) return 'unknown';
+    return hs[i] > trough + wakeMargin ? 'awake' : 'asleep';
   });
 };
 
@@ -138,29 +139,102 @@ export const inactivity: Voter = ({ minutes }) => {
   });
 };
 
+// ── Voter 4: HRV / RR autonomic arousal ───────────────────────────────────────
+// Beat-to-beat RR spread (SD) climbs with autonomic arousal toward and at wake. A
+// minute is 'awake' when its short-window RR-SD is elevated AND HR sits above the
+// sleeping trough. Returns 'unknown' when the minute has no RR — so a night without
+// RR simply drops this voter rather than biasing it. This is the SECOND autonomic
+// signal: paired with `cardiac` it lets the ≥2 consensus fire on quiet wake (HR up,
+// no motion) without the two blind motion voters being able to veto it.
+export const hrvArousal: Voter = ({ minutes, baseline, rrByMin }) => {
+  const usable = minutes.filter(isHrUsable).map((m) => m.hr_avg);
+  const sorted = [...usable].sort((a, b) => a - b);
+  const p10 = sorted.length ? sorted[Math.floor(sorted.length * 0.1)] : baseline.resting_hr;
+  const trough = Math.max(baseline.resting_hr || 0, p10 || 0) || (sorted[0] ?? 0);
+  const RR_SD_WAKE = 45; // ms — elevated beat-to-beat spread (validated on real RR)
+  // Per-minute RR-SD (NaN when <4 beats)…
+  const sdRaw = minutes.map((m) => {
+    const rr = rrByMin?.get(Math.floor(m.ts / MIN) * MIN);
+    if (!rr || rr.length < 4) return NaN;
+    const mean = rr.reduce((s, v) => s + v, 0) / rr.length;
+    return Math.sqrt(rr.reduce((s, v) => s + (v - mean) ** 2, 0) / rr.length);
+  });
+  // …then ±2-min median-smoothed. Raw minute RR-SD bounces across the threshold, which
+  // fragments the morning wake so cardiac+hrv only intermittently reach the ≥2 bar;
+  // smoothing makes the autonomic signal continuous (mirrors the cardiac HR smoothing).
+  const sd = sdRaw.map((_, i) => {
+    const seg = sdRaw.slice(Math.max(0, i - 2), Math.min(sdRaw.length, i + 3))
+      .filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+    return seg.length ? seg[seg.length >> 1] : NaN;
+  });
+  return minutes.map((m, i) => {
+    if (!Number.isFinite(sd[i]) || !isHrUsable(m)) return 'unknown';
+    return sd[i] > RR_SD_WAKE && m.hr_avg > trough ? 'awake' : 'asleep';
+  });
+};
+
 // Pluggable registry — swap/extend these as better algorithms are validated.
+// FOUR voters, two families: motion (coleKripke, inactivity) + autonomic (cardiac,
+// hrvArousal). The consensus rule (≥2) + bout-smoothing is HR-led by construction —
+// motion is blind to quiet wake, so the autonomic pair must be able to carry a wake.
 export const DEFAULT_VOTERS: { name: string; fn: Voter }[] = [
   { name: 'coleKripke', fn: coleKripke },
   { name: 'cardiac', fn: cardiac },
   { name: 'inactivity', fn: inactivity },
+  { name: 'hrvArousal', fn: hrvArousal },
 ];
 
-/** Majority label per minute across voters (unknown ignored; tie → unknown). */
-function majorityPerMinute(labels: WakeLabel[][], n: number): WakeLabel[] {
+/**
+ * Consensus label per minute: AWAKE if ≥`minAwake` voters say awake. NOT a majority —
+ * a 2–2 split counts as AWAKE on purpose. Two of the four voters are motion-based and
+ * physically blind to quiet wakefulness (lying still, HR up); a flat majority lets them
+ * veto a correct cardiac+HRV wake (and ties → 'unknown' → the close never fires). The
+ * ≥2 rule means the autonomic pair (cardiac, hrvArousal) can carry a wake on their own,
+ * while still requiring corroboration (one voter alone never flips it). Else asleep if
+ * any voter had a known read; else unknown.
+ */
+function consensusPerMinute(labels: WakeLabel[][], n: number, minAwake = 2): WakeLabel[] {
   const out: WakeLabel[] = [];
   for (let i = 0; i < n; i++) {
-    let asleep = 0, awake = 0, known = 0;
+    let awake = 0, known = 0;
     for (const arr of labels) {
       const l = arr[i];
-      if (l === 'asleep') { asleep++; known++; }
-      else if (l === 'awake') { awake++; known++; }
+      if (l === 'awake') { awake++; known++; }
+      else if (l === 'asleep') known++;
     }
-    if (known === 0) out.push('unknown');
-    else if (asleep > awake) out.push('asleep');
-    else if (awake > asleep) out.push('awake');
-    else out.push('unknown');
+    out.push(awake >= minAwake ? 'awake' : known ? 'asleep' : 'unknown');
   }
   return out;
+}
+
+/**
+ * Merge per-minute label runs shorter than `minRun` minutes into their larger
+ * neighbour (repeated to a fixed point), so intermittent voter agreement reads as one
+ * stable bout instead of a sawtooth. The HRV voter flickers in/out, which fragments a
+ * real continuous wake into sub-threshold pieces; smoothing bridges them. Same
+ * technique the sleep stager uses on its hypnogram.
+ */
+function boutSmooth(labels: WakeLabel[], minRun = 10, passes = 4): WakeLabel[] {
+  const s = [...labels];
+  for (let p = 0; p < passes; p++) {
+    const runs: { a: number; b: number }[] = [];
+    for (let i = 0; i < s.length;) { let j = i; while (j < s.length && s[j] === s[i]) j++; runs.push({ a: i, b: j - 1 }); i = j; }
+    if (runs.length <= 1) break;
+    let changed = false;
+    for (let r = 0; r < runs.length; r++) {
+      const { a, b } = runs[r];
+      if (b - a + 1 >= minRun) continue;
+      const prev = r > 0 ? runs[r - 1] : null;
+      const next = r < runs.length - 1 ? runs[r + 1] : null;
+      let tgt: WakeLabel | null = null;
+      if (prev && next) tgt = (prev.b - prev.a) >= (next.b - next.a) ? s[prev.a] : s[next.a];
+      else if (prev) tgt = s[prev.a];
+      else if (next) tgt = s[next.a];
+      if (tgt) { for (let x = a; x <= b; x++) s[x] = tgt; changed = true; }
+    }
+    if (!changed) break;
+  }
+  return s;
 }
 
 /**
@@ -180,7 +254,8 @@ export function detectWakeState(
   if (n < SUSTAINED_WAKE_MIN) return empty;
 
   const perVoter = voters.map((v) => v.fn(ctx));
-  const labels = majorityPerMinute(perVoter, n);
+  // HR-led consensus (≥2 awake, ties→awake) then bout-smoothed into stable bouts.
+  const labels = boutSmooth(consensusPerMinute(perVoter, n));
 
   // votes at `now` (last minute) for transparency.
   const votes: Record<string, WakeLabel> = {};
