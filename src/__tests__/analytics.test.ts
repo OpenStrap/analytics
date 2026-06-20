@@ -23,6 +23,7 @@ import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hr
 import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
 import { calcCircadian, stageSleep } from '../circadian';
+import { detectSleepCycles } from '../cycles';
 import { detectWakeState, peekRecentState } from '../wake';
 
 const baseline: Baseline = {
@@ -723,6 +724,31 @@ console.log('--- regression: RR-driven REM staging ---');
   const noRr = night.map((m) => ({ ts: m.ts, hr_avg: m.hr_avg }));
   const fb = stageSleep(noRr, ONSET, WAKE, 90);
   assert((fb.light_min + fb.deep_min + fb.rem_min) > 0, 'HR-only fallback still stages');
+}
+
+// ── §Sleep cycles (fractal-cycle method on HRV) ───────────────────────────────
+console.log('--- §detectSleepCycles ---');
+{
+  // RMSSD oscillating with a ~80-min ultradian period over a 320-min night → the
+  // findpeaks(20min, 0.9z) detector should recover ~4 peaks ⇒ ~3 cycles near 80 min.
+  // RR is built so each minute's RMSSD ≈ target: alternate ±d ⇒ RMSSD ≈ 2d.
+  const rrFor = (rmssd: number): number[] => {
+    const d = Math.max(2, Math.round(rmssd / 2));
+    return Array.from({ length: 40 }, (_, j) => 900 + (j % 2 ? d : -d));
+  };
+  const mins: { ts: number; rr: number[] }[] = [];
+  for (let i = 0; i < 320; i++) {
+    const rmssd = 50 + 30 * Math.sin((2 * Math.PI * i) / 80); // ~80-min cycle
+    mins.push({ ts: i * 60, rr: rrFor(rmssd) });
+  }
+  const c = detectSleepCycles(mins, 0, 319 * 60);
+  assert(c.n >= 2 && c.n <= 6, `cycles: ~3-4 ultradian cycles found (got ${c.n})`);
+  assert(c.mean_duration_min != null && c.mean_duration_min >= 55 && c.mean_duration_min <= 110,
+    `cycles: mean duration near the ~80-min period (got ${c.mean_duration_min})`);
+  assert(c.series.length > 0, 'cycles: emits a z-series for plotting');
+  // No RR → abstain cleanly (no fabricated cycles).
+  const noRr = detectSleepCycles(Array.from({ length: 200 }, (_, i) => ({ ts: i * 60 })), 0, 199 * 60);
+  assert(noRr.n === 0 && noRr.cycles.length === 0, 'cycles: no RR → abstains');
 }
 
 // ── regression: resolveMaxHr doesn't promote a quiet within-day peak ──────────
