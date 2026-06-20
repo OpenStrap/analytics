@@ -85,6 +85,10 @@ export type {
 // §12 Stress — HRV-based (Baevsky Stress Index + LF/HF, personal-relative).
 export { calcStress } from './stress';
 
+// §SpO₂ — RELATIVE blood-oxygen index from the red/IR reflectance ratio.
+export { calcSpo2Index } from './spo2';
+export type { Spo2Value } from './spo2';
+
 // §Sleep stress / nocturnal arousal (HR surge + motion during sleep).
 export { calcSleepStress } from './arousal';
 

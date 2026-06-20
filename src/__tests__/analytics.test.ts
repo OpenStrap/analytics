@@ -15,6 +15,7 @@ import { calcLoad, calcFitnessTrend } from '../trends';
 import { calcAnomaly } from '../readiness';
 import { calcBaselines } from '../baselines';
 import { calcStress } from '../stress';
+import { calcSpo2Index } from '../spo2';
 import { calcSleepStress } from '../arousal';
 import { calcNocturnalHeart } from '../nocturnal';
 import { calcIllness } from '../illness';
@@ -532,6 +533,28 @@ console.log('--- §12 calcStress (HRV) ---');
   assert((hi.score ?? 0) >= (withBase.score ?? 0), 'higher SI vs baseline → higher stress');
   // determinism
   assert(JSON.stringify(calcStress(rr, baseSI)) === JSON.stringify(calcStress(rr, baseSI)), 'stress deterministic');
+}
+
+// ── §SpO₂ relative index (red/IR ratio) ───────────────────────────────────────
+console.log('--- §calcSpo2Index ---');
+{
+  // Too few minutes → null, conf 0.
+  assert(calcSpo2Index([0.85, 0.86, 0.85], 0.85).index === null, 'spo2: <30 min → null');
+  assert(calcSpo2Index([0.85, 0.86], 0.85).confidence === 0, 'spo2: too few → conf 0');
+  // No baseline yet → seed night_ratio, null index.
+  const stable = Array.from({ length: 200 }, () => 0.850);
+  const seed = calcSpo2Index(stable, null);
+  assert(seed.index === null, 'spo2: no baseline → null index');
+  approx(seed.night_ratio!, 0.85, 0.001, 'spo2: no baseline → seed night_ratio');
+  // Stable clean night vs baseline → high confidence; lower ratio than baseline → positive index.
+  const better = calcSpo2Index(Array.from({ length: 200 }, () => 0.840), 0.850);
+  assert(better.index !== null && better.index > 0, 'spo2: lower ratio than baseline → positive index');
+  assert(better.confidence > 0.8, 'spo2: stable + plenty of samples → high confidence');
+  // Noisy night (high intra-night CV) → low confidence even with a baseline.
+  const noisy = calcSpo2Index(Array.from({ length: 200 }, (_, i) => 0.85 + (i % 2 ? 0.08 : -0.08)), 0.850);
+  assert(noisy.confidence < 0.3, 'spo2: high intra-night CV → low confidence');
+  // Plausibility gate drops garbage ratios.
+  assert(calcSpo2Index(Array.from({ length: 200 }, () => 3.0), 0.85).index === null, 'spo2: implausible ratios → null');
 }
 
 // ── §sleep-stress / nocturnal arousal ─────────────────────────────────────────
