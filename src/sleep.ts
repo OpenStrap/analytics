@@ -5,9 +5,25 @@ import type {
   SleepPeriod, SleepPeriodsValue,
 } from './types';
 import { isHrUsable, mean, round } from './util';
+import { cleanRr } from './hrv';
 
 // Cole-Kripke weights over window [-4..+2].
 const CK_W = [1.06, 0.54, 0.58, 0.76, 2.3, 0.74, 0.67];
+
+/** Per-minute RMSSD (ms) from a raw RR stream; null if too few clean beats. */
+function minuteRmssd(rr: number[] | undefined): number | null {
+  if (!rr || rr.length < 12) return null;
+  const c = cleanRr(rr);
+  if (c.length < 10) return null;
+  let s = 0;
+  for (let i = 1; i < c.length; i++) { const d = c[i] - c[i - 1]; s += d * d; }
+  return Math.sqrt(s / (c.length - 1));
+}
+function medOfNullable(xs: (number | null)[]): number | null {
+  const a = xs.filter((x): x is number => x != null && Number.isFinite(x)).sort((p, q) => p - q);
+  return a.length ? a[a.length >> 1] : null;
+}
+const REM_RMSSD_FACTOR = 0.90; // high-HR minute with smoothed RMSSD < 0.90×asleep-median = REM, not wake
 
 /**
  * calcSleep(minutes, baseline)
@@ -341,6 +357,148 @@ export function calcSleepPeriods(minutes: Minute[], baseline: Baseline): Metric<
     confidence: periods[main_idx].confidence,
     tier: 'HIGH',
     inputs_used,
+  };
+}
+
+/**
+ * sleepAwakeMask(minutes, baseline, rrByMin?) → Map<ts, asleep:boolean> per minute.
+ * Cole-Kripke actigraphy + HR-dip — the authoritative asleep/awake boundary — PLUS an
+ * RR tiebreaker for the override's blind spot:
+ *
+ * The HR-dip rule "HR > 1.15·rhr ⇒ awake" is right for genuine wake but it ALSO catches
+ * REM (REM HR legitimately runs ~15% above the sleeping floor) — and on a calm wrist with
+ * a near-dead activity signal there's no movement to tell them apart, so REM gets called
+ * "awake". Fix: for those high-HR minutes, look at beat-to-beat RR. REM = parasympathetic
+ * withdrawal ⇒ LOW RMSSD; so a high-HR minute whose smoothed RMSSD is below 0.90× the
+ * night's asleep-RMSSD median is REM → stays ASLEEP, not awake. (rrByMin optional; without
+ * it the legacy HR-only override stands.)
+ *
+ * The day-detail uses this to drive the hypnogram + breakdown from one source. Empty map
+ * when there's no resting-HR baseline. calcSleep/calcSleepPeriods scorers stay untouched.
+ */
+export function sleepAwakeMask(
+  minutes: Minute[], baseline: Baseline, rrByMin?: Map<number, number[]>,
+): Map<number, boolean> {
+  const out = new Map<number, boolean>();
+  const rhr = baseline.resting_hr;
+  if (rhr == null || rhr <= 0) return out;
+  const sorted = [...minutes].sort((a, b) => a.ts - b.ts);
+  const n = sorted.length;
+
+  // Per-minute smoothed RMSSD + the asleep-RMSSD median → the REM cut for the tiebreaker.
+  let rms: (number | null)[] = [];
+  let remCut: number | null = null;
+  if (rrByMin && rrByMin.size) {
+    const raw = sorted.map((m) => minuteRmssd(rrByMin.get(m.ts)));
+    rms = raw.map((_, i) => medOfNullable(raw.slice(Math.max(0, i - 2), Math.min(n, i + 3))));
+    const asleepRms = sorted.map((m, i) => (m.hr_avg > 0 ? rms[i] : null));
+    const med = medOfNullable(asleepRms);
+    if (med != null) remCut = REM_RMSSD_FACTOR * med;
+  }
+
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let k = 0; k < CK_W.length; k++) {
+      const idx = i + (k - 4);
+      if (idx >= 0 && idx < n) s += CK_W[k] * sorted[idx].activity;
+    }
+    s *= 0.001;
+    const m = sorted[i];
+    if (!m.wrist_on) { out.set(m.ts, false); continue; } // off-wrist = not asleep (boundary)
+    let isAsleep = s < 1;
+    if (m.hr_avg > 0) {
+      if (m.hr_avg < 0.95 * rhr) isAsleep = true;
+      else if (m.hr_avg > 1.15 * rhr) {
+        // RR tiebreaker: high HR + low RMSSD = REM (asleep); else genuine wake.
+        const remLike = remCut != null && rms[i] != null && rms[i]! < remCut;
+        isAsleep = remLike;
+      }
+    }
+    out.set(m.ts, isAsleep);
+  }
+  return out;
+}
+
+/** Merge per-minute stage runs shorter than the floor into the larger neighbour
+ *  (awake keeps a higher floor) — consolidates the per-minute classifier's flicker
+ *  into stable bouts so the hypnogram doesn't sawtooth. */
+function boutSmoothStage(labels: string[], minRun = 5, minAwakeRun = 7, passes = 6): string[] {
+  const s = [...labels];
+  for (let p = 0; p < passes; p++) {
+    const runs: { a: number; b: number }[] = [];
+    for (let i = 0; i < s.length;) { let j = i; while (j < s.length && s[j] === s[i]) j++; runs.push({ a: i, b: j - 1 }); i = j; }
+    if (runs.length <= 1) break;
+    let changed = false;
+    for (let r = 0; r < runs.length; r++) {
+      const { a, b } = runs[r];
+      const floor = s[a] === 'awake' ? minAwakeRun : minRun;
+      if (b - a + 1 >= floor) continue;
+      const prev = r > 0 ? runs[r - 1] : null;
+      const next = r < runs.length - 1 ? runs[r + 1] : null;
+      let tgt: string | null = null;
+      if (prev && next) tgt = (prev.b - prev.a) >= (next.b - next.a) ? s[prev.a] : s[next.a];
+      else if (prev) tgt = s[prev.a];
+      else if (next) tgt = s[next.a];
+      if (tgt) { for (let x = a; x <= b; x++) s[x] = tgt; changed = true; }
+    }
+    if (!changed) break;
+  }
+  return s;
+}
+
+export interface NightHypnogram {
+  hypnogram: { t: number; stage: 'awake' | 'light' | 'deep' | 'rem' }[];
+  light_min: number; deep_min: number; rem_min: number; awake_min: number; asleep_min: number;
+}
+
+/**
+ * stageHypnogram(minutes, onset, wake, baseline) — the v1 staging method, made
+ * per-minute and consistent. ONE source for the whole hypnogram + breakdown:
+ *   • asleep/awake from calcSleep's Cole-Kripke + HR-dip mask (the proven detector),
+ *   • deep/light/rem within the asleep minutes from the SAME HR-percentile bands as
+ *     estimateStages (deep = bottom ~22% of sleeping HR, REM = top ~21%, else light),
+ *   • bout-smoothed so it reads as stable bouts, not minute flicker.
+ * No RR, no circadian, no second stager — exactly what worked in v1, now driving both
+ * the graph and the totals (so they can never disagree). null if no resting-HR baseline.
+ */
+export function stageHypnogram(
+  minutes: Minute[], onset: number, wake: number, baseline: Baseline, rrByMin?: Map<number, number[]>,
+): NightHypnogram | null {
+  const rhr = baseline.resting_hr;
+  if (rhr == null || rhr <= 0) return null;
+  const mask = sleepAwakeMask(minutes, baseline, rrByMin); // ts → asleep (REM tiebreaker via RR)
+  const win = minutes.filter((m) => m.ts >= onset && m.ts <= wake).sort((a, b) => a.ts - b.ts);
+  if (win.length < 5) return null;
+
+  // HR-percentile bands over the night's OWN sleeping HR (same as estimateStages).
+  const sleepHr = win.filter((m) => mask.get(m.ts) !== false && m.hr_avg > 0).map((m) => m.hr_avg);
+  const hrs = sleepHr.length ? sleepHr : win.filter((m) => m.hr_avg > 0).map((m) => m.hr_avg);
+  const sortedHr = [...hrs].sort((a, b) => a - b);
+  const meanHr = hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : rhr;
+  const q = (p: number): number => sortedHr.length ? sortedHr[Math.min(sortedHr.length - 1, Math.floor(p * sortedHr.length))] : meanHr;
+  const deepEdge = q(0.22), remEdge = q(0.79);
+  const bigJump = Math.max(6, (hrs.length ? Math.max(1, q(0.9) - q(0.1)) : 1) * 0.6);
+  const acts = win.map((m) => m.activity);
+  const meanAct = acts.reduce((a, b) => a + b, 0) / (acts.length || 1);
+
+  const raw: string[] = win.map((m, i) => {
+    if (mask.get(m.ts) === false || m.hr_avg <= 0) return 'awake';
+    const hr = m.hr_avg;
+    const prev = i > 0 && win[i - 1].hr_avg > 0 ? win[i - 1].hr_avg : hr;
+    const next = i + 1 < win.length && win[i + 1].hr_avg > 0 ? win[i + 1].hr_avg : hr;
+    const hrJump = Math.max(Math.abs(hr - prev), Math.abs(hr - next));
+    const lowAct = m.activity <= meanAct;
+    if (lowAct && hr <= deepEdge) return 'deep';
+    if (lowAct && hr >= remEdge) return 'rem';
+    if (lowAct && hrJump > bigJump) return 'rem';
+    return 'light';
+  });
+  const sm = boutSmoothStage(raw);
+  let light = 0, deep = 0, rem = 0, awake = 0;
+  for (const s of sm) { if (s === 'awake') awake++; else if (s === 'deep') deep++; else if (s === 'rem') rem++; else light++; }
+  return {
+    hypnogram: win.map((m, i) => ({ t: m.ts, stage: sm[i] as 'awake' | 'light' | 'deep' | 'rem' })),
+    light_min: light, deep_min: deep, rem_min: rem, awake_min: awake, asleep_min: light + deep + rem,
   };
 }
 

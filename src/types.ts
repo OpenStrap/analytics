@@ -292,6 +292,20 @@ export interface BaselinesValue {
   days_used: number;
 }
 
+// CircaCP circadian rhythm + main-sleep boundary (see circadian.ts). Cosinor
+// phase is timezone-free (the physiological day anchor); onset/wake are the
+// main-sleep boundary of the most-recent completed cycle.
+export interface CircadianValue {
+  mesor: number | null;         // bpm, rhythm-adjusted mean HR
+  amplitude: number | null;     // bpm, cosinor amplitude (half peak-to-trough)
+  acrophase_ts: number | null;  // unix s, HR peak (active-phase center) near window end
+  bathyphase_ts: number | null; // unix s, HR trough (rest-phase center) of the detected cycle
+  onset_ts: number | null;      // main-sleep onset (HR drop), or null
+  wake_ts: number | null;       // main-sleep wake (HR rise), or null
+  in_bed_min: number;           // wake − onset, minutes
+  settled: boolean;             // wake older than the settle window → night complete
+}
+
 // ── history shapes for trend/baseline fns ───────────────────────────────────
 
 /** One night's sleep summary (for SRI). */

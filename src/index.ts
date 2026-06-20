@@ -24,6 +24,18 @@ export { calcCalories } from './calories';
 export { calcSleep } from './sleep';
 // §5b Sleep v2 — multi-period (naps = shorter sleeps). Additive; calcSleep unchanged.
 export { calcSleepPeriods } from './sleep';
+// Per-minute asleep/awake mask (calcSleep's boundary) — reconciles the hypnogram's awake.
+export { sleepAwakeMask } from './sleep';
+// v1-method per-minute hypnogram (Cole-Kripke + HR-percentile bands) — single source.
+export { stageHypnogram } from './sleep';
+export type { NightHypnogram } from './sleep';
+// §Sleep cycles — ultradian NREM↔REM cycles (Rosenblum 2024 fractal-cycle method, HRV-adapted).
+export { detectSleepCycles } from './cycles';
+export type { SleepCycle, SleepCyclesValue } from './cycles';
+
+// §Menstrual cycle — log-anchored calendar method + fertile window (Wilcox 2000).
+export { calcCycle } from './cycle';
+export type { CycleValue, CyclePhase } from './cycle';
 
 // §6 Sleep regularity (SRI)
 export { calcSleepRegularity } from './regularity';
@@ -51,6 +63,15 @@ export { calcVo2Max, calcFitnessModel, calcMonotony } from './fitness';
 // §Steps — AN-2554 wrist pedometer (pure math; backend re-decodes the IMU + runs it)
 export { calcSteps, pedometer, STEP_PARAMS } from './steps';
 
+// §Circadian — CircaCP cosinor + bounded change-point (physiological-day anchor)
+export { calcCircadian, stageSleep } from './circadian';
+export type { CircadianOpts, SleepStaging } from './circadian';
+
+// §Sleep/wake ENSEMBLE — pluggable voters (Cole-Kripke + cardiac/CPD + van Hees);
+// drives the demand-driven day-close trigger. detectWakeState + cheap peekRecentState.
+export { detectWakeState, peekRecentState, coleKripke, cardiac, inactivity, DEFAULT_VOTERS } from './wake';
+export type { WakeContext, WakeState, WakeLabel, Voter } from './wake';
+
 // §Composite Readiness — weighted HRV + sleep blend (abstains without HRV)
 export { calcReadinessIndex } from './readiness_index';
 export type { ReadinessInputs } from './readiness_index';
@@ -75,6 +96,10 @@ export type {
 
 // §12 Stress — HRV-based (Baevsky Stress Index + LF/HF, personal-relative).
 export { calcStress } from './stress';
+
+// §SpO₂ — RELATIVE blood-oxygen index from the red/IR reflectance ratio.
+export { calcSpo2Index } from './spo2';
+export type { Spo2Value } from './spo2';
 
 // §Sleep stress / nocturnal arousal (HR surge + motion during sleep).
 export { calcSleepStress } from './arousal';

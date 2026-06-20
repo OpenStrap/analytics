@@ -15,12 +15,17 @@ import { calcLoad, calcFitnessTrend } from '../trends';
 import { calcAnomaly } from '../readiness';
 import { calcBaselines } from '../baselines';
 import { calcStress } from '../stress';
+import { calcSpo2Index } from '../spo2';
 import { calcSleepStress } from '../arousal';
 import { calcNocturnalHeart } from '../nocturnal';
 import { calcIllness } from '../illness';
 import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hrv';
 import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
+import { calcCircadian, stageSleep } from '../circadian';
+import { detectSleepCycles } from '../cycles';
+import { detectWakeState, peekRecentState } from '../wake';
+import { calcCycle } from '../cycle';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -532,6 +537,28 @@ console.log('--- §12 calcStress (HRV) ---');
   assert(JSON.stringify(calcStress(rr, baseSI)) === JSON.stringify(calcStress(rr, baseSI)), 'stress deterministic');
 }
 
+// ── §SpO₂ relative index (red/IR ratio) ───────────────────────────────────────
+console.log('--- §calcSpo2Index ---');
+{
+  // Too few minutes → null, conf 0.
+  assert(calcSpo2Index([0.85, 0.86, 0.85], 0.85).index === null, 'spo2: <30 min → null');
+  assert(calcSpo2Index([0.85, 0.86], 0.85).confidence === 0, 'spo2: too few → conf 0');
+  // No baseline yet → seed night_ratio, null index.
+  const stable = Array.from({ length: 200 }, () => 0.850);
+  const seed = calcSpo2Index(stable, null);
+  assert(seed.index === null, 'spo2: no baseline → null index');
+  approx(seed.night_ratio!, 0.85, 0.001, 'spo2: no baseline → seed night_ratio');
+  // Stable clean night vs baseline → high confidence; lower ratio than baseline → positive index.
+  const better = calcSpo2Index(Array.from({ length: 200 }, () => 0.840), 0.850);
+  assert(better.index !== null && better.index > 0, 'spo2: lower ratio than baseline → positive index');
+  assert(better.confidence > 0.8, 'spo2: stable + plenty of samples → high confidence');
+  // Noisy night (high intra-night CV) → low confidence even with a baseline.
+  const noisy = calcSpo2Index(Array.from({ length: 200 }, (_, i) => 0.85 + (i % 2 ? 0.08 : -0.08)), 0.850);
+  assert(noisy.confidence < 0.3, 'spo2: high intra-night CV → low confidence');
+  // Plausibility gate drops garbage ratios.
+  assert(calcSpo2Index(Array.from({ length: 200 }, () => 3.0), 0.85).index === null, 'spo2: implausible ratios → null');
+}
+
 // ── §sleep-stress / nocturnal arousal ─────────────────────────────────────────
 console.log('--- §calcSleepStress ---');
 {
@@ -650,6 +677,81 @@ console.log('--- regression: sleep stage proportions ---');
   assert(st.light_min >= st.rem_min, `light ≥ REM (light ${st.light_min} vs REM ${st.rem_min})`);
 }
 
+// ── regression: stageSleep detects REM from RR variability on a flat-HR night ──
+console.log('--- regression: RR-driven REM staging ---');
+{
+  // A calm night where HR is nearly flat (≈60 bpm) so HR LEVEL alone CANNOT separate
+  // REM from light (the real bug: REM read 0%). REM is encoded the physiological way —
+  // parasympathetic withdrawal → REDUCED beat-to-beat variability (low RMSSD), with HR
+  // only mildly above light. Deep = high RMSSD + lowest HR. stageSleep must use the RR
+  // autonomic axis to recover a physiological REM share (15–25%), not 0.
+  const ONSET = 0, WAKE = 280 * 60;
+  // Build a minute's RR stream with a target RMSSD: alternate ±d around the mean RR so
+  // successive |Δ| ≈ 2d ⇒ RMSSD ≈ 2d (kept < 200 ms so cleanRr doesn't drop beats).
+  const rrFor = (hr: number, rmssdTarget: number): number[] => {
+    const meanRr = Math.round(60000 / hr);
+    const d = Math.min(95, Math.round(rmssdTarget / 2));
+    const out: number[] = [];
+    for (let j = 0; j < 48; j++) out.push(meanRr + (j % 2 === 0 ? d : -d));
+    return out;
+  };
+  type SM = { ts: number; hr_avg: number; rr?: number[] };
+  const night: SM[] = [];
+  const push = (a: number, b: number, hr: number, rmssd: number) => {
+    for (let i = a; i < b; i++) night.push({ ts: i * 60, hr_avg: hr, rr: rrFor(hr, rmssd) });
+  };
+  push(0, 30, 60, 50);     // light  (medium variability)
+  push(30, 95, 56, 90);    // deep   (high RMSSD, lowest HR)
+  push(95, 150, 60, 50);   // light
+  push(150, 215, 64, 16);  // REM    (low RMSSD, mildly elevated HR)
+  push(215, 280, 60, 50);  // light
+  const ss = stageSleep(night, ONSET, WAKE, /*mesor*/ 90);
+  const tot = ss.light_min + ss.deep_min + ss.rem_min;
+  assert(tot > 0, 'RR-staged night produced stages');
+  const remPct = (100 * ss.rem_min) / tot, deepPct = (100 * ss.deep_min) / tot;
+  assert(remPct >= 12 && remPct <= 35, `REM recovered from RR, physiological share (got ${remPct.toFixed(0)}%)`);
+  assert(deepPct >= 8, `deep detected from high-RMSSD block (got ${deepPct.toFixed(0)}%)`);
+  assert(ss.light_min >= ss.rem_min, 'light remains dominant');
+  // 0 short(<20 min) awake flaps in the hypnogram.
+  let flaps = 0;
+  for (let i = 0; i < ss.hypnogram.length;) {
+    let j = i; while (j < ss.hypnogram.length && ss.hypnogram[j].stage === ss.hypnogram[i].stage) j++;
+    if (ss.hypnogram[i].stage === 'awake' && (j - i) < 20) flaps++;
+    i = j;
+  }
+  assert(flaps === 0, `no short awake flaps (got ${flaps})`);
+  // Without RR, the SAME flat-HR night cannot resolve REM → graceful HR-only fallback
+  // (must not throw, must not fabricate a REM-dominated night).
+  const noRr = night.map((m) => ({ ts: m.ts, hr_avg: m.hr_avg }));
+  const fb = stageSleep(noRr, ONSET, WAKE, 90);
+  assert((fb.light_min + fb.deep_min + fb.rem_min) > 0, 'HR-only fallback still stages');
+}
+
+// ── §Sleep cycles (fractal-cycle method on HRV) ───────────────────────────────
+console.log('--- §detectSleepCycles ---');
+{
+  // RMSSD oscillating with a ~80-min ultradian period over a 320-min night → the
+  // findpeaks(20min, 0.9z) detector should recover ~4 peaks ⇒ ~3 cycles near 80 min.
+  // RR is built so each minute's RMSSD ≈ target: alternate ±d ⇒ RMSSD ≈ 2d.
+  const rrFor = (rmssd: number): number[] => {
+    const d = Math.max(2, Math.round(rmssd / 2));
+    return Array.from({ length: 40 }, (_, j) => 900 + (j % 2 ? d : -d));
+  };
+  const mins: { ts: number; rr: number[] }[] = [];
+  for (let i = 0; i < 320; i++) {
+    const rmssd = 50 + 30 * Math.sin((2 * Math.PI * i) / 80); // ~80-min cycle
+    mins.push({ ts: i * 60, rr: rrFor(rmssd) });
+  }
+  const c = detectSleepCycles(mins, 0, 319 * 60);
+  assert(c.n >= 2 && c.n <= 6, `cycles: ~3-4 ultradian cycles found (got ${c.n})`);
+  assert(c.mean_duration_min != null && c.mean_duration_min >= 55 && c.mean_duration_min <= 110,
+    `cycles: mean duration near the ~80-min period (got ${c.mean_duration_min})`);
+  assert(c.series.length > 0, 'cycles: emits a z-series for plotting');
+  // No RR → abstain cleanly (no fabricated cycles).
+  const noRr = detectSleepCycles(Array.from({ length: 200 }, (_, i) => ({ ts: i * 60 })), 0, 199 * 60);
+  assert(noRr.n === 0 && noRr.cycles.length === 0, 'cycles: no RR → abstains');
+}
+
 // ── regression: resolveMaxHr doesn't promote a quiet within-day peak ──────────
 console.log('--- regression: resolveMaxHr source ---');
 {
@@ -691,6 +793,126 @@ console.log('--- §Steps pedometer ---');
   approx(calcSteps([walk]), Math.round(raw * STEP_PARAMS.GAIN), 0.001,
     'calcSteps applies the ×GAIN calibration to the summed raw count');
   assert(STEP_PARAMS.GAIN === 1.11, 'locked calibration gain = 1.11');
+}
+
+// ── §Circadian — CircaCP cosinor + bounded change-point ──────────────────────
+console.log('--- §Circadian calcCircadian ---');
+{
+  // 2 days of 1-min HR: asleep (hr≈55) hours [1,8), awake (hr≈80) otherwise.
+  // Onset ≈ 01:00, wake ≈ 08:00 each day; sharp transitions.
+  const mins: Minute[] = [];
+  for (let i = 0; i < 2 * 1440; i++) {
+    const ts = i * 60;
+    const hod = Math.floor(ts / 3600) % 24;
+    const asleep = hod >= 1 && hod < 8;
+    const hr = (asleep ? 55 : 80) + (i % 5) - 2; // tiny deterministic jitter
+    mins.push(min(ts, hr));
+  }
+  const c = calcCircadian(mins);
+  assert(c.amplitude !== null && c.amplitude > 5, `circadian amplitude detected (got ${c.amplitude})`);
+  // day-2 onset ≈ 90000s (25:00 → 01:00 day 2), wake ≈ 115200s (32:00 → 08:00 day 2)
+  assert(c.onset_ts !== null && Math.abs(c.onset_ts - 90000) <= 1800, `onset ≈ 01:00 day2 (got ${c.onset_ts})`);
+  assert(c.wake_ts !== null && Math.abs(c.wake_ts - 115200) <= 1800, `wake ≈ 08:00 day2 (got ${c.wake_ts})`);
+  assert(c.settled === true, 'completed night marked settled');
+  assert(c.confidence > 0.5, `confidence high on clean rhythm (got ${c.confidence})`);
+
+  // flat HR (no rhythm) → abstain
+  const flat: Minute[] = [];
+  for (let i = 0; i < 2 * 1440; i++) flat.push(min(i * 60, 70));
+  const cf = calcCircadian(flat);
+  assert(cf.onset_ts === null && cf.confidence < 0.3, 'flat HR → abstains (no fabricated boundary)');
+}
+
+// ── detectWakeState (sleep/wake ensemble) ─────────────────────────────────────
+{
+  const bl: Baseline = { resting_hr: 50, max_hr: 190, sleep_need_min: 480 };
+  // 8h sleep (low HR, still) then N min awake (elevated HR, moving + steps).
+  const build = (awakeMin: number): Minute[] => {
+    const out: Minute[] = [];
+    let t = 0;
+    for (let i = 0; i < 480; i++, t += 60) out.push(min(t, 50, 0.01, { wrist_on: true }));
+    for (let i = 0; i < awakeMin; i++, t += 60) out.push(min(t, 72, 0.4, { steps: 20, wrist_on: true }));
+    return out;
+  };
+
+  const woke = detectWakeState({ minutes: build(15), baseline: bl });
+  assert(woke.state === 'awake', `ensemble: state awake after waking (got ${woke.state})`);
+  assert(woke.wake_ts != null && Math.abs(woke.wake_ts - 480 * 60) <= 180, `ensemble: wake_ts ≈ sleep→wake boundary ±3min (got ${woke.wake_ts})`);
+  assert(woke.awake_min >= 12 && woke.awake_min <= 19, `ensemble: sustained awake ~15 min ±detector fuzz (got ${woke.awake_min})`);
+  assert(woke.asleep_min >= 90, `ensemble: main sleep ≥90 min (got ${woke.asleep_min})`);
+
+  const tooSoon = detectWakeState({ minutes: build(5), baseline: bl });
+  assert(tooSoon.wake_ts === null, 'ensemble: <10 min awake → no premature wake fire');
+
+  const stillAsleep = detectWakeState({ minutes: build(0), baseline: bl });
+  assert(stillAsleep.state === 'asleep' && stillAsleep.wake_ts === null, 'ensemble: mid-sleep → asleep, no wake_ts');
+
+  const movingTail = [min(0, 72, 0.4, { steps: 20, wrist_on: true }), min(60, 73, 0.5, { steps: 25, wrist_on: true }), min(120, 71, 0.3, { steps: 10, wrist_on: true })];
+  assert(peekRecentState(movingTail, bl) === 'awake', 'peek: moving + HR up → awake');
+}
+
+// ── regression: QUIET sedentary wake (HR up, NO motion, RR present) must fire ──
+// The real-world bug: a user awake but still (on the phone in bed) has elevated HR
+// and RR but ~zero motion. The OLD flat 2-of-3 majority let the two motion voters
+// (blind to quiet wake) outvote cardiac → "asleep" → close never fired → no recovery.
+// The ≥2 consensus must let the autonomic pair (cardiac + hrvArousal) carry the wake.
+{
+  const bl: Baseline = { resting_hr: 55, max_hr: 190, sleep_need_min: 480 };
+  const minutes: Minute[] = [];
+  const rrByMin = new Map<number, number[]>();
+  let t = 0;
+  const rr = (meanMs: number, sd: number, n = 40) => Array.from({ length: n }, (_, j) => meanMs + (j % 2 ? sd : -sd));
+  for (let i = 0; i < 480; i++, t += 60) { minutes.push(min(t, 52, 0.01, { wrist_on: true })); rrByMin.set(t, rr(1150, 12)); } // sleep: low HR, still, low RR-SD
+  for (let i = 0; i < 30; i++, t += 60) { minutes.push(min(t, 74, 0.01, { wrist_on: true })); rrByMin.set(t, rr(810, 60)); }   // QUIET wake: HR up, NO motion, high RR-SD
+
+  const ws = detectWakeState({ minutes, baseline: bl, rrByMin });
+  assert(ws.state === 'awake', `quiet sedentary wake detected without motion (got ${ws.state})`);
+  assert(ws.wake_ts != null && Math.abs(ws.wake_ts - 480 * 60) <= 180, `quiet wake_ts at the boundary (got ${ws.wake_ts})`);
+  assert(ws.asleep_min >= 90, `main sleep preserved (got ${ws.asleep_min})`);
+  assert(ws.votes.cardiac === 'awake' && ws.votes.hrvArousal === 'awake', 'autonomic pair both vote awake at wake');
+
+  // Honest degradation: same still-but-awake tail with NO RR → only 1 signal (cardiac)
+  // → below the ≥2 bar → stays asleep rather than guess.
+  const noRr = detectWakeState({ minutes, baseline: bl });
+  assert(noRr.wake_ts === null, `no-RR + no-motion quiet wake cannot be confirmed (honest) (got ${noRr.wake_ts})`);
+}
+
+// ── menstrual cycle (log-anchored calendar method) ───────────────────────────
+{
+  // No logs → empty/abstain.
+  const none = calcCycle([], '2026-06-20');
+  assert(none.confidence === 0 && none.phase === 'unknown' && none.predicted_next === null,
+    'cycle: no logs → abstain');
+
+  // Three regular 28-day starts → median 28, prediction = last + 28.
+  const starts = ['2026-04-04', '2026-05-02', '2026-05-30'];
+  const c = calcCycle(starts, '2026-06-06'); // day 8 of the cycle that began 05-30
+  assert(c.mean_length === 28, `cycle: median length 28 (got ${c.mean_length})`);
+  assert(c.length_history.length === 2, `cycle: 2 observed lengths (got ${c.length_history.length})`);
+  assert(c.cycle_day === 8, `cycle: cycle day 8 (got ${c.cycle_day})`);
+  assert(c.predicted_next === '2026-06-27', `cycle: next period 06-27 (got ${c.predicted_next})`);
+  assert(c.ovulation_est === '2026-06-13', `cycle: ovulation = next−14 (got ${c.ovulation_est})`);
+  assert(c.fertile_start === '2026-06-08' && c.fertile_end === '2026-06-14',
+    `cycle: fertile window ov−5..ov+1 (got ${c.fertile_start}..${c.fertile_end})`);
+  assert(c.phase === 'follicular', `cycle: day 8 pre-ovulation → follicular (got ${c.phase})`);
+  assert(c.confidence > 0.5, `cycle: confidence grows with cycles (got ${c.confidence})`);
+
+  // Menstruation window (day ≤ 5).
+  const m = calcCycle(starts, '2026-05-31'); // day 2
+  assert(m.phase === 'menstruation', `cycle: day 2 → menstruation (got ${m.phase})`);
+
+  // Luteal: after the fertile window, before next period.
+  const l = calcCycle(starts, '2026-06-20'); // day 22
+  assert(l.phase === 'luteal', `cycle: day 22 → luteal (got ${l.phase})`);
+
+  // Very overdue → prediction unreliable, abstain on phase + low confidence.
+  const od = calcCycle(starts, '2026-07-25'); // ~56 days since last start
+  assert(od.phase === 'unknown' && od.confidence <= 0.2, `cycle: very overdue → unknown/low conf (got ${od.phase}/${od.confidence})`);
+
+  // Single log → 28-day default, low-but-nonzero confidence.
+  const one = calcCycle(['2026-06-10'], '2026-06-15');
+  assert(one.mean_length === null && one.predicted_next === '2026-07-08' && one.confidence > 0,
+    `cycle: single log uses 28d default (got ${one.predicted_next}/${one.confidence})`);
 }
 
 summary('analytics');
