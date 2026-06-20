@@ -21,7 +21,7 @@ import { calcIllness } from '../illness';
 import { timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr } from '../hrv';
 import { pedometer, calcSteps, STEP_PARAMS } from '../steps';
 import { resolveMaxHr } from '../util';
-import { calcCircadian } from '../circadian';
+import { calcCircadian, stageSleep } from '../circadian';
 import { detectWakeState, peekRecentState } from '../wake';
 
 const baseline: Baseline = {
@@ -650,6 +650,56 @@ console.log('--- regression: sleep stage proportions ---');
   assert(st.rem_min / tot < 0.40, `REM is a minority, not dominant (got ${(100*st.rem_min/tot).toFixed(0)}%)`);
   assert(st.deep_min / tot > 0.05, `some deep sleep detected (got ${(100*st.deep_min/tot).toFixed(0)}%)`);
   assert(st.light_min >= st.rem_min, `light ≥ REM (light ${st.light_min} vs REM ${st.rem_min})`);
+}
+
+// ── regression: stageSleep detects REM from RR variability on a flat-HR night ──
+console.log('--- regression: RR-driven REM staging ---');
+{
+  // A calm night where HR is nearly flat (≈60 bpm) so HR LEVEL alone CANNOT separate
+  // REM from light (the real bug: REM read 0%). REM is encoded the physiological way —
+  // parasympathetic withdrawal → REDUCED beat-to-beat variability (low RMSSD), with HR
+  // only mildly above light. Deep = high RMSSD + lowest HR. stageSleep must use the RR
+  // autonomic axis to recover a physiological REM share (15–25%), not 0.
+  const ONSET = 0, WAKE = 280 * 60;
+  // Build a minute's RR stream with a target RMSSD: alternate ±d around the mean RR so
+  // successive |Δ| ≈ 2d ⇒ RMSSD ≈ 2d (kept < 200 ms so cleanRr doesn't drop beats).
+  const rrFor = (hr: number, rmssdTarget: number): number[] => {
+    const meanRr = Math.round(60000 / hr);
+    const d = Math.min(95, Math.round(rmssdTarget / 2));
+    const out: number[] = [];
+    for (let j = 0; j < 48; j++) out.push(meanRr + (j % 2 === 0 ? d : -d));
+    return out;
+  };
+  type SM = { ts: number; hr_avg: number; rr?: number[] };
+  const night: SM[] = [];
+  const push = (a: number, b: number, hr: number, rmssd: number) => {
+    for (let i = a; i < b; i++) night.push({ ts: i * 60, hr_avg: hr, rr: rrFor(hr, rmssd) });
+  };
+  push(0, 30, 60, 50);     // light  (medium variability)
+  push(30, 95, 56, 90);    // deep   (high RMSSD, lowest HR)
+  push(95, 150, 60, 50);   // light
+  push(150, 215, 64, 16);  // REM    (low RMSSD, mildly elevated HR)
+  push(215, 280, 60, 50);  // light
+  const ss = stageSleep(night, ONSET, WAKE, /*mesor*/ 90);
+  const tot = ss.light_min + ss.deep_min + ss.rem_min;
+  assert(tot > 0, 'RR-staged night produced stages');
+  const remPct = (100 * ss.rem_min) / tot, deepPct = (100 * ss.deep_min) / tot;
+  assert(remPct >= 12 && remPct <= 35, `REM recovered from RR, physiological share (got ${remPct.toFixed(0)}%)`);
+  assert(deepPct >= 8, `deep detected from high-RMSSD block (got ${deepPct.toFixed(0)}%)`);
+  assert(ss.light_min >= ss.rem_min, 'light remains dominant');
+  // 0 short(<20 min) awake flaps in the hypnogram.
+  let flaps = 0;
+  for (let i = 0; i < ss.hypnogram.length;) {
+    let j = i; while (j < ss.hypnogram.length && ss.hypnogram[j].stage === ss.hypnogram[i].stage) j++;
+    if (ss.hypnogram[i].stage === 'awake' && (j - i) < 20) flaps++;
+    i = j;
+  }
+  assert(flaps === 0, `no short awake flaps (got ${flaps})`);
+  // Without RR, the SAME flat-HR night cannot resolve REM → graceful HR-only fallback
+  // (must not throw, must not fabricate a REM-dominated night).
+  const noRr = night.map((m) => ({ ts: m.ts, hr_avg: m.hr_avg }));
+  const fb = stageSleep(noRr, ONSET, WAKE, 90);
+  assert((fb.light_min + fb.deep_min + fb.rem_min) > 0, 'HR-only fallback still stages');
 }
 
 // ── regression: resolveMaxHr doesn't promote a quiet within-day peak ──────────
