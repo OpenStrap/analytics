@@ -25,6 +25,7 @@ import { resolveMaxHr } from '../util';
 import { calcCircadian, stageSleep } from '../circadian';
 import { detectSleepCycles } from '../cycles';
 import { detectWakeState, peekRecentState } from '../wake';
+import { calcCycle } from '../cycle';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -874,6 +875,44 @@ console.log('--- §Circadian calcCircadian ---');
   // → below the ≥2 bar → stays asleep rather than guess.
   const noRr = detectWakeState({ minutes, baseline: bl });
   assert(noRr.wake_ts === null, `no-RR + no-motion quiet wake cannot be confirmed (honest) (got ${noRr.wake_ts})`);
+}
+
+// ── menstrual cycle (log-anchored calendar method) ───────────────────────────
+{
+  // No logs → empty/abstain.
+  const none = calcCycle([], '2026-06-20');
+  assert(none.confidence === 0 && none.phase === 'unknown' && none.predicted_next === null,
+    'cycle: no logs → abstain');
+
+  // Three regular 28-day starts → median 28, prediction = last + 28.
+  const starts = ['2026-04-04', '2026-05-02', '2026-05-30'];
+  const c = calcCycle(starts, '2026-06-06'); // day 8 of the cycle that began 05-30
+  assert(c.mean_length === 28, `cycle: median length 28 (got ${c.mean_length})`);
+  assert(c.length_history.length === 2, `cycle: 2 observed lengths (got ${c.length_history.length})`);
+  assert(c.cycle_day === 8, `cycle: cycle day 8 (got ${c.cycle_day})`);
+  assert(c.predicted_next === '2026-06-27', `cycle: next period 06-27 (got ${c.predicted_next})`);
+  assert(c.ovulation_est === '2026-06-13', `cycle: ovulation = next−14 (got ${c.ovulation_est})`);
+  assert(c.fertile_start === '2026-06-08' && c.fertile_end === '2026-06-14',
+    `cycle: fertile window ov−5..ov+1 (got ${c.fertile_start}..${c.fertile_end})`);
+  assert(c.phase === 'follicular', `cycle: day 8 pre-ovulation → follicular (got ${c.phase})`);
+  assert(c.confidence > 0.5, `cycle: confidence grows with cycles (got ${c.confidence})`);
+
+  // Menstruation window (day ≤ 5).
+  const m = calcCycle(starts, '2026-05-31'); // day 2
+  assert(m.phase === 'menstruation', `cycle: day 2 → menstruation (got ${m.phase})`);
+
+  // Luteal: after the fertile window, before next period.
+  const l = calcCycle(starts, '2026-06-20'); // day 22
+  assert(l.phase === 'luteal', `cycle: day 22 → luteal (got ${l.phase})`);
+
+  // Very overdue → prediction unreliable, abstain on phase + low confidence.
+  const od = calcCycle(starts, '2026-07-25'); // ~56 days since last start
+  assert(od.phase === 'unknown' && od.confidence <= 0.2, `cycle: very overdue → unknown/low conf (got ${od.phase}/${od.confidence})`);
+
+  // Single log → 28-day default, low-but-nonzero confidence.
+  const one = calcCycle(['2026-06-10'], '2026-06-15');
+  assert(one.mean_length === null && one.predicted_next === '2026-07-08' && one.confidence > 0,
+    `cycle: single log uses 28d default (got ${one.predicted_next}/${one.confidence})`);
 }
 
 summary('analytics');
