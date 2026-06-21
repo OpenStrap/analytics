@@ -63,3 +63,58 @@ export function calcSpo2Index(ratios: number[], baselineRatio: number | null): M
   ];
   return { index, night_ratio: nightR, confidence: conf, tier: 'RELATIVE', inputs_used, drivers };
 }
+
+export interface DesaturationValue {
+  /** count of relative-desaturation dips overnight (R rising ≥ DESAT_REL above baseline) */
+  events: number;
+  /** desaturation index: events per hour of usable signal (apnea-screening ODI analogue) */
+  odi: number | null;
+  /** deepest relative dip seen, in % of baseline ratio */
+  deepest_pct: number | null;
+  note: string;
+}
+
+const DESAT_REL = 0.04;   // R rising ≥4% above baseline ≈ a relative desaturation dip
+const DESAT_MINUTES = 1;  // a dip must persist ≥1 min to count (collapse consecutive)
+
+/**
+ * calcDesaturation(ratios, baselineRatio) — nocturnal RELATIVE desaturation screen.
+ *
+ * A higher red/IR ratio than baseline = relatively LESS oxygenated. We count clustered
+ * dips where R rises ≥ DESAT_REL above the personal baseline and report an ODI-style
+ * events/hour. RELATIVE + SCREENING ONLY — no absolute %SpO₂, no diagnosis (we lack
+ * factory calibration and 1 Hz can't resolve true ratio-of-ratios). Confidence-gated:
+ * a noisy night or no baseline → low confidence / null, never a misleading number.
+ */
+export function calcDesaturation(ratios: number[], baselineRatio: number | null): Metric<DesaturationValue> {
+  const NOTE = 'a screen, not a diagnosis';
+  const r = ratios.filter(PLAUSIBLE);
+  const none = (conf = 0): Metric<DesaturationValue> => ({
+    events: 0, odi: null, deepest_pct: null, note: NOTE, confidence: conf, tier: 'RELATIVE', inputs_used: [],
+  });
+  if (r.length < MIN_MINUTES || baselineRatio == null || !(baselineRatio > 0)) return none();
+
+  const thresh = baselineRatio * (1 + DESAT_REL);
+  let events = 0, run = 0, deepest = 0;
+  for (const v of r) {
+    if (v >= thresh) {
+      run++;
+      const dipPct = ((v - baselineRatio) / baselineRatio) * 100;
+      if (dipPct > deepest) deepest = dipPct;
+      if (run === DESAT_MINUTES) events++; // count once per sustained dip
+    } else {
+      run = 0;
+    }
+  }
+  const hours = Math.max(0.5, r.length / 60);
+  const m = mean(r);
+  const cv = m > 0 ? stddev(r) / m : 1;
+  const conf = round(clamp(Math.min(r.length / 180, 1) * Math.max(0, 1 - cv / CV_FLOOR), 0, 1), 3);
+  const drivers: Driver[] = [
+    { label: 'Desaturation dips', contribution: events, detail: `${events} dips (${round(events / hours, 1)}/h)`, ref: { metric: 'spo2', scale: 'day' } },
+  ];
+  return {
+    events, odi: round(events / hours, 1), deepest_pct: round(deepest, 1), note: NOTE,
+    confidence: conf, tier: 'RELATIVE', inputs_used: ['spo2_red_raw', 'spo2_ir_raw'], drivers,
+  };
+}

@@ -49,10 +49,10 @@ export { calcHrRecovery, calcRecovery } from './recovery';
 // §HRV — RMSSD/SDNN/pNN50, Lomb–Scargle LF/HF, Baevsky SI, RSA respiratory rate
 export {
   timeDomainHrv, freqDomainHrv, baevskyStressIndex, cleanRr,
-  calcHrvStability, calcIrregular,
+  calcHrvStability, calcIrregular, calcDaytimeHrv,
   VLF_BAND, LF_BAND, HF_BAND,
 } from './hrv';
-export type { TimeDomainHrv, FreqDomainHrv } from './hrv';
+export type { TimeDomainHrv, FreqDomainHrv, DaytimeHrvValue } from './hrv';
 
 // §9 Training load / fitness trend
 export { calcLoad, calcFitnessTrend } from './trends';
@@ -62,6 +62,16 @@ export { calcVo2Max, calcFitnessModel, calcMonotony } from './fitness';
 
 // §Steps — AN-2554 wrist pedometer (pure math; backend re-decodes the IMU + runs it)
 export { calcSteps, pedometer, STEP_PARAMS } from './steps';
+
+// §HAR — wrist activity recognition (Mannini 2013): per-window features + classifier
+//        + workout segmentation. LIVE high-rate stream only (flash is 1 Hz).
+export {
+  extractHarFeatures, extractHarFeaturesFromSmv, classifyActivityWindow, segmentWorkout,
+  dwtDetailEnergies, DB10_LO,
+} from './har';
+export type {
+  HarFeatures, ClassVote, WorkoutSegment, SegmentResult,
+} from './har';
 
 // §Circadian — CircaCP cosinor + bounded change-point (physiological-day anchor)
 export { calcCircadian, stageSleep } from './circadian';
@@ -79,9 +89,9 @@ export type { ReadinessInputs } from './readiness_index';
 // §10 Anomaly + illness (Mahalanobis). calcReadiness REMOVED (heuristic) — use
 //     calcRecovery (HRV) instead.
 export { calcAnomaly } from './readiness';
-export type { AnomalyInputs } from './readiness';
+export type { AnomalyInputs, AnomalyOpts } from './readiness';
 export { calcIllness } from './illness';
-export type { IllnessToday, IllnessHistory } from './illness';
+export type { IllnessToday, IllnessHistory, IllnessOpts } from './illness';
 
 // §11 Baselines
 export { calcBaselines } from './baselines';
@@ -97,12 +107,16 @@ export type {
 // §12 Stress — HRV-based (Baevsky Stress Index + LF/HF, personal-relative).
 export { calcStress } from './stress';
 
-// §SpO₂ — RELATIVE blood-oxygen index from the red/IR reflectance ratio.
-export { calcSpo2Index } from './spo2';
-export type { Spo2Value } from './spo2';
+// §SpO₂ — RELATIVE blood-oxygen index + overnight desaturation screen.
+export { calcSpo2Index, calcDesaturation } from './spo2';
+export type { Spo2Value, DesaturationValue } from './spo2';
 
 // §Sleep stress / nocturnal arousal (HR surge + motion during sleep).
 export { calcSleepStress } from './arousal';
+
+// §Restlessness — nocturnal movement fragmentation from per-minute actigraphy.
+export { calcRestlessness } from './restlessness';
+export type { RestlessnessValue } from './restlessness';
 
 // §13 Nocturnal Heart (sleeping-HR dynamics + dip + elevated-overnight flag).
 export { calcNocturnalHeart } from './nocturnal';

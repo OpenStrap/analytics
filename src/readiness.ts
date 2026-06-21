@@ -3,6 +3,7 @@
 // keeps only the simple, rule-based RHR anomaly (Radin et al., Lancet Digit Health
 // 2020); the richer multivariate illness signal lives in illness.ts (Mahalanobis).
 import type { Baseline, Metric, AnomalyValue } from './types';
+import type { CyclePhase } from './cycle';
 import { round } from './util';
 
 export interface AnomalyInputs {
@@ -11,6 +12,10 @@ export interface AnomalyInputs {
   skin_temp?: number | null; // today RELATIVE
   sleep_efficiency?: number | null; // today
   baseline_sleep_efficiency?: number | null; // prior typical efficiency
+}
+export interface AnomalyOpts {
+  /** menstrual-cycle phase if tracked — gates phase-expected RHR rises */
+  cyclePhase?: CyclePhase | null;
 }
 
 /**
@@ -25,9 +30,10 @@ export interface AnomalyInputs {
  */
 export function calcAnomaly(
   inputs: AnomalyInputs,
-  baseline: Baseline
+  baseline: Baseline,
+  opts?: AnomalyOpts
 ): Metric<AnomalyValue> {
-  const NOTE = 'signal, not a diagnosis';
+  let NOTE = 'signal, not a diagnosis';
   const triggers: string[] = [];
   const used: string[] = [];
 
@@ -66,7 +72,14 @@ export function calcAnomaly(
   const ruleB = rhrUp && tempUp && effDown;
   if (ruleB) triggers.push('rhr_temp_efficiency');
 
-  const signal = ruleA || ruleB;
+  // Cycle-aware gate: through the luteal/menstrual phase a RHR (and temp) rise is
+  // normal physiology. Suppress the pure-RHR rule A then; rule B keeps firing because
+  // its sleep-efficiency drop is NOT explained by the cycle. (Wilcox 2000.)
+  const inCyclePhase = opts?.cyclePhase === 'luteal' || opts?.cyclePhase === 'menstruation';
+  const signal = (ruleA && !inCyclePhase) || ruleB;
+  if (ruleA && inCyclePhase && !ruleB) {
+    NOTE = 'signal, not a diagnosis (an elevated resting HR can be expected in this phase of your cycle)';
+  }
 
   // Confidence scales with how many corroborating inputs were evaluable.
   const evaluable = [

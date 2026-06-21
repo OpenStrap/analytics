@@ -26,6 +26,11 @@ import { calcCircadian, stageSleep } from '../circadian';
 import { detectSleepCycles } from '../cycles';
 import { detectWakeState, peekRecentState } from '../wake';
 import { calcCycle } from '../cycle';
+import { extractHarFeatures, classifyActivityWindow, segmentWorkout, DB10_LO, dwtDetailEnergies } from '../har';
+import type { ClassVote } from '../har';
+import { calcRestlessness } from '../restlessness';
+import { calcDaytimeHrv } from '../hrv';
+import { calcDesaturation } from '../spo2';
 
 const baseline: Baseline = {
   resting_hr: 50,
@@ -306,12 +311,28 @@ console.log('--- §7 detectSessions ---');
   assert(ses.type === 'run/cardio', 'high act + high HR → run/cardio');
   assert(ses.strain > 0 && ses.kcal > 0, 'session carries strain + calories');
 
-  // a <5min bout is discarded
+  // a 2-min sustained bout now qualifies (threshold lowered 3/5 → 2 min).
+  const short: Minute[] = [];
+  for (let i = 0; i < 10; i++) short.push(min(i * 60, 55, 1));
+  for (let i = 10; i < 12; i++) short.push(min(i * 60, 150, 100)); // 2 min
+  for (let i = 12; i < 20; i++) short.push(min(i * 60, 55, 1));
+  assert(detectSessions(short, baseline).length === 1, '2-min bout now detected');
+
+  // a 1-min blip is still discarded.
   const tiny: Minute[] = [];
   for (let i = 0; i < 10; i++) tiny.push(min(i * 60, 55, 1));
-  for (let i = 10; i < 13; i++) tiny.push(min(i * 60, 150, 100)); // only 3 min
-  for (let i = 13; i < 20; i++) tiny.push(min(i * 60, 55, 1));
-  assert(detectSessions(tiny, baseline).length === 0, 'bout <5 min discarded');
+  tiny.push(min(10 * 60, 150, 100)); // 1 min only
+  for (let i = 11; i < 20; i++) tiny.push(min(i * 60, 55, 1));
+  assert(detectSessions(tiny, baseline).length === 0, '1-min blip discarded');
+
+  // Per-minute HAR class → motion-based workout type + confidence (not the HR heuristic).
+  const cyc: Minute[] = [];
+  for (let i = 0; i < 10; i++) cyc.push(min(i * 60, 55, 1));
+  for (let i = 10; i < 20; i++) cyc.push(min(i * 60, 140, 100, { hr_max: 150, act_class: 'cycle' }));
+  for (let i = 20; i < 30; i++) cyc.push(min(i * 60, 55, 1));
+  const cs = detectSessions(cyc, baseline)[0];
+  assert(cs.type === 'cycle' && cs.type_confidence > 0.4, `motion class → cycle (got ${cs.type}/${cs.type_confidence})`);
+  assert(cs.detected_type === 'cycle', 'detected_type recorded for calibration ledger');
 }
 
 // ── §8 calcHrRecovery ────────────────────────────────────────────────────────
@@ -389,6 +410,10 @@ console.log('--- §10 calcRecovery / calcAnomaly / calcIllness ---');
   const an = calcAnomaly({ recent_rhr: [50, 51, 55, 56] }, baseline);
   assert(an.signal === true && an.triggers.includes('rhr_elevated_2d'), 'two elevated RHR days → signal');
   assert(an.note === 'signal, not a diagnosis', 'anomaly non-diagnostic note');
+  // §4 cycle gate: luteal phase suppresses the pure-RHR-elevation rule (expected rise).
+  const anLuteal = calcAnomaly({ recent_rhr: [50, 51, 55, 56] }, baseline, { cyclePhase: 'luteal' });
+  assert(anLuteal.signal === false && /cycle/i.test(anLuteal.note),
+    'luteal phase suppresses pure-RHR anomaly with a cycle note');
 
   // illness (Mahalanobis): RHR↑ + RMSSD↓ + temp↑ vs baseline → signal.
   const hist = {
@@ -401,6 +426,26 @@ console.log('--- §10 calcRecovery / calcAnomaly / calcIllness ---');
   assert(sick.note === 'a signal, not a diagnosis', 'illness non-diagnostic note');
   const well = calcIllness({ resting_hr: 56, rmssd: 76, skin_temp: 34.05 }, hist);
   assert(well.signal === false, 'normal vector → no illness signal');
+
+  // §5 respiratory rate as a 4th Mahalanobis feature: RMSSD↓ + resp↑ fires + lists 'resp'.
+  const histR = { ...hist, resp_rate: Array.from({ length: 20 }, (_, i) => 14 + (i % 2)) };
+  const sickResp = calcIllness({ resting_hr: 56, rmssd: 45, skin_temp: 34.05, resp_rate: 19 }, histR);
+  assert(sickResp.signal === true && sickResp.triggers.includes('resp'),
+    'elevated respiratory rate drives the illness signal');
+  assert(sickResp.inputs_used.includes('resp_rate'), 'resp_rate listed in inputs_used');
+
+  // §4 cycle gating: temp+RHR rise ALONE is phase-expected → suppressed in luteal,
+  //    but still fires when no cycle context is supplied.
+  const cycIn = { resting_hr: 64, rmssd: 76, skin_temp: 35.0 };
+  const noCyc = calcIllness(cycIn, hist);
+  assert(noCyc.signal === true && noCyc.triggers.includes('rhr') && noCyc.triggers.includes('temp'),
+    'temp+RHR rise → illness signal with no cycle context');
+  const luteal = calcIllness(cycIn, hist, { cyclePhase: 'luteal' });
+  assert(luteal.signal === false, 'luteal phase suppresses temp/RHR-only illness signal');
+  assert(/cycle/i.test(luteal.note), 'suppressed signal explains the cycle phase');
+  // …but HRV/resp deviations are NOT explained by the cycle → still fires.
+  const lutealReal = calcIllness({ resting_hr: 64, rmssd: 45, skin_temp: 35.0, resp_rate: 19 }, histR, { cyclePhase: 'luteal' });
+  assert(lutealReal.signal === true, 'HRV/resp shift still fires even in luteal phase');
 }
 
 // ── §11 calcBaselines ────────────────────────────────────────────────────────
@@ -913,6 +958,106 @@ console.log('--- §Circadian calcCircadian ---');
   const one = calcCycle(['2026-06-10'], '2026-06-15');
   assert(one.mean_length === null && one.predicted_next === '2026-07-08' && one.confidence > 0,
     `cycle: single log uses 28d default (got ${one.predicted_next}/${one.confidence})`);
+}
+
+// ── §HAR — activity recognition (Mannini features + classifier + segmentation) ──
+console.log('--- §HAR activity recognition ---');
+{
+  // db10 orthonormality invariants — catch any coefficient transcription error.
+  const sumLo = DB10_LO.reduce((s, v) => s + v, 0);
+  const sumSq = DB10_LO.reduce((s, v) => s + v * v, 0);
+  assert(DB10_LO.length === 20, 'db10 has 20 taps');
+  approx(sumLo, Math.SQRT2, 1e-6, 'db10 Σh = √2');
+  approx(sumSq, 1, 1e-6, 'db10 Σh² = 1');
+
+  // Synthetic tri-axial window: gravity on Z + a sinusoidal swing at f0 on X.
+  const fs = 100, secs = 4, n = fs * secs;
+  // Oscillate the magnitude (gravity axis) at f0 so SMV ≈ 1 + amp·sin(2π f0 t) — this
+  // matches how the accel-vector magnitude actually varies with gait (avoids the sin²
+  // frequency-doubling artifact you get from a single off-axis sinusoid).
+  const mk = (f0: number, amp: number, noise = 0.004) => {
+    const x: number[] = [], y: number[] = [], z: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const t = i / fs;
+      z.push(1 + amp * Math.sin(2 * Math.PI * f0 * t) + (((i * 7919) % 991) / 991 - 0.5) * noise);
+      x.push((((i * 1103515245 + 12345) % 1000) / 1000 - 0.5) * noise);
+      y.push((((i * 1103) % 997) / 997 - 0.5) * noise);
+    }
+    return { x, y, z };
+  };
+
+  // Frequency detection: a 2.0 Hz swing → dom1_freq ≈ 2.0 (within bin resolution).
+  const w2 = mk(2.0, 0.5);
+  const f2 = extractHarFeatures(w2.x, w2.y, w2.z, fs);
+  approx(f2.dom1_freq, 2.0, 0.3, `HAR dom1_freq ≈ 2.0 (got ${f2.dom1_freq.toFixed(2)})`);
+  assert(f2.dom1_ratio > 0.25, 'HAR strong sine → periodic (high dom1_ratio)');
+
+  // Classification: flat (gravity only, tiny noise) → sedentary.
+  const flat = mk(1.0, 0.0);
+  assert(classifyActivityWindow(extractHarFeatures(flat.x, flat.y, flat.z, fs)).cls === 'sedentary',
+    'HAR flat signal → sedentary');
+
+  // 2 Hz strong swing → a locomotion class (walk), not sedentary/other.
+  const cw = classifyActivityWindow(f2);
+  assert(cw.cls === 'walk', `HAR 2 Hz → walk (got ${cw.cls})`);
+
+  // 2.8 Hz strong swing → run.
+  const w3 = mk(2.8, 0.6);
+  assert(classifyActivityWindow(extractHarFeatures(w3.x, w3.y, w3.z, fs)).cls === 'run',
+    'HAR 2.8 Hz → run');
+
+  // wavelet detail energies present (6 levels), non-negative.
+  const we = dwtDetailEnergies(w2.x, 6);
+  assert(we.length === 6 && we.every((e) => e >= 0), 'db10 detail energies: 6 levels, ≥0');
+
+  // Segmentation: 5 min walk → 5 min run (one continuous bout) → two phases, primary = either.
+  const votes: ClassVote[] = [];
+  for (let t = 0; t < 300; t += 4) votes.push({ ts: 1000 + t, cls: 'walk', conf: 0.7 });
+  for (let t = 300; t < 600; t += 4) votes.push({ ts: 1000 + t, cls: 'run', conf: 0.7 });
+  const seg = segmentWorkout(votes);
+  assert(seg.segments.length === 2, `HAR segment: walk→run → 2 phases (got ${seg.segments.length})`);
+  assert(seg.segments[0].type === 'walk' && seg.segments[1].type === 'run', 'HAR phases ordered walk then run');
+
+  // A single-window blip inside a long run is smoothed away (no spurious phase).
+  const blip: ClassVote[] = [];
+  for (let t = 0; t < 600; t += 4) blip.push({ ts: 2000 + t, cls: t === 300 ? 'cycle' : 'run', conf: 0.7 });
+  assert(segmentWorkout(blip).segments.length === 1, 'HAR single-window blip smoothed → one phase');
+}
+
+// ── §Restlessness / §Daytime HRV / §Desaturation ────────────────────────────
+console.log('--- §restlessness / daytime HRV / desaturation ---');
+{
+  // Restlessness: a still night with a movement spike every 30 min → bouts detected.
+  const sleepMin: Minute[] = [];
+  for (let i = 0; i < 240; i++) {
+    const moving = i % 30 === 0;
+    sleepMin.push({ ts: 1000 + i * 60, hr_avg: 55, hr_min: 54, hr_max: 56, hr_n: 60, activity: moving ? 0.5 : 0.01, steps: 0, wrist_on: true });
+  }
+  const rest = calcRestlessness(sleepMin);
+  assert(rest.score !== null && rest.movement_bouts >= 5, `restlessness: detects bouts (got ${rest.movement_bouts})`);
+  assert(rest.longest_still_min > 0 && rest.mobility_pct !== null, 'restlessness: still stretch + mobility');
+  assert(calcRestlessness(sleepMin.slice(0, 5)).score === null, 'restlessness: <20 min → null');
+
+  // Daytime HRV: 60 min of RR bucketed into 5-min windows → per-window RMSSD series.
+  const byMin: { ts: number; rr: number[] }[] = [];
+  for (let i = 0; i < 60; i++) {
+    const rr: number[] = [];
+    for (let k = 0; k < 12; k++) rr.push(850 + ((i + k) % 5) * 15);
+    byMin.push({ ts: 1000 + i * 60, rr });
+  }
+  const dh = calcDaytimeHrv(byMin, 300);
+  assert(dh.rmssd_median !== null && dh.n_windows >= 10, `daytime HRV: windows (got ${dh.n_windows})`);
+  assert(dh.series.length === dh.n_windows && dh.lowest_ts !== null, 'daytime HRV: series + lowest window');
+  assert(calcDaytimeHrv([], 300).rmssd_median === null, 'daytime HRV: no RR → null');
+
+  // Desaturation: a 2-min dip (R↑ above baseline) every 20 min → events counted.
+  const ratios: number[] = [];
+  for (let i = 0; i < 120; i++) ratios.push(i % 20 < 2 ? 0.86 : 0.79);
+  const des = calcDesaturation(ratios, 0.80);
+  assert(des.events >= 4 && des.odi !== null, `desaturation: counts dips (got ${des.events})`);
+  assert(des.deepest_pct !== null && des.deepest_pct > 0, 'desaturation: reports deepest dip');
+  const desNoBase = calcDesaturation(ratios, null);
+  assert(desNoBase.events === 0 && desNoBase.confidence === 0, 'desaturation: no baseline → abstain');
 }
 
 summary('analytics');
