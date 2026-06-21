@@ -30,7 +30,7 @@ export function min(
   ts: number,
   hr: number,
   activity = 0,
-  opts: Partial<{ steps: number; wrist_on: boolean; hr_max: number }> = {}
+  opts: Partial<{ steps: number; wrist_on: boolean; hr_max: number; act_class: import('../types').ActivityClass }> = {}
 ) {
   return {
     ts,
@@ -41,5 +41,6 @@ export function min(
     activity,
     steps: opts.steps ?? 0,
     wrist_on: opts.wrist_on ?? hr > 0,
+    ...(opts.act_class ? { act_class: opts.act_class } : {}),
   };
 }

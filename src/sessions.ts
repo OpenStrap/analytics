@@ -1,10 +1,12 @@
 // §7 Auto-workout detection. Tier HIGH (event) / ESTIMATE (type).
-import type { Minute, Baseline, Profile, Metric, SessionValue } from './types';
+import type { Minute, Baseline, Profile, Metric, SessionValue, ActivityClass } from './types';
 import { isHrUsable, resolveMaxHr, median, mean, round } from './util';
 import { calcStrain } from './strain';
 import { calcCalories } from './calories';
 import { calcHrZones } from './zones';
 import { calcHrRecovery } from './recovery';
+import { segmentWorkout } from './har';
+import type { ClassVote } from './har';
 
 /**
  * detectSessions(minutes, baseline, profile?)
@@ -64,10 +66,10 @@ export function detectSessions(
     i = lastAboveIdx + 1;
   }
 
-  // 2. Require ≥3 min sustained start AND mean activity > daily median.
+  // 2. Require ≥2 min sustained start AND mean activity > daily median.
   const qualified = segs.filter((s) => {
     const slice = worn.slice(s.startIdx, s.endIdx + 1);
-    if (slice.length < 3) return false;
+    if (slice.length < 2) return false;
     const meanAct = mean(slice.map((m) => m.activity));
     return meanAct > dailyMedianAct;
   });
@@ -88,12 +90,12 @@ export function detectSessions(
     }
   }
 
-  // 4. Discard sessions <5 min total; build outputs.
+  // 4. Discard sessions <2 min total; build outputs.
   const out: Metric<SessionValue>[] = [];
   for (const s of merged) {
     const slice = worn.slice(s.startIdx, s.endIdx + 1);
     const durationMin = (slice[slice.length - 1].ts - slice[0].ts) / 60 + 1;
-    if (durationMin < 5) continue;
+    if (durationMin < 2) continue;
 
     const hrs = slice.map((m) => m.hr_avg);
     const avgHr = mean(hrs);
@@ -107,7 +109,28 @@ export function detectSessions(
     const zones = calcHrZones(slice, baseline, profile);
     const hrr = calcHrRecovery(slice, baseline, profile);
 
-    const type = classifyType(meanAct, dailyMedianAct, avgHr, rhr, maxHr);
+    // Type: prefer the motion-based HAR classes carried per-minute from ingest (live
+    // high-rate stream → Mannini classifier). Run segmentWorkout over the bout's
+    // per-minute act_class to get the primary type + graceful phase breakdown. If the
+    // bout has no classified minutes (flash-drained, 1 Hz, no motion texture), fall
+    // back to the crude HR/activity heuristic — honestly low-confidence.
+    const votes: ClassVote[] = slice
+      .filter((m) => m.act_class)
+      .map((m) => ({ ts: m.ts, cls: m.act_class as ActivityClass, conf: 1 }));
+    let type: string;
+    let typeConf: number;
+    let segments: SessionValue['segments'];
+    if (votes.length >= 2) {
+      const seg = segmentWorkout(votes, { minPhaseSec: 120 });
+      type = seg.primary;
+      // Cap at 0.75: motion-classified is far better than the HR heuristic but still
+      // ESTIMATE (threshold classifier, no trained model yet).
+      typeConf = Math.min(0.75, Math.max(0.4, seg.type_confidence));
+      segments = seg.segments.length > 1 ? seg.segments : undefined;
+    } else {
+      type = classifyType(meanAct, dailyMedianAct, avgHr, rhr, maxHr);
+      typeConf = 0.4;
+    }
 
     out.push({
       start_ts: slice[0].ts,
@@ -131,7 +154,9 @@ export function detectSessions(
       mean_activity: round(meanAct, 4),
       peak_activity: round(peakAct, 4),
       type,
-      type_confidence: 0.4,
+      type_confidence: round(typeConf, 2),
+      segments,
+      detected_type: type,
       confidence: 0.8, // event detection, HIGH
       tier: 'HIGH',
       inputs_used: ['hr_avg', 'hr_max', 'activity', 'baseline.resting_hr'],

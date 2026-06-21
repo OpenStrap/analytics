@@ -14,7 +14,7 @@
 // RR is decoded from type-24 records (parse_r24 rr_intervals_ms) and validated on
 // real hardware (99.7% physiological; p50≈860 ms ≈ 70 bpm). This is NOT the parked
 // R17/R11 live-optical path — it's the historical RR that ships in every record.
-import { round, mean, stddev } from './util';
+import { round, mean, stddev, median } from './util';
 import type { Metric, HrvStabilityValue, IrregularValue } from './types';
 
 /** Standard frequency bands (Hz) per the HRV Task Force (1996). */
@@ -242,6 +242,55 @@ export function calcIrregular(rrRaw: number[]): Metric<IrregularValue> {
     note: NOTE,
     confidence: round(Math.min(1, physio.length / 300), 3),
     tier: 'ESTIMATE',
+    inputs_used: ['rr_intervals'],
+  };
+}
+
+/** §Daytime HRV — waking-hours RMSSD timeline (ultradian autonomic rhythm). */
+export interface DaytimeHrvValue {
+  rmssd_median: number | null;          // median of per-window RMSSD across the day
+  series: { ts: number; rmssd: number }[]; // per-window RMSSD (ultradian rhythm / stress timeline)
+  lowest_ts: number | null;             // window with the lowest RMSSD (most-stressed point)
+  n_windows: number;
+}
+
+/**
+ * calcDaytimeHrv(byMinute, bucketSec=300) — HRV across the WAKING day (not just sleep).
+ * `byMinute` is per-minute RR arrays (ms) over the daytime window. We bucket RR into
+ * fixed windows (default 5 min) and run the standard time-domain RMSSD per window with
+ * enough beats → an ultradian HRV / daytime-stress timeline. Tier HIGH (published
+ * RMSSD); abstains (null) when too few windows have usable RR — no fabrication.
+ */
+export function calcDaytimeHrv(
+  byMinute: { ts: number; rr: number[] }[],
+  bucketSec = 300,
+): Metric<DaytimeHrvValue> {
+  const buckets = new Map<number, { ts: number; rr: number[] }>();
+  for (const m of byMinute) {
+    if (!m.rr || m.rr.length === 0) continue;
+    const key = Math.floor(m.ts / bucketSec);
+    const b = buckets.get(key) ?? { ts: key * bucketSec, rr: [] };
+    for (const v of m.rr) b.rr.push(v);
+    buckets.set(key, b);
+  }
+  const series: { ts: number; rmssd: number }[] = [];
+  for (const b of [...buckets.values()].sort((a, c) => a.ts - c.ts)) {
+    const td = timeDomainHrv(b.rr);
+    if (td.rmssd != null) series.push({ ts: b.ts, rmssd: td.rmssd });
+  }
+  if (series.length < 3) {
+    return { rmssd_median: null, series, lowest_ts: null, n_windows: series.length, confidence: 0, tier: 'HIGH', inputs_used: ['rr_intervals'] };
+  }
+  const vals = series.map((s) => s.rmssd);
+  let lowest = series[0];
+  for (const s of series) if (s.rmssd < lowest.rmssd) lowest = s;
+  return {
+    rmssd_median: round(median(vals) ?? 0, 1),
+    series,
+    lowest_ts: lowest.ts,
+    n_windows: series.length,
+    confidence: round(Math.min(1, series.length / 24), 3), // ~2 h of windows → full
+    tier: 'HIGH',
     inputs_used: ['rr_intervals'],
   };
 }

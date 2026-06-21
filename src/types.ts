@@ -14,7 +14,17 @@ export interface Minute {
   activity: number; // motion magnitude (actigraphy count)
   steps: number; // detected steps this minute (accel peak-count; ESTIMATE)
   wrist_on: boolean;
+  // Dominant HAR activity class for this minute, classified at ingest from the live
+  // high-rate accel (see har.ts). Present ONLY for live-streamed minutes (flash is
+  // 1 Hz → no motion texture). Drives workout typing + segmentation in detectSessions.
+  act_class?: ActivityClass;
 }
+
+/** Wrist activity-recognition class (Mannini 2013). Canonical home for the shared type. */
+export type ActivityClass = 'sedentary' | 'walk' | 'run' | 'cycle' | 'lift' | 'other';
+
+/** One labelled phase of a workout (graceful activity switches). */
+export interface SessionSegment { start_ts: number; end_ts: number; type: string; confidence: number }
 
 /** User profile. Fields are frequently absent — algorithms must degrade honestly. */
 export interface Profile {
@@ -186,8 +196,10 @@ export interface SessionValue {
   hrr60: number | null;
   mean_activity: number;
   peak_activity: number;
-  type: 'walk' | 'run/cardio' | 'strength/other';
-  type_confidence: number; // ESTIMATE 0.4
+  type: string; // ActivityClass when motion-classified, else legacy 'walk'|'run/cardio'|'strength/other'
+  type_confidence: number; // ESTIMATE
+  segments?: SessionSegment[]; // labelled phases (multi-activity workouts)
+  detected_type?: string;      // the model's call at detection (for the calibration ledger)
 }
 
 export interface HrRecoveryValue {
