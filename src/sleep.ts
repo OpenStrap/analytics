@@ -71,6 +71,38 @@ export function calcSleep(minutes: Minute[], baseline: Baseline): Metric<SleepVa
   // garbage (everything reads "awake"). Abstain until we have one.
   if (rhr == null || rhr <= 0) return empty();
 
+  // Per-window sleep-HR reference for the HR-dip awake override.
+  //
+  // The band's flash record (R24, the entire overnight) carries NO usable
+  // actigraphy — its accel is a single 1 Hz gravity sample, so per-minute
+  // `activity` reads ~0 and the Cole-Kripke score never clears its count-scaled
+  // S<1 threshold. The awake/asleep call is therefore HR-driven in practice.
+  // Anchoring "elevated → awake" to `rhr` is WRONG, because `rhr` is the
+  // 5th-PERCENTILE sleep HR (a floor): normal/REM sleep HR legitimately runs
+  // 20–40% above that floor, so a fixed 1.15*rhr cutoff flags almost every real
+  // sleep minute awake (observed: 167/168 worn minutes on a real night, RHR 58 →
+  // 67 bpm cutoff vs a 66–94 bpm sleeping band → 1-minute "sleep"). Instead anchor
+  // the cutoff to THIS window's own depressed-HR level (a low percentile of worn
+  // HR), with `rhr` as a floor so a window that is genuinely all-awake can't
+  // manufacture a low reference. Percentiles are robust to the high-HR
+  // evening/morning tail that shares the search window.
+  const wornHr = sorted
+    .filter((m) => m.wrist_on && m.hr_avg > 0)
+    .map((m) => m.hr_avg)
+    .sort((a, b) => a - b);
+  const pctl = (p: number) =>
+    wornHr.length ? wornHr[Math.min(wornHr.length - 1, Math.floor(p * wornHr.length))] : rhr;
+  const sleepHr = Math.max(rhr, pctl(0.10)); // the quiet sleep-HR level for this window
+  const ASLEEP_HI = 1.05; // ≤ this × sleepHr → strong dip, nudge asleep
+  const AWAKE_HI = 1.20;  // > this × sleepHr → clearly elevated, nudge awake (clears REM)
+  // Absolute backstop: HR at/above this × the RHR floor reads awake REGARDLESS of the
+  // window. Without it, a flat + motion-inert window anchors sleepHr to its own level and
+  // every minute falls under ASLEEP_HI*sleepHr → a sedentary-awake stretch (TV, desk)
+  // would be mis-read as a full night. Real sleep, including REM, rarely SUSTAINS >1.5×
+  // the 5th-percentile RHR floor, so this clips the false-positive without clipping sleep.
+  // (The proper tie-breaker is actigraphy; R24 carries none today — see decode note.)
+  const ABS_WAKE = 1.5;
+
   // 1. Cole-Kripke score + HR-dip fusion → boolean asleep per epoch.
   const asleep: boolean[] = new Array(n).fill(false);
   for (let i = 0; i < n; i++) {
@@ -93,8 +125,9 @@ export function calcSleep(minutes: Minute[], baseline: Baseline): Metric<SleepVa
     let isAsleep = s < 1;
     // HR-dip fusion (only when we have a usable HR reading).
     if (m.hr_avg > 0) {
-      if (m.hr_avg < 0.95 * rhr) isAsleep = true; // strong dip → asleep
-      else if (m.hr_avg > 1.15 * rhr) isAsleep = false; // clearly elevated → awake
+      if (m.hr_avg > ABS_WAKE * rhr) isAsleep = false; // absolute backstop → awake regardless
+      else if (m.hr_avg <= ASLEEP_HI * sleepHr) isAsleep = true; // at/below the sleep level → asleep
+      else if (m.hr_avg > AWAKE_HI * sleepHr) isAsleep = false; // clearly elevated → awake
     }
     asleep[i] = isAsleep;
   }

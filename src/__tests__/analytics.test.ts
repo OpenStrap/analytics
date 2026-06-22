@@ -217,6 +217,29 @@ console.log('--- §5 calcSleep ---');
   assert(ow.in_bed_min <= 210,
     `off-wrist: off-wrist stretch not counted as in-bed (got ${ow.in_bed_min})`);
 
+  // Regression (v3): the band's flash record (R24 — the entire overnight) carries NO
+  // actigraphy, so `activity` is ~0 for every sleep minute and Cole-Kripke is inert; the
+  // call is HR-driven. A night's HR legitimately runs ABOVE the 5th-pctile RHR floor, so
+  // the old fixed `1.15*rhr` awake-override flagged the whole night awake → 1-min "sleep"
+  // (observed in prod). The window-relative reference must detect it. rhr=50 floor, night
+  // HR ~62 (well above 1.15*50=57.5), activity 0, bracketed by waking HR ~95.
+  const aboveFloor: Minute[] = [];
+  for (let i = 0; i < 30; i++) aboveFloor.push(min(i * 60, 95, 0));     // waking evening
+  for (let i = 30; i < 430; i++) aboveFloor.push(min(i * 60, 62, 0));   // ~6.7h night, HR > RHR floor
+  for (let i = 430; i < 470; i++) aboveFloor.push(min(i * 60, 95, 0));  // waking morning
+  const af = calcSleep(aboveFloor, baseline);
+  assert(af.duration_min >= 380,
+    `above-floor night (HR>RHR, activity inert) is detected, not clipped to ~1min (got ${af.duration_min})`);
+
+  // Regression (v3): the OTHER failure mode — with activity inert, a flat + ELEVATED
+  // sedentary-awake window must NOT be manufactured into a full night. The absolute
+  // backstop (HR > 1.5*RHR → awake) clips it. Flat 92 bpm for 5h, rhr 50 → 92 > 75.
+  const flatAwake: Minute[] = [];
+  for (let i = 0; i < 300; i++) flatAwake.push(min(i * 60, 92, 0));
+  const fa = calcSleep(flatAwake, baseline);
+  assert(fa.duration_min <= 30,
+    `flat elevated sedentary-awake window is not mis-read as sleep (got ${fa.duration_min})`);
+
   // Plausibility guard: even if (pathologically) almost the whole 18h window
   // reads low-activity, a single main-sleep period must never exceed ~14h.
   const giant: Minute[] = [];
