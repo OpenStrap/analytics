@@ -1,0 +1,10 @@
+/target
+/pkg
+/worker-test/pkg
+/worker-test/.wrangler
+/worker-test/node_modules
+parity_input.json
+parity_ts.json
+parity_all_input.json
+parity_all_ts.json
+Cargo.lock
