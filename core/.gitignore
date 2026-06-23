@@ -7,4 +7,6 @@ parity_input.json
 parity_ts.json
 parity_all_input.json
 parity_all_ts.json
+decode_parity_cases.json
+dart_header.json
 Cargo.lock
