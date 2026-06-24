@@ -14,6 +14,7 @@ mod fitness;
 mod har;
 mod hrv;
 mod hz1;
+mod frontier;
 mod illness;
 mod sessions;
 mod sleep;
@@ -580,6 +581,51 @@ pub fn stage_hypnogram(req_json: &str) -> String {
         }
         Err(e) => err(&e.to_string()),
     }
+}
+
+#[derive(Deserialize)]
+struct MealReq { minutes: Vec<Minute> }
+#[wasm_bindgen]
+pub fn detect_meals(req_json: &str) -> String {
+    match serde_json::from_str::<MealReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::meal::detect_meals(&r.minutes)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
+}
+#[wasm_bindgen]
+pub fn calc_af_burden(req_json: &str) -> String {
+    match serde_json::from_str::<RrReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::af_burden::af_burden(&r.rr)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
+}
+#[wasm_bindgen]
+pub fn calc_coherence(req_json: &str) -> String {
+    match serde_json::from_str::<RrReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::coherence::coherence(&r.rr)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
+}
+#[derive(Deserialize)]
+struct AlcoholReq { sleeping_hr: f64, rmssd: f64, nadir_fraction: f64, #[serde(default)] base_hr: Vec<f64>, #[serde(default)] base_rmssd: Vec<f64>, #[serde(default)] base_nadir: Vec<f64> }
+#[wasm_bindgen]
+pub fn calc_alcohol_signature(req_json: &str) -> String {
+    match serde_json::from_str::<AlcoholReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::alcohol::alcohol_signature(r.sleeping_hr, r.rmssd, r.nadir_fraction, &r.base_hr, &r.base_rmssd, &r.base_nadir)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
+}
+#[derive(Deserialize)]
+struct AcclimReq { days: Vec<[f64;3]>, base: [f64;3], sd: [f64;3], #[serde(default)] mode: String }
+#[wasm_bindgen]
+pub fn calc_acclimatization(req_json: &str) -> String {
+    match serde_json::from_str::<AcclimReq>(req_json) { Ok(r) => { let days: Vec<(f64,f64,f64)> = r.days.iter().map(|d| (d[0],d[1],d[2])).collect(); let m = if r.mode.is_empty() { "altitude".to_string() } else { r.mode }; serde_json::to_string(&frontier::acclimatization::acclimatization(&days, (r.base[0],r.base[1],r.base[2]), (r.sd[0],r.sd[1],r.sd[2]), &m)).unwrap_or_else(|e| err(&e.to_string())) }, Err(e) => err(&e.to_string()) }
+}
+#[derive(Deserialize)]
+struct RecoveryDebtReq { hr: Vec<f64>, #[serde(default)] rmssd: Vec<Option<f64>>, base_hr: f64, #[serde(default)] base_rmssd: f64 }
+#[wasm_bindgen]
+pub fn calc_recovery_debt(req_json: &str) -> String {
+    match serde_json::from_str::<RecoveryDebtReq>(req_json) { Ok(r) => { let rm = if r.rmssd.is_empty() { vec![None; r.hr.len()] } else { r.rmssd }; serde_json::to_string(&frontier::recovery_debt::recovery_debt(&r.hr, &rm, r.base_hr, r.base_rmssd)).unwrap_or_else(|e| err(&e.to_string())) }, Err(e) => err(&e.to_string()) }
+}
+#[derive(Deserialize)]
+struct LightReq { samples: Vec<(f64,f64)>, onset_ts: f64, wake_ts: f64 }
+#[wasm_bindgen]
+pub fn calc_light_hygiene(req_json: &str) -> String {
+    match serde_json::from_str::<LightReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::light::light_hygiene(&r.samples, r.onset_ts, r.wake_ts)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
+}
+#[derive(Deserialize)]
+struct OrthoReq { samples: Vec<(f64,f64,f64,f64,f64)> }
+#[wasm_bindgen]
+pub fn calc_orthostatic(req_json: &str) -> String {
+    match serde_json::from_str::<OrthoReq>(req_json) { Ok(r) => serde_json::to_string(&frontier::orthostatic::orthostatic(&r.samples)).unwrap_or_else(|e| err(&e.to_string())), Err(e) => err(&e.to_string()) }
 }
 
 fn err(msg: &str) -> String {
