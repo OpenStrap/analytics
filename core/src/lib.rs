@@ -8,7 +8,6 @@ mod calories;
 mod circadian;
 mod coach;
 mod cycle;
-mod decode;
 mod cycles;
 mod fitness;
 mod har;
@@ -812,63 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_parity_vs_ts() {
-        // 3-way gate (TS side): run the ported decoder on the SAME raw hex the real
-        // TS decoders ran on (whoop_hist 550 R24 + whoop_capture live inners) and
-        // require byte-identical output across every case.
-        let raw = std::fs::read_to_string("decode_parity_cases.json").expect("run `npx tsx scripts/decode_parity.ts`");
-        let cases: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
-        let mut fails: Vec<String> = Vec::new();
-        let mut by_kind: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-        for c in &cases {
-            let kind = c["kind"].as_str().unwrap();
-            let hex = c["hex"].as_str().unwrap();
-            let got_str = match kind {
-                "r24" => super::decode_r24(hex),
-                "record" => super::decode_record(hex),
-                "rr" => super::realtime_rr(hex),
-                "accel" => super::frame_accel(hex),
-                _ => { fails.push(format!("{}: unknown kind", kind)); continue; }
-            };
-            *by_kind.entry(kind.to_string()).or_insert(0) += 1;
-            let got: serde_json::Value = serde_json::from_str(&got_str).unwrap_or(serde_json::Value::Null);
-            if !json_num_eq(&got, &c["out"]) {
-                if fails.len() < 12 {
-                    fails.push(format!("{} {}…\n   got: {}\n   exp: {}", kind, &hex[..hex.len().min(24)], got, c["out"]));
-                } else {
-                    fails.push(format!("{} {}… (mismatch)", kind, &hex[..hex.len().min(16)]));
-                }
-            }
-        }
-        assert!(fails.is_empty(), "{} decode mismatches across {:?}:\n{}", fails.len(), by_kind, fails.join("\n"));
-        assert!(cases.len() >= 2000, "expected ≥2000 cases, got {}", cases.len());
-    }
-
-    #[test]
-    fn decode_parity_vs_dart() {
-        // 3-way gate (Dart side): the edge Dart decoder emits the R24 HEADER subset
-        // (counter/ts_epoch/ts_subsec/hr). Require Rust's decode_r24 to match it on
-        // all 550 whoop_hist frames.
-        let raw = std::fs::read_to_string("dart_header.json").expect("run `dart run tool/dart_header_dump.dart` in openstrap-edge");
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
-        let mut fails = 0;
-        for r in &rows {
-            let hex = r["hex"].as_str().unwrap();
-            let got: serde_json::Value = serde_json::from_str(&super::decode_r24(hex)).unwrap();
-            for f in ["counter", "ts_epoch", "ts_subsec", "hr"] {
-                if got[f] != r[f] {
-                    fails += 1;
-                    if fails <= 8 {
-                        eprintln!("dart!=rust {} {}: dart={} rust={}", f, &hex[..16], r[f], got[f]);
-                    }
-                }
-            }
-        }
-        assert_eq!(fails, 0, "{} header-field mismatches vs Dart over {} frames", fails, rows.len());
-        assert!(rows.len() >= 500, "expected ≥500 dart frames, got {}", rows.len());
-    }
-
-    #[test]
     fn json_boundary_roundtrips() {
         let out = time_domain_hrv(r#"{"rr":[800,820,800,820,800,820,800,820,800,820,800,820,800,820,800,820,800,820,800,820,800,820]}"#);
         assert!(out.contains("\"rmssd\":20"), "json out: {}", out);
@@ -928,42 +870,6 @@ pub fn build_notifications(req_json: &str) -> String {
     match serde_json::from_str::<notify::NotifyInputs>(req_json) {
         Ok(r) => serde_json::to_string(&notify::build_notifications(&r)).unwrap_or_else(|e| err(&e.to_string())),
         Err(e) => err(&e.to_string()),
-    }
-}
-
-// ── Protocol decoder wasm wrappers (hex string in → JSON out; "null" when undecodable) ──
-fn dec_or_null<T: serde::Serialize>(v: Option<T>) -> String {
-    match v {
-        Some(x) => serde_json::to_string(&x).unwrap_or_else(|e| err(&e.to_string())),
-        None => "null".to_string(),
-    }
-}
-#[wasm_bindgen]
-pub fn decode_r24(hex: &str) -> String {
-    match decode::hex_to_bytes(hex) {
-        Some(b) => dec_or_null(decode::records::parse_r24(&b)),
-        None => "null".to_string(),
-    }
-}
-#[wasm_bindgen]
-pub fn decode_record(hex: &str) -> String {
-    match decode::hex_to_bytes(hex) {
-        Some(b) => dec_or_null(decode::live::decode_record(&b)),
-        None => "null".to_string(),
-    }
-}
-#[wasm_bindgen]
-pub fn realtime_rr(hex: &str) -> String {
-    match decode::hex_to_bytes(hex) {
-        Some(b) => dec_or_null(decode::live::realtime_rr(&b)),
-        None => "null".to_string(),
-    }
-}
-#[wasm_bindgen]
-pub fn frame_accel(hex: &str) -> String {
-    match decode::hex_to_bytes(hex) {
-        Some(b) => dec_or_null(decode::live::frame_accel(&b)),
-        None => "null".to_string(),
     }
 }
 
