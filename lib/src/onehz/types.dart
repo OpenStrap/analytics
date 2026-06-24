@@ -1,7 +1,7 @@
 // 1 Hz-native analytics family — input/output types.
 //
-// This family is NET-NEW and independent of the parked minute-family
-// (lib/src/*.dart). It models the always-on 1 Hz substrate described in
+// Independent of the minute-resolution family in lib/src/*.dart. Models the
+// always-on 1 Hz substrate described in
 // docs/ALGORITHM_CATALOG_1HZ.md:
 //   - beat-to-beat RR (0–4 beats/s, ms)
 //   - 1 Hz HR

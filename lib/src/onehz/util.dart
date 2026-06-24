@@ -195,7 +195,7 @@ class LombScargle {
 /// invariant. Returns null if <4 points or zero variance.
 ///
 /// This operates on NATIVE sample times — no resampling — which is exactly why
-/// it's the correct PSD for beat-time RR (per the catalog).
+/// it's the correct PSD for unevenly-sampled beat-time RR.
 LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   final n = t.length;
   if (n < 4 || y.length != n || freqsHz.isEmpty) return null;

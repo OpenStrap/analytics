@@ -5,9 +5,9 @@
 // variance is 1/Σ(1/σ²). Simple GUM (JCGM 100:2008) uncertainty propagation for
 // a weighted sum gives the combined standard uncertainty.
 //
-// HONESTY: per the catalog we GATE biased motion-artifact inputs OUT (drop,
-// don't down-weight). A caller passes `trusted=false` for any channel the SQI
-// gate rejected; those are excluded entirely from the fusion.
+// Biased motion-artifact inputs are gated OUT, not down-weighted: a caller
+// passes `trusted=false` for any channel the SQI gate rejected, and those are
+// excluded entirely from the fusion.
 
 import 'dart:math' as math;
 

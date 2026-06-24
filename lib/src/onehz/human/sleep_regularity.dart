@@ -9,8 +9,8 @@
 //
 // Sleep debt: Kitamura's "optimal sleep duration" is estimated from the
 // rebound on unconstrained (free) nights; debt = OSD − recent habitual sleep.
-// HONEST when there is no free night yet (we say so, don't fabricate an 8 h
-// trope).
+// Returns null when there is no free night yet, rather than assuming a generic
+// 8 h target.
 
 import '../types.dart';
 import '../util.dart';

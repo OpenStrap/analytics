@@ -1,8 +1,7 @@
 // WELLNESS family barrel — temperature / anomaly / change-point / readiness.
 //
-// Net-new 1 Hz-native family built on the committed foundations
-// (types/util/baseline/fusion) and clinical (cosinor, illness_cusum). Per the
-// catalog these are MED-tier, RELATIVE-honest methods:
+// Built on the foundations (types/util/baseline/fusion) and clinical (cosinor,
+// illness_cusum) layers. MED-tier, RELATIVE-honest methods:
 //   - tempCircadian        : relative skin-temp cosinor + IS/IV/RA/L5/M10
 //   - tempIllnessFlag      : Smarr nightly relative-temp z, CYCLE-AWARE
 //   - menstrualCoverline   : 3-over-6 retrospective ovulation CONFIRMATION

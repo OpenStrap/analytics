@@ -9,9 +9,9 @@
 //   - Cardiopulmonary Coupling (CPC)              (cpc.dart)
 //   - Nonparametric circadian IS/IV/RA/L5/M10     (circadian_np.dart)
 //
-// All net-new, pure Dart, building on the package foundations (RR correction,
-// Lomb-Scargle, robust stats). No TS oracle exists for these — validated by
-// synthetic known-answer tests + real-capture plausibility.
+// Pure Dart, built on the package foundations (RR correction, Lomb-Scargle,
+// robust stats). Validated by synthetic known-answer tests + real-capture
+// plausibility.
 
 export 'van_hees.dart';
 export 'sri.dart';

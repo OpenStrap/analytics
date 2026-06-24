@@ -56,7 +56,7 @@ class CpcResult {
 /// CPC from a cleaned NN series + its beat times.
 ///
 /// [nnMs] cleaned NN intervals (ms). [nnTimesMs] matching cumulative beat times
-/// (ms). Both from `correctRr`. We build the respiration surrogate internally.
+/// (ms). Both from `correctRr`. The respiration surrogate is built internally.
 Metric<CpcResult> cardiopulmonaryCoupling(
   List<double> nnMs,
   List<double> nnTimesMs,

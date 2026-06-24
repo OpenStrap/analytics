@@ -2,16 +2,16 @@
 //
 // Lipponen & Tarvainen 2019 ("A robust algorithm for heart rate variability
 // time series artefact correction using novel beat classification", J Med Eng
-// Technol) — the detector Kubios automates. We implement the dRR / mRR / sRR
-// decision logic with a TIME-VARYING threshold derived from a quantile-based
+// Technol) — the detector Kubios automates. Applies the dRR / mRR / sRR
+// decision logic with a time-varying threshold derived from a quantile-based
 // dispersion of dRR over a sliding window.
 //
-// Correction policy per the catalog (Peltola 2012):
+// Correction policy (Peltola 2012):
 //   * cubic-spline interpolate ONLY isolated single ectopic/missed/extra beats;
-//   * FLAG-AND-DROP multi-beat runs — NEVER interpolate a run (no fabrication).
+//   * flag-and-drop multi-beat runs — never interpolate a run.
 //
-// Honesty: this is PRV. Output = cleaned NN series + per-beat artifact mask +
-// clean fraction. We never silently bridge multi-beat gaps.
+// This is PRV. Output = cleaned NN series + per-beat artifact mask + clean
+// fraction. Multi-beat gaps are never silently bridged.
 
 import 'dart:math' as math;
 import '../util.dart';

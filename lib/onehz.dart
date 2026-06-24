@@ -1,6 +1,6 @@
 /// openstrap_analytics — 1 Hz-native physiological analytics family.
 ///
-/// NET-NEW, independent of the parked minute-family in
+/// Independent of the minute-resolution library in
 /// `lib/openstrap_analytics.dart`. Operates on the always-on 1 Hz substrate
 /// (beat-to-beat RR, 1 Hz HR, 1 Hz tri-axial accel, relative-ADC channels) per
 /// docs/ALGORITHM_CATALOG_1HZ.md.
