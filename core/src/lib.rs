@@ -13,6 +13,7 @@ mod cycles;
 mod fitness;
 mod har;
 mod hrv;
+mod hz1;
 mod illness;
 mod sessions;
 mod sleep;
@@ -917,5 +918,58 @@ pub fn frame_accel(hex: &str) -> String {
     match decode::hex_to_bytes(hex) {
         Some(b) => dec_or_null(decode::live::frame_accel(&b)),
         None => "null".to_string(),
+    }
+}
+
+// ── hz1 (1 Hz-native family) wasm wrappers ──────────────────────────────────
+#[derive(Deserialize)]
+struct RrReq { rr: Vec<f64>, #[serde(default)] window: usize }
+#[wasm_bindgen]
+pub fn calc_dc_ac(req_json: &str) -> String {
+    match serde_json::from_str::<RrReq>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::prsa::capacity(&r.rr, if r.window == 0 { 4 } else { r.window })).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
+    }
+}
+#[derive(Deserialize)]
+struct RrOnly { rr: Vec<f64> }
+#[wasm_bindgen]
+pub fn calc_long_term_hrv(req_json: &str) -> String {
+    match serde_json::from_str::<RrOnly>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::longhrv::long_term_hrv(&r.rr)).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
+    }
+}
+#[wasm_bindgen]
+pub fn calc_hr_asymmetry(req_json: &str) -> String {
+    match serde_json::from_str::<RrOnly>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::asymmetry::heart_rate_asymmetry(&r.rr)).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
+    }
+}
+#[wasm_bindgen]
+pub fn calc_cvhr(req_json: &str) -> String {
+    match serde_json::from_str::<RrOnly>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::cvhr::cvhr_screen(&r.rr)).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
+    }
+}
+#[derive(Deserialize)]
+struct CircHrvReq { by_minute: Vec<MinuteRr>, #[serde(default = "default_bucket")] bucket_sec: f64, #[serde(default)] night_from: Option<f64>, #[serde(default)] night_to: Option<f64> }
+#[wasm_bindgen]
+pub fn calc_circadian_hrv(req_json: &str) -> String {
+    match serde_json::from_str::<CircHrvReq>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::circ_hrv::circadian_hrv(&r.by_minute, r.bucket_sec, r.night_from, r.night_to)).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
+    }
+}
+#[derive(Deserialize)]
+struct SriReq { epochs: Vec<hz1::sri::SriEpoch>, #[serde(default = "default_epoch")] epoch_sec: f64 }
+fn default_epoch() -> f64 { 30.0 }
+#[wasm_bindgen]
+pub fn calc_sleep_regularity_index(req_json: &str) -> String {
+    match serde_json::from_str::<SriReq>(req_json) {
+        Ok(r) => serde_json::to_string(&hz1::sri::sleep_regularity_index(&r.epochs, r.epoch_sec)).unwrap_or_else(|e| err(&e.to_string())),
+        Err(e) => err(&e.to_string()),
     }
 }

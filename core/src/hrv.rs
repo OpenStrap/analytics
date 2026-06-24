@@ -68,7 +68,7 @@ pub fn time_domain_hrv(rr_raw: &[f64]) -> TimeDomainHrvOut {
 }
 
 /// Lomb–Scargle band power + in-band peak. Mirrors lombScargleBand.
-fn lomb_scargle_band(t: &[f64], x: &[f64], f_lo: f64, f_hi: f64, df: f64) -> (f64, f64, f64) {
+pub(crate) fn lomb_scargle_band(t: &[f64], x: &[f64], f_lo: f64, f_hi: f64, df: f64) -> (f64, f64, f64) {
     let mut power = 0.0;
     let mut peak_power = -1.0;
     let mut peak_freq = 0.0;
