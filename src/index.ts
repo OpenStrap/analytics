@@ -94,7 +94,7 @@ export { calcIllness } from './illness';
 export type { IllnessToday, IllnessHistory, IllnessOpts } from './illness';
 
 // §11 Baselines
-export { calcBaselines } from './baselines';
+export { calcBaselines, seedBaselines, type SeededBaselines } from './baselines';
 
 // Activity metric (steps / active-sedentary) REMOVED in v0 — see activity.ts.
 

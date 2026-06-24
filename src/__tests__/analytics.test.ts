@@ -13,7 +13,7 @@ import { detectSessions } from '../sessions';
 import { calcHrRecovery, calcRecovery } from '../recovery';
 import { calcLoad, calcFitnessTrend } from '../trends';
 import { calcAnomaly } from '../readiness';
-import { calcBaselines } from '../baselines';
+import { calcBaselines, seedBaselines } from '../baselines';
 import { calcStress } from '../stress';
 import { calcSpo2Index } from '../spo2';
 import { calcSleepStress } from '../arousal';
@@ -1081,6 +1081,32 @@ console.log('--- §restlessness / daytime HRV / desaturation ---');
   assert(des.deepest_pct !== null && des.deepest_pct > 0, 'desaturation: reports deepest dip');
   const desNoBase = calcDesaturation(ratios, null);
   assert(desNoBase.events === 0 && desNoBase.confidence === 0, 'desaturation: no baseline → abstain');
+}
+
+// ── §11b seedBaselines (profile priors) ──────────────────────────────────────
+console.log('--- §11b seedBaselines ---');
+{
+  const m = seedBaselines({ age: 30, sex: 'm' });
+  assert(m.resting_hr === 62, `seed: male RHR prior (got ${m.resting_hr})`);
+  assert(m.max_hr === 187, `seed: Tanaka 208-0.7*30 (got ${m.max_hr})`);
+  assert(m.sleep_need_min === 480, 'seed: adult 8h sleep need');
+  assert(m.sleeping_hr === 55, `seed: sleeping HR = resting-7 (got ${m.sleeping_hr})`);
+  approx(m.hrv_rmssd, 42, 0.5, `seed: RMSSD age-prior 60-0.6*30 (got ${m.hrv_rmssd})`);
+
+  const f = seedBaselines({ age: 66, sex: 'f' });
+  assert(f.resting_hr === 66, 'seed: female RHR prior');
+  assert(f.max_hr === 162, `seed: Tanaka @66 (got ${f.max_hr})`);
+  assert(f.sleep_need_min === 450, 'seed: ≥65 → 450');
+  assert(f.hrv_rmssd === 20, `seed: RMSSD @66 (got ${f.hrv_rmssd})`);
+
+  const young = seedBaselines({ age: 20 });
+  assert(young.sleep_need_min === 510, 'seed: <25 → 510');
+  assert(young.hrv_rmssd === 48, `seed: RMSSD @20 (got ${young.hrv_rmssd})`);
+
+  const none = seedBaselines();
+  assert(none.resting_hr === 64, 'seed: no sex → neutral RHR 64');
+  assert(none.max_hr === Math.round(208 - 0.7 * 35), 'seed: no age → default age 35 maxHR');
+  assert(none.resp_rate === 15 && none.hrv_si === 90, 'seed: resp + SI constants');
 }
 
 summary('analytics');
