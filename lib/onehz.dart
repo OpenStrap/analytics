@@ -13,3 +13,9 @@ library onehz;
 // Layer: input types & math.
 export 'src/onehz/types.dart';
 export 'src/onehz/util.dart';
+
+// Layer 0: foundations.
+export 'src/onehz/foundations/rr_correction.dart';
+export 'src/onehz/foundations/ppg_sqi.dart';
+export 'src/onehz/foundations/baseline.dart';
+export 'src/onehz/foundations/fusion.dart';
