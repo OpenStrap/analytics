@@ -1,6 +1,56 @@
 // §11 Baselines — rolling 30-day medians feeding everything.
 import type { DayHistory, Profile, Metric, BaselinesValue } from './types';
-import { median, round } from './util';
+import { median, round, clamp } from './util';
+
+/** Population/profile-prior baselines for a brand-new user (see seedBaselines). */
+export interface SeededBaselines {
+  resting_hr: number;
+  max_hr: number | null;
+  sleep_need_min: number;
+  hrv_rmssd: number;
+  sleeping_hr: number;
+  resp_rate: number;
+  hrv_si: number;
+}
+
+/**
+ * seedBaselines(profile?)
+ *
+ * Population/profile PRIORS for a user with no measured history yet. These are
+ * low-confidence anchors, NOT measured truth — they let strain/HR-zones use a
+ * personal resting/max HR from day 1, and warm-start the EWMA-rolled autonomic
+ * baselines (RMSSD, sleeping-HR, SI) from physiological norms instead of cold,
+ * self-referential seeding on night 1. Every value is overwritten by real data as
+ * it accrues: calcBaselines' rolling medians, the nightly EWMA rolls, and the
+ * ≥5-night gated scores (recovery/stress) — which still require real nights and
+ * are never fabricated by these priors.
+ *
+ * Population medians (healthy adults):
+ *   resting HR  — ~62 (m) / ~66 (f) (HUNT3 / NHANES adult medians).
+ *   max HR      — Tanaka 208 − 0.7·age (Tanaka et al., JACC 2001).
+ *   sleep need  — 8 h adult default (NSF 2015), nudged at age extremes.
+ *   RMSSD       — age-declining (Umetani et al., JACC 1998): 60 − 0.6·age, 18–60 ms.
+ *   sleeping HR — resting − ~7 (typical nocturnal dip).
+ *   resp rate   — 15 br/min (normal resting adult).
+ *   Baevsky SI  — ~90 (normal resting sympathetic tone).
+ */
+export function seedBaselines(profile?: Profile): SeededBaselines {
+  const age = profile?.age && profile.age > 0 ? profile.age : 35;
+  const sex = profile?.sex;
+  const restingHr = sex === 'f' ? 66 : sex === 'm' ? 62 : 64;
+  const maxHr = Math.round(208 - 0.7 * age);
+  const sleepNeed = age < 25 ? 510 : age >= 65 ? 450 : 480;
+  const rmssd = clamp(round(60 - 0.6 * age, 0), 18, 60);
+  return {
+    resting_hr: restingHr,
+    max_hr: maxHr > 0 ? maxHr : null,
+    sleep_need_min: sleepNeed,
+    hrv_rmssd: rmssd,
+    sleeping_hr: restingHr - 7,
+    resp_rate: 15,
+    hrv_si: 90,
+  };
+}
 
 /**
  * calcBaselines(history, profile?)
