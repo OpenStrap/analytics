@@ -18,7 +18,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
-import 'package:openstrap_analytics/src/onehz/human/human.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
 void main() {
@@ -248,18 +247,18 @@ void main() {
       final tempHist = List<double>.generate(20, (i) => 0.0 + (i % 5) * 0.02);
 
       final inputs = [
-        ReadinessInput(
+        GlassBoxInput(
             label: 'hrv', value: 3.0, history: hrvHist, weight: wHrv), // way low
-        ReadinessInput(
+        GlassBoxInput(
             label: 'rhr',
             value: 55.4,
             history: rhrHist,
             weight: wRhr,
             lowerIsBetter: true),
-        ReadinessInput(
+        GlassBoxInput(
             label: 'resp', value: 14.2, history: respHist, weight: wResp,
             lowerIsBetter: true),
-        ReadinessInput(
+        GlassBoxInput(
             label: 'temp', value: 0.04, history: tempHist, weight: wTemp,
             lowerIsBetter: true),
       ];
@@ -281,8 +280,8 @@ void main() {
       // All inputs essentially at their median => no driver clears MDC.
       final hist = List<double>.generate(20, (i) => 50.0 + (i % 5) * 0.1);
       final inputs = [
-        ReadinessInput(label: 'hrv', value: 50.2, history: hist, weight: wHrv),
-        ReadinessInput(
+        GlassBoxInput(label: 'hrv', value: 50.2, history: hist, weight: wHrv),
+        GlassBoxInput(
             label: 'rhr', value: 50.2, history: hist, weight: wRhr,
             lowerIsBetter: true),
       ];
@@ -294,9 +293,9 @@ void main() {
     test('missing input reweights, does not zero the score', () {
       final hist = List<double>.generate(20, (i) => 60.0 + (i % 5));
       final inputs = [
-        ReadinessInput(label: 'hrv', value: 64, history: hist, weight: wHrv),
+        GlassBoxInput(label: 'hrv', value: 64, history: hist, weight: wHrv),
         // temp has no history => dropped + reweighted, not zeroed.
-        ReadinessInput(label: 'temp', value: 0.0, history: const [], weight: wTemp),
+        GlassBoxInput(label: 'temp', value: 0.0, history: const [], weight: wTemp),
       ];
       final m = glassBoxReadiness(inputs);
       expect(m.present, isTrue);

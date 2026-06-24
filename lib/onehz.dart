@@ -29,3 +29,10 @@ export 'src/onehz/clinical/illness_cusum.dart';
 export 'src/onehz/clinical/readiness_lnrmssd.dart';
 export 'src/onehz/clinical/cosinor.dart';
 export 'src/onehz/clinical/load_trimp.dart';
+
+// Metric families (each a self-contained barrel over the foundations + clinical).
+export 'src/onehz/sleep/sleep.dart';
+export 'src/onehz/respiration/respiration.dart';
+export 'src/onehz/motion/motion.dart';
+export 'src/onehz/wellness/wellness.dart';
+export 'src/onehz/human/human.dart';

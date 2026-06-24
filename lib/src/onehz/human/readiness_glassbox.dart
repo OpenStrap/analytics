@@ -1,5 +1,5 @@
-// HUMAN LAYER — Glass-box Readiness 0–100 + deterministic narrative.
-// Catalog §D: Glass-box Readiness [PUB HRV centrality; HEUR weighting] and
+// HUMAN LAYER — Glass-box GlassBoxReadiness 0–100 + deterministic narrative.
+// Catalog §D: Glass-box GlassBoxReadiness [PUB HRV centrality; HEUR weighting] and
 // deterministic narrative driver-attribution [HEUR, standard decomposition].
 //
 // EVERY input is a within-user percentile-of-you (0..100), sign-oriented so
@@ -20,14 +20,14 @@ import '../util.dart';
 import '../foundations/baseline.dart';
 
 /// One readiness input the caller supplies.
-class ReadinessInput {
+class GlassBoxInput {
   final String label; // 'hrv' | 'rhr' | 'resp' | 'temp' | custom
   final double value; // tonight's value (raw unit)
   final List<double> history; // personal history of this input (excl. tonight)
   final double weight; // relative weight (HRV>RHR>RR>temp)
   /// If true, a LOWER value is better-for-you (e.g. RHR, resp, temp deviation).
   final bool lowerIsBetter;
-  const ReadinessInput({
+  const GlassBoxInput({
     required this.label,
     required this.value,
     required this.history,
@@ -61,13 +61,13 @@ class ReadinessBreakdownItem {
       };
 }
 
-class Readiness {
+class GlassBoxReadiness {
   final double score; // 0..100
   final List<ReadinessBreakdownItem> breakdown; // ALWAYS present
   final List<Driver> drivers; // ranked by |w·z|, only NAMED past MDC
   final String narrative; // deterministic, definitional "why"
   final int inputsUsed;
-  const Readiness(this.score, this.breakdown, this.drivers, this.narrative,
+  const GlassBoxReadiness(this.score, this.breakdown, this.drivers, this.narrative,
       this.inputsUsed);
   Map<String, dynamic> toJson() => {
         'score': round6(score),
@@ -88,8 +88,8 @@ class Readiness {
 /// Drivers: contribution_i = weight_i · (orientedPct_i − 50). Ranked by
 /// magnitude; a driver is NAMED in the narrative only if its raw change cleared
 /// its MDC (robust baseline gate). The breakdown lists ALL inputs regardless.
-Metric<Readiness> glassBoxReadiness(
-  List<ReadinessInput> inputs, {
+Metric<GlassBoxReadiness> glassBoxReadiness(
+  List<GlassBoxInput> inputs, {
   int minHistory = 7,
 }) {
   const used = ['readiness_inputs'];
@@ -146,7 +146,7 @@ Metric<Readiness> glassBoxReadiness(
   }
 
   if (nUsable == 0 || wsum == 0) {
-    return const Metric<Readiness>.absent(
+    return const Metric<GlassBoxReadiness>.absent(
       tier: Tier.estimate,
       inputs_used: used,
       note: 'no readiness input has enough of your history yet',
@@ -171,8 +171,8 @@ Metric<Readiness> glassBoxReadiness(
 
   // Confidence reflects how many of the priority inputs were usable.
   final conf = clamp(nUsable / inputs.length.toDouble(), 0.3, 0.9);
-  return Metric<Readiness>(
-    value: Readiness(score, items, drivers, narrative, nUsable),
+  return Metric<GlassBoxReadiness>(
+    value: GlassBoxReadiness(score, items, drivers, narrative, nUsable),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: used,

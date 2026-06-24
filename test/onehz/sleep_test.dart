@@ -15,7 +15,6 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
-import 'package:openstrap_analytics/src/onehz/sleep/sleep.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
 void main() {
