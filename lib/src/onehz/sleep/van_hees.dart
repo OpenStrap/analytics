@@ -79,7 +79,12 @@ Metric<SleepWindow> vanHeesSleepWindow(
   List<AccelSample> accel, {
   double angleThresholdDeg = 5,
   int sustainedMin = 5,
-  int bridgeGapMin = 1,
+  // Bridge brief intra-sleep interruptions (position changes / awakenings) when
+  // joining sustained-inactivity blocks into one sleep period. The published
+  // van Hees/GGIR HDCZA bridges ~30–60 min; a too-small value (was 1 min)
+  // fragments a real night at every reposition and keeps only the longest sliver.
+  // Validated on real 1 Hz data: 1 min → 28-min sliver; 30 min → full ~6.9 h night.
+  int bridgeGapMin = 30,
   int smoothSec = 5,
 }) {
   const inputs = ['accel_1hz'];
