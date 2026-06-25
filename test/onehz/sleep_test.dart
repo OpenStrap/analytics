@@ -275,6 +275,93 @@ void main() {
       expect(s.present, isFalse);
       expect(s.confidence, 0);
     });
+
+    // --- Webster/Cole-Kripke sleep-continuity rescoring regression -----------
+    // These pin the over-wake fix: brief arousals (motion blips that the van
+    // Hees 5-min forward window smears, or short HR bumps) must be rescored to
+    // sleep, while a SUSTAINED active + high-HR block stays WAKE.
+    test('(d) brief 2-3 min arousals are rescored → high efficiency', () {
+      // 2h day, 7h night, 1h tail. Night is dead-still & low-HR except for a
+      // few brief (2-3 min) arousals (motion + HR bump) that should be bridged.
+      const dayH = 2, nightH = 7, tailH = 1;
+      final arousals = <List<int>>[
+        [90 * 60, 90 * 60 + 120], // 2 min at 1.5h
+        [200 * 60, 200 * 60 + 180], // 3 min at ~3.3h
+        [300 * 60, 300 * 60 + 150], // 2.5 min at 5h
+      ];
+      bool inArousal(int s) =>
+          arousals.any((a) => s >= a[0] && s < a[1]);
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < dayH * 3600; i++) {
+        final p = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * p, 0.3, 0.9 * (1 - 0.2 * p)));
+        hr.add(72 + (i % 5).toDouble());
+        t += 1000.0;
+      }
+      for (var i = 0; i < nightH * 3600; i++) {
+        if (inArousal(i)) {
+          accel.add(AccelSample(t, 0.5, -0.4, 0.6)); // motion
+          hr.add(80 + (i % 7).toDouble()); // HR bump toward wake
+        } else {
+          accel.add(AccelSample(t, 0.02, 0.02, 1.0)); // dead still
+          hr.add(50 + (i % 3).toDouble() - 1); // low sleeping HR
+        }
+        t += 1000.0;
+      }
+      for (var i = 0; i < tailH * 3600; i++) {
+        final p = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * p, 0.3, 0.9 * (1 - 0.2 * p)));
+        hr.add(72 + (i % 5).toDouble());
+        t += 1000.0;
+      }
+      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
+      expect(s.present, isTrue);
+      // Arousals total < 8 min over a ~7h night; rescoring → high efficiency.
+      expect(s.efficiencyPct!, greaterThan(90));
+      expect(s.wasoSec!, lessThan(20 * 60)); // < 20 min residual wake
+    });
+
+    test('(e) a sustained 30-min active+high-HR block scores as WAKE', () {
+      // Still low-HR night with ONE sustained 30-min block of continuous motion
+      // AND elevated HR in the middle. That block is real WASO — NOT bridged.
+      const dayH = 2, nightH = 7, tailH = 1;
+      const blkStart = 180 * 60; // 3h into night
+      const blkEnd = blkStart + 30 * 60; // 30-min block
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < dayH * 3600; i++) {
+        final p = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * p, 0.3, 0.9 * (1 - 0.2 * p)));
+        hr.add(72 + (i % 5).toDouble());
+        t += 1000.0;
+      }
+      for (var i = 0; i < nightH * 3600; i++) {
+        if (i >= blkStart && i < blkEnd) {
+          final p = math.sin(i * 0.7);
+          accel.add(AccelSample(t, 0.4 * p, -0.3, 0.85 * (1 - 0.2 * p)));
+          hr.add(92 + (i % 9).toDouble()); // clearly awake HR
+        } else {
+          accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+          hr.add(50 + (i % 3).toDouble() - 1);
+        }
+        t += 1000.0;
+      }
+      for (var i = 0; i < tailH * 3600; i++) {
+        final p = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * p, 0.3, 0.9 * (1 - 0.2 * p)));
+        hr.add(72 + (i % 5).toDouble());
+        t += 1000.0;
+      }
+      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
+      expect(s.present, isTrue);
+      // The 30-min block (1800 s) must be counted as wake/WASO, not bridged.
+      // Allow epoch/HR-dip edge trimming but require most of the 30-min block
+      // (1800 s) to remain wake — proving sustained arousals are NOT bridged.
+      expect(s.wasoSec!, greaterThan(18 * 60));
+    });
   });
 
   // ------------------------------------------------------------------- stager
