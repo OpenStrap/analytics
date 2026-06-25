@@ -13,8 +13,9 @@
 //      supplied, confirm/refine onset & offset to where HR sustains below the
 //      baseline (the cardiac signature of sleep), tightening — never widening —
 //      the accel window. This is a CONSENSUS refinement, not a second detector.
-//   3. autonomicStager over the WINDOW SLICE ONLY (hr + immobility sliced to
-//      [onsetIdx, offsetIdx)) → 3-class wake/NREM/REM per epoch.
+//   3. walchStager (Walch et al. 2019) over the WINDOW SLICE ONLY (hr + accel
+//      sliced to [onsetIdx, offsetIdx)) → validated 3-class wake/NREM/REM per
+//      epoch. (Replaces the deprecated hand-rolled autonomicStager.)
 //   4. Expand the per-epoch stages to PER-SECOND labels over the window, and
 //      derive TST/WASO/efficiency/stage-seconds ALL from those labels
 //      (asleep = stage != wake), so they are mutually consistent and consistent
@@ -28,7 +29,7 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
 import 'van_hees.dart';
-import 'stager.dart';
+import 'walch_stager.dart';
 import 'accounting.dart' show SleepStage;
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
@@ -164,10 +165,18 @@ SleepSegmentation segmentSleep(
   final inBed = offset - onset;
   if (inBed < _minQualifyingSleepSec) return SleepSegmentation.absent;
 
-  // 3. Stager over the WINDOW SLICE ONLY.
+  // 3. Stager over the WINDOW SLICE ONLY — Walch et al. 2019 (validated 3-class
+  //    wrist stager) replaces the hand-rolled autonomicStager. Walch consumes
+  //    HR + raw accel (it derives its own motion/HR/cosine features). The
+  //    cosine sleep-drive feature is anchored to ELAPSED time from window onset
+  //    (clockHourAtStart = null), EXACTLY matching Walch's `build_cosine`
+  //    (cosine_proxy of epoch.timestamp − first_timestamp): the window onset IS
+  //    the model's t0, so the sleep-drive cosine sweeps toward its trough ~5 h
+  //    in. This is the convention the embedded coefficients were trained under;
+  //    passing a wall-clock hour here would introduce train/serve phase skew.
   final hrSlice = hr1hz.sublist(onset, offset);
-  final immSlice = w.immobile.sublist(onset, offset);
-  final sm = autonomicStager(hrSlice, immSlice);
+  final accelSlice = accel.sublist(onset, offset);
+  final sm = walchStager(hrSlice, accelSlice, clockHourAtStart: null);
   final st = sm.value;
   if (st == null) return SleepSegmentation.absent;
 
