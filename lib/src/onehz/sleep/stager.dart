@@ -165,6 +165,18 @@ Metric<StagerResult> autonomicStager(
   // (Symmetric in both directions: "surrounded by" sleep on either side.)
   _websterRescore(sm, epochSec);
 
+  // --- Stage-architecture consolidation ---------------------------------------
+  // The raw per-epoch labels flip-flop nrem↔rem because the REM gate (elevated
+  // HR + above-median variability) is met intermittently within a single REM
+  // episode and during NREM micro-fluctuations. Real sleep architecture is a
+  // few SUSTAINED NREM/REM bouts within ~90-min cycles, not per-epoch jitter.
+  // Enforce: (a) REM only survives as EPISODES ≥ minRemMin, gap-bridged so a
+  // brief NREM intrusion inside an otherwise-REM run doesn't split it; (b) any
+  // remaining stage bout shorter than minBoutMin is merged into its neighbour.
+  // WAKE bouts are preserved (Webster already governs WASO); only the asleep
+  // NREM/REM micro-structure is consolidated.
+  _consolidateStages(sm, epochSec);
+
   var w = 0, nr = 0, r = 0;
   for (final s in sm) {
     switch (s) {
@@ -286,5 +298,133 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
       }
     }
     i = j;
+  }
+}
+
+/// Minimum sustained REM episode (min) and minimum NREM/REM bout (min) for the
+/// architecture-consolidation post-step. ~5 min reflects the shortest credible
+/// REM episode and merges sub-5-min stage flicker into the surrounding stage.
+const double remEpisodeMinMin = 5.0;
+const double stageBoutMinMin = 5.0;
+
+/// PUBLIC, PURE consolidation of a per-epoch 3-class stage stream into sustained
+/// NREM/REM bouts (returns a new list; does not mutate [stages]). Exposed so the
+/// edge — and tests — can consolidate a raw label stream directly. See
+/// [_consolidateStages] for the rules; WAKE bouts are preserved.
+List<SleepStage> consolidateSleepStages(List<SleepStage> stages, int epochSec) {
+  final out = List<SleepStage>.from(stages);
+  _consolidateStages(out, epochSec);
+  return out;
+}
+
+/// Consolidate the asleep micro-structure (in place) into sustained NREM/REM
+/// bouts so the hypnogram reads as a few cycles, not per-epoch jitter.
+///
+/// Step 1 — REM-episode gap-bridge: within the asleep span, a NREM gap shorter
+///          than [remEpisodeMinMin] that sits BETWEEN two REM runs is rescored
+///          to REM (one fragmented episode, not two). WAKE is never bridged.
+/// Step 2 — minimum-bout merge: any NREM/REM bout shorter than [stageBoutMinMin]
+///          is merged into the LONGER adjacent asleep bout (or its only
+///          neighbour). Repeated to a fixed point. WAKE bouts are left intact.
+/// Totals are preserved to within ±one bout (a short bout is reassigned whole).
+void _consolidateStages(List<SleepStage> sm, int epochSec) {
+  final n = sm.length;
+  if (n == 0) return;
+  final remGapEp = (remEpisodeMinMin * 60.0 / epochSec).round();
+  final minBoutEp = (stageBoutMinMin * 60.0 / epochSec).round();
+  if (minBoutEp <= 1 && remGapEp <= 1) return;
+
+  bool isSleep(SleepStage s) => s != SleepStage.wake;
+
+  // --- Step 1: bridge short NREM gaps INSIDE a genuine REM episode. ----------
+  // Walk runs; a NREM run shorter than remGapEp is rescored to REM only when it
+  // is flanked on BOTH sides by SUBSTANTIAL REM runs (each ≥ remGapEp epochs) —
+  // i.e. it is a brief intrusion inside one sustained REM episode, not a stray
+  // single-epoch REM flicker sitting inside a NREM block (that flicker is left
+  // for step 2 to absorb into NREM).
+  {
+    // Precompute run boundaries.
+    final runs = <List<int>>[];
+    var p = 0;
+    while (p < n) {
+      var q = p;
+      while (q < n && sm[q] == sm[p]) {
+        q++;
+      }
+      runs.add([p, q]);
+      p = q;
+    }
+    for (var ri = 0; ri < runs.length; ri++) {
+      final start = runs[ri][0], end = runs[ri][1];
+      if (sm[start] != SleepStage.nrem) continue;
+      final gapLen = end - start;
+      if (gapLen >= remGapEp) continue;
+      final left = (ri > 0 && sm[runs[ri - 1][0]] == SleepStage.rem)
+          ? runs[ri - 1][1] - runs[ri - 1][0]
+          : 0;
+      final right = (ri + 1 < runs.length && sm[runs[ri + 1][0]] == SleepStage.rem)
+          ? runs[ri + 1][1] - runs[ri + 1][0]
+          : 0;
+      // Bridge only when both sides are REM AND the COMBINED episode (the two
+      // flanking REM runs plus the gap) is a genuine REM episode ≥ remGapEp.
+      // This stitches an intrusion inside a real episode, but never fuses two
+      // single-epoch REM flickers that merely straddle a NREM stretch.
+      if (left > 0 && right > 0 && (left + right + gapLen) >= remGapEp) {
+        for (var k = start; k < end; k++) {
+          sm[k] = SleepStage.rem;
+        }
+      }
+    }
+  }
+
+  // --- Step 2: merge short asleep bouts into the longer adjacent asleep bout.
+  // Iterate to a fixed point (merging can create a new short bout).
+  var changed = true;
+  while (changed) {
+    changed = false;
+    // Build run boundaries.
+    final runs = <List<int>>[]; // [start, endExclusive]
+    var p = 0;
+    while (p < n) {
+      var q = p;
+      while (q < n && sm[q] == sm[p]) {
+        q++;
+      }
+      runs.add([p, q]);
+      p = q;
+    }
+    for (var ri = 0; ri < runs.length; ri++) {
+      final start = runs[ri][0], end = runs[ri][1];
+      final stage = sm[start];
+      if (!isSleep(stage)) continue; // never merge wake
+      if ((end - start) >= minBoutEp) continue;
+      // Find adjacent asleep neighbours.
+      SleepStage? left, right;
+      var leftLen = 0, rightLen = 0;
+      if (ri > 0 && isSleep(sm[runs[ri - 1][0]])) {
+        left = sm[runs[ri - 1][0]];
+        leftLen = runs[ri - 1][1] - runs[ri - 1][0];
+      }
+      if (ri + 1 < runs.length && isSleep(sm[runs[ri + 1][0]])) {
+        right = sm[runs[ri + 1][0]];
+        rightLen = runs[ri + 1][1] - runs[ri + 1][0];
+      }
+      SleepStage? target;
+      if (left != null && right != null) {
+        target = leftLen >= rightLen ? left : right;
+      } else if (left != null) {
+        target = left;
+      } else if (right != null) {
+        target = right;
+      } else {
+        continue; // isolated short bout between wake on both sides — leave it
+      }
+      if (target == stage) continue;
+      for (var k = start; k < end; k++) {
+        sm[k] = target;
+      }
+      changed = true;
+      break; // re-scan from scratch after a merge
+    }
   }
 }

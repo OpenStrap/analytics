@@ -14,21 +14,31 @@
 // resp↑} + cycle-awareness before ever saying "illness".
 
 import 'dart:math' as math;
+import '../types.dart' show needBaselineNote;
 import '../util.dart';
 
 enum IllnessState { green, yellow, red }
+
+/// Required minimum valid baseline nights before the CUSUM can flag.
+const int illnessCusumMinBaseline = 7;
 
 class IllnessDay {
   final String date;
   final IllnessState state;
   final double? cusum; // accumulator value this night (null if no baseline)
   final double? z; // standardized RHR deviation (modified-z)
-  const IllnessDay(this.date, this.state, this.cusum, this.z);
+
+  /// Machine-readable "need_baseline:have=H,need=N" note set on nights that
+  /// could not be evaluated because the trailing baseline is too short. Null on
+  /// nights that were honestly evaluated (or had no RHR tonight at all).
+  final String? need;
+  const IllnessDay(this.date, this.state, this.cusum, this.z, {this.need});
   Map<String, dynamic> toJson() => {
         'date': date,
         'state': state.name,
         if (cusum != null) 'cusum': round6(cusum!),
         if (z != null) 'z': round6(z!),
+        if (need != null) 'note': need,
       };
 }
 
@@ -49,7 +59,7 @@ List<IllnessDay> illnessCusum(
   double k = 0.5,
   double h = 4.0,
   int persistDays = 2,
-  int minBaseline = 7,
+  int minBaseline = illnessCusumMinBaseline,
   double returnZ = 0.5,
   int recoverDays = 2,
 }) {
@@ -69,7 +79,12 @@ List<IllnessDay> illnessCusum(
     }
     if (r == null || window.length < minBaseline) {
       // No data tonight or no baseline yet: hold green, don't accumulate.
-      out.add(IllnessDay(dates[i], IllnessState.green, null, null));
+      // When RHR IS present but the baseline is too short, attach a
+      // machine-readable need_baseline note so the edge can say "Need N more".
+      final need = r != null
+          ? needBaselineNote(have: window.length, need: minBaseline)
+          : null;
+      out.add(IllnessDay(dates[i], IllnessState.green, null, null, need: need));
       // A missing night neither advances nor resets the run.
       continue;
     }

@@ -56,6 +56,45 @@ Metric<double> banisterTrimp(
   );
 }
 
+/// Log-squash a raw TRIMP into a 0–21 headline "strain" score.
+///
+/// Raw Banister TRIMP grows roughly linearly with duration·intensity and lands
+/// in the hundreds for a normal active day (~335), which is meaningless as a
+/// headline number. A logarithmic squash compresses it into a bounded WHOOP-like
+/// 0–21 scale where each extra point is progressively harder to earn:
+///
+///     strain(trimp) = min(21, ln(trimp + 1) / ln(1.5))
+///
+/// Check-points: 0 → 0; 335 → ln(336)/ln(1.5) ≈ 14.34 (cap not hit).
+double strainScore(double trimp) {
+  if (trimp <= 0) return 0.0;
+  final s = math.log(trimp + 1) / math.log(1.5);
+  return math.min(21.0, s);
+}
+
+/// Headline 0–21 strain as a Metric, alongside the raw TRIMP (HIGH/EST tier).
+///
+/// [trimp] the raw Banister TRIMP for the day/session. Returns absent when no
+/// TRIMP is available (never fabricate a strain from nothing).
+Metric<double> strainScoreMetric(double? trimp) {
+  const inputs = ['trimp'];
+  if (trimp == null || trimp < 0) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'no TRIMP available for a strain score',
+    );
+  }
+  return Metric<double>(
+    value: strainScore(trimp),
+    confidence: 0.6,
+    tier: Tier.estimate,
+    inputs_used: inputs,
+    note: 'headline 0–21 strain = log-squash of raw TRIMP '
+        '(min(21, ln(trimp+1)/ln(1.5))); wrist-HR estimate',
+  );
+}
+
 /// Edwards zone-sum TRIMP. [zoneMinutes] minutes in each of the 5 HR zones
 /// (50–60/60–70/70–80/80–90/90–100 %HRmax); weights 1..5.
 Metric<double> edwardsTrimp(List<double> zoneMinutes) {

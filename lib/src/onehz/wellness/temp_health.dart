@@ -24,20 +24,29 @@ import '../foundations/baseline.dart';
 
 enum TempFlag { normal, elevated, lutealConfound }
 
+/// Required minimum valid baseline nights before a skin-temp deviation z is
+/// computed.
+const int tempIllnessMinBaseline = 7;
+
 class TempIllnessDay {
   final String date;
   final TempFlag flag;
   final double? z; // robust z of tonight's temp vs trailing baseline
   final bool luteal;
   final double confidence; // down-weighted in luteal phase
+
+  /// Machine-readable "need_baseline:have=H,need=N" note set on nights that
+  /// could not be evaluated for lack of baseline. Null when evaluated.
+  final String? need;
   const TempIllnessDay(this.date, this.flag, this.z, this.luteal,
-      this.confidence);
+      this.confidence, {this.need});
   Map<String, dynamic> toJson() => {
         'date': date,
         'flag': flag.name,
         if (z != null) 'z': round6(z!),
         'luteal': luteal,
         'confidence': round6(confidence),
+        if (need != null) 'note': need,
       };
 }
 
@@ -59,7 +68,7 @@ List<TempIllnessDay> tempIllnessFlag(
   int baselineDays = 21,
   double zThresh = 2.0,
   int persistDays = 2,
-  int minBaseline = 7,
+  int minBaseline = tempIllnessMinBaseline,
 }) {
   final n = nightlyTemp.length;
   final out = <TempIllnessDay>[];
@@ -74,7 +83,13 @@ List<TempIllnessDay> tempIllnessFlag(
       if (v != null) window.add(v);
     }
     if (t == null || window.length < minBaseline) {
-      out.add(TempIllnessDay(dates[i], TempFlag.normal, null, lut, 0.0));
+      // RHR-style need_baseline note when tonight HAS a temp but the baseline
+      // is too short (no fabricated deviation).
+      final need = t != null
+          ? needBaselineNote(have: window.length, need: minBaseline)
+          : null;
+      out.add(
+          TempIllnessDay(dates[i], TempFlag.normal, null, lut, 0.0, need: need));
       elevatedRun = 0;
       continue;
     }

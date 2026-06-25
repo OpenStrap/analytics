@@ -348,4 +348,53 @@ void main() {
           reason: 'snippet is sub-day — multi-day methods synthetic-only');
     });
   });
+
+  group('baseline-need signals (need_baseline convention)', () {
+    test('readinessComposite: value present but 1-day baseline -> absent + need',
+        () {
+      final inputs = [
+        hrvInput(50.0, [48.0]), // value present, baseline length 1 (< min 3)
+      ];
+      final m = readinessComposite(inputs);
+      expect(m.present, isFalse);
+      expect(m.confidence, 0);
+      expect(m.note, 'need_baseline:have=1,need=$readinessCompositeMinBaseline');
+      // With >= minBaseline points it computes.
+      final ok = readinessComposite([
+        hrvInput(60.0, [48.0, 49.0, 50.0, 51.0, 52.0]),
+      ]);
+      expect(ok.present, isTrue);
+    });
+
+    test('multivariateAnomaly: short baseline night carries need note', () {
+      final n = 14;
+      final dates = [for (var i = 0; i < n; i++) 'd$i'];
+      final feats = [
+        for (var i = 0; i < n; i++)
+          AnomalyFeatures(
+              rhr: 55.0 + (i % 2),
+              hrv: 3.5,
+              temp: 0.0 + (i % 2) * 0.1,
+              resp: 14.0)
+      ];
+      final days = multivariateAnomaly(dates, feats);
+      // Night 1 has only 1 baseline night -> need note, have=1.
+      expect(days[1].mahalanobis, isNull);
+      expect(days[1].need,
+          'need_baseline:have=1,need=$multivariateAnomalyMinBaseline');
+      // Past the minimum baseline a distance is computed (no need note).
+      expect(days[multivariateAnomalyMinBaseline + 1].need, isNull);
+      expect(days[multivariateAnomalyMinBaseline + 1].mahalanobis, isNotNull);
+    });
+
+    test('tempIllnessFlag: short baseline night carries need note', () {
+      final n = 12;
+      final dates = [for (var i = 0; i < n; i++) 'd$i'];
+      final temp = [for (var i = 0; i < n; i++) 100.0 + (i % 2)];
+      final days = tempIllnessFlag(dates, temp);
+      expect(days[0].need, 'need_baseline:have=0,need=$tempIllnessMinBaseline');
+      expect(days[0].z, isNull);
+      expect(days[tempIllnessMinBaseline].need, isNull);
+    });
+  });
 }

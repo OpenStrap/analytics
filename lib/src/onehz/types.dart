@@ -16,6 +16,23 @@
 
 import 'util.dart' show round6;
 
+/// MACHINE-READABLE "needs more baseline" convention (single source of truth).
+///
+/// A baseline-relative metric (recovery composite, lnRMSSD readiness, illness
+/// CUSUM, multivariate anomaly, skin-temp deviation) is meaningless until it has
+/// enough trailing history. When the supplied history is shorter than the
+/// metric's REQUIRED MINIMUM, the metric MUST return an ABSENT Metric (value
+/// null, confidence 0) whose `note` is EXACTLY:
+///
+///     need_baseline:have=<H>,need=<N>
+///
+/// where <H> is the count of valid history points actually supplied and <N> is
+/// the required minimum (exposed per-metric as a public `*MinNights`/`*MinBaseline`
+/// constant so the edge can render "Need N−H more nights"). NEVER fabricate a
+/// value or a placeholder number. Build the note with [needBaselineNote].
+String needBaselineNote({required int have, required int need}) =>
+    'need_baseline:have=$have,need=$need';
+
 /// Confidence/quality tier of a published method on our substrate.
 class Tier {
   /// Directly measured / definitional (e.g. RR count, raw ADC).

@@ -31,20 +31,30 @@ class AnomalyFeatures {
   const AnomalyFeatures({this.rhr, this.hrv, this.temp, this.resp});
 }
 
+/// Required minimum valid baseline nights (per feature) before a distance is
+/// computed for the multivariate anomaly detector.
+const int multivariateAnomalyMinBaseline = 10;
+
 class AnomalyDay {
   final String date;
   final double? mahalanobis; // robust Mahalanobis distance (null if no baseline)
   final bool flagged; // distance crossed gate AND persistence satisfied
   final bool candidate; // distance crossed gate THIS night (pre-persistence)
   final List<Driver> drivers; // per-feature signed contribution
+
+  /// Machine-readable "need_baseline:have=H,need=N" note set on nights that
+  /// could not be evaluated for lack of baseline coverage (H = best per-feature
+  /// baseline count available, N = required minimum). Null when evaluated.
+  final String? need;
   const AnomalyDay(this.date, this.mahalanobis, this.flagged, this.candidate,
-      this.drivers);
+      this.drivers, {this.need});
   Map<String, dynamic> toJson() => {
         'date': date,
         if (mahalanobis != null) 'mahalanobis': round6(mahalanobis!),
         'flagged': flagged,
         'candidate': candidate,
         'drivers': drivers.map((d) => d.toJson()).toList(),
+        if (need != null) 'note': need,
       };
 }
 
@@ -69,7 +79,7 @@ List<AnomalyDay> multivariateAnomaly(
   List<String> dates,
   List<AnomalyFeatures> feats, {
   int baselineDays = 28,
-  int minBaseline = 10,
+  int minBaseline = multivariateAnomalyMinBaseline,
   double? chiSqGate,
   int persistDays = 2,
   double ridge = 0.1,
@@ -100,7 +110,18 @@ List<AnomalyDay> multivariateAnomaly(
       if (cur[f] != null && cols[f].length >= minBaseline) idx.add(f);
     }
     if (idx.length < 2) {
-      out.add(AnomalyDay(dates[i], null, false, false, const []));
+      // Not enough baseline coverage to compute a distance. If tonight HAS
+      // features, attach a machine-readable need_baseline note (have = the best
+      // per-feature baseline count among tonight's present features).
+      String? need;
+      var bestHave = -1;
+      for (var f = 0; f < 4; f++) {
+        if (cur[f] != null && cols[f].length > bestHave) bestHave = cols[f].length;
+      }
+      if (bestHave >= 0) {
+        need = needBaselineNote(have: bestHave, need: minBaseline);
+      }
+      out.add(AnomalyDay(dates[i], null, false, false, const [], need: need));
       run = 0;
       continue;
     }

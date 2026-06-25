@@ -530,6 +530,88 @@ void main() {
       expect(st.tier, Tier.estimate);
     });
   });
+
+  group('stage-architecture consolidation', () {
+    int transitions(List<SleepStage> s) {
+      var t = 0;
+      for (var i = 1; i < s.length; i++) {
+        if (s[i] != s[i - 1]) t++;
+      }
+      return t;
+    }
+
+    Map<SleepStage, int> totals(List<SleepStage> s) {
+      final m = {SleepStage.wake: 0, SleepStage.nrem: 0, SleepStage.rem: 0};
+      for (final x in s) {
+        m[x] = m[x]! + 1;
+      }
+      return m;
+    }
+
+    test('jittery nrem<->rem stream consolidates into sustained bouts', () {
+      // 160 epochs @ 30 s. Underlying architecture: two long NREM blocks and one
+      // long REM block, but each block carries SPORADIC single-epoch flicker
+      // (a lone epoch flips to the other stage every ~12 epochs) — the kind of
+      // borderline-gate thrash that leaves the block otherwise sustained.
+      const epochSec = 30;
+      SleepStage flick(SleepStage base, SleepStage other, int e) =>
+          (e % 12 == 6) ? other : base;
+      final raw = <SleepStage>[
+        for (var e = 0; e < 60; e++) flick(SleepStage.nrem, SleepStage.rem, e),
+        for (var e = 0; e < 40; e++) flick(SleepStage.rem, SleepStage.nrem, e),
+        for (var e = 0; e < 60; e++) flick(SleepStage.nrem, SleepStage.rem, e),
+      ];
+      final rawTrans = transitions(raw);
+      final consolidated = consolidateSleepStages(raw, epochSec);
+      final conTrans = transitions(consolidated);
+
+      // Raw thrashes; consolidated has only a few sustained bouts.
+      expect(rawTrans, greaterThan(20));
+      expect(conTrans, lessThan(8),
+          reason: 'consolidation removes per-epoch jitter');
+      expect(conTrans, lessThan(rawTrans ~/ 3),
+          reason: 'far fewer transitions after consolidation');
+
+      // No "light"/4th stage ever appears — strictly 3-class.
+      expect(
+          consolidated.toSet().difference(
+              {SleepStage.wake, SleepStage.nrem, SleepStage.rem}),
+          isEmpty);
+
+      // Totals preserved to within a couple of bouts (minBoutEp=10 here): the
+      // sporadic flicker is reabsorbed into its surrounding sustained stage.
+      final rt = totals(raw);
+      final ct = totals(consolidated);
+      expect((ct[SleepStage.nrem]! - rt[SleepStage.nrem]!).abs(), lessThan(30));
+      expect((ct[SleepStage.rem]! - rt[SleepStage.rem]!).abs(), lessThan(30));
+      // No wake present and none created.
+      expect(ct[SleepStage.wake], rt[SleepStage.wake]);
+    });
+
+    test('preserves a genuine sustained REM episode and bridges a brief gap',
+        () {
+      const epochSec = 30;
+      // 20 NREM, then 12 REM with one 1-epoch NREM intrusion, then 20 NREM.
+      final raw = <SleepStage>[
+        ...List.filled(20, SleepStage.nrem),
+        ...List.filled(6, SleepStage.rem),
+        SleepStage.nrem, // brief intrusion inside the REM episode
+        ...List.filled(5, SleepStage.rem),
+        ...List.filled(20, SleepStage.nrem),
+      ];
+      final c = consolidateSleepStages(raw, epochSec);
+      // The brief NREM intrusion is bridged, yielding one contiguous REM run of
+      // 6 + 1 (bridged) + 5 = 12 epochs.
+      final remRun = c.where((s) => s == SleepStage.rem).length;
+      expect(remRun, 12);
+      // One NREM->REM and one REM->NREM transition = 2 total.
+      var t = 0;
+      for (var i = 1; i < c.length; i++) {
+        if (c[i] != c[i - 1]) t++;
+      }
+      expect(t, 2);
+    });
+  });
 }
 
 SleepStage _dominant(List<SleepStage> xs) {

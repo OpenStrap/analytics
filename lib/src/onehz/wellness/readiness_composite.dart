@@ -83,20 +83,31 @@ class Readiness {
 /// robust z. Weights are renormalized over present inputs. [swcMultiplier] sets
 /// the smallest-worthwhile-change gate (Hopkins 0.2 of the composite scale,
 /// i.e. of unit SD here since z is standardized).
+/// Required minimum baseline points (per input) before readiness can compute.
+const int readinessCompositeMinBaseline = 3;
+
 Metric<Readiness> readinessComposite(
   List<ReadinessInput> inputs, {
   double swcMultiplier = 0.2,
-  int minBaseline = 3,
+  int minBaseline = readinessCompositeMinBaseline,
 }) {
   final used = <String>[];
   final drivers = <Driver>[];
   var weightSum = 0.0;
   var weightedZ = 0.0;
+  // Track the best-covered input that has a value but a too-short baseline, so
+  // we can emit a machine-readable need_baseline note when nothing computes.
+  var anyValuePresent = false;
+  var bestShortHave = -1;
   for (final inp in inputs) {
     final v = inp.value;
     if (v == null) continue;
+    anyValuePresent = true;
     final base = inp.baseline;
-    if (base.length < minBaseline) continue;
+    if (base.length < minBaseline) {
+      if (base.length > bestShortHave) bestShortHave = base.length;
+      continue;
+    }
     final zr = robustZ(v, base); // null if MAD degenerate
     if (zr == null) continue;
     final oriented = inp.goodSign * zr; // + = good for readiness
@@ -108,6 +119,15 @@ Metric<Readiness> readinessComposite(
         detail: 'oriented robust-z=${round6(oriented)}'));
   }
   if (used.isEmpty || weightSum == 0) {
+    // If inputs HAD values but their baselines were too short, say so in the
+    // machine-readable need_baseline convention (don't fabricate a score).
+    if (anyValuePresent && bestShortHave >= 0) {
+      return Metric<Readiness>.absent(
+        tier: Tier.estimate,
+        inputs_used: const [],
+        note: needBaselineNote(have: bestShortHave, need: minBaseline),
+      );
+    }
     return const Metric<Readiness>.absent(
       tier: Tier.estimate,
       inputs_used: [],

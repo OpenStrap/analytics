@@ -206,4 +206,109 @@ void main() {
       expect(s.value!.tsb, lessThan(0));
     });
   });
+
+  group('robust nocturnal RMSSD (median-of-5min-windows)', () {
+    test('robust RMSSD tracks the stable level while whole-night is inflated',
+        () {
+      // Build ~40 min of NN at 1 beat/s. Mostly a stable RR ~1000 ms with small
+      // ±8 ms beat-to-beat wobble (RMSSD ~tens of ms). Inject a few high-variance
+      // bursts (REM/arousal-like) that whipsaw RR by ±250 ms — these inflate a
+      // single whole-night RMSSD but should NOT dominate the median-of-windows.
+      final nn = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < 2400; i++) {
+        // 8 consecutive 5-min windows (~300 beats each at ~1 s RR). Mark TWO of
+        // the eight windows (idx 2 and 5) as high-variance REM/arousal bursts;
+        // the other six are stable. A whole-night RMSSD is dragged up by the two
+        // bursts, but the MEDIAN of eight window RMSSDs picks a stable window.
+        final win = i ~/ 300;
+        final inBurst = win == 2 || win == 5;
+        final base = 1000.0;
+        final v = inBurst
+            ? base + (i.isEven ? 250.0 : -250.0) // ±250 ms whipsaw
+            : base + (i.isEven ? 8.0 : -8.0); // small ±8 ms wobble
+        nn.add(v);
+        t += v;
+        times.add(t);
+      }
+      final whole = hrvTime(nn).value!.rmssd!;
+      final robust = nocturnalRmssd(nn, times).value!;
+      // Whole-night RMSSD is dragged way up by the bursts.
+      expect(whole, greaterThan(100),
+          reason: 'whole-night RMSSD inflated by bursts');
+      // The stable wobble RMSSD ≈ sqrt((16^2)) ≈ 16 ms; robust median stays low.
+      expect(robust, lessThan(40),
+          reason: 'median-of-windows is robust to a few burst windows');
+      expect(robust, lessThan(whole / 3),
+          reason: 'robust << whole-night when bursts are present');
+    });
+
+    test('stage mask keeps only NREM windows', () {
+      final nn = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < 1200; i++) {
+        nn.add(1000.0 + (i.isEven ? 10.0 : -10.0));
+        t += nn.last;
+        times.add(t);
+      }
+      // Mask out the entire first 5-min window (mark as wake/false), keep rest.
+      final mask = List<bool>.filled(1300, true);
+      for (var s = 0; s < 300; s++) {
+        mask[s] = false;
+      }
+      final m = nocturnalRmssd(nn, times, stageMaskPerSec: mask);
+      expect(m.present, isTrue);
+      expect(m.note, contains('PRV not ECG'));
+    });
+
+    test('absent without enough beats', () {
+      expect(nocturnalRmssd([800, 810], [800, 1610]).present, isFalse);
+    });
+  });
+
+  group('strain score (0-21 log-squash of TRIMP)', () {
+    test('pins TRIMP -> strain check-points', () {
+      expect(strainScore(0), closeTo(0.0, 1e-9));
+      expect(strainScore(335), closeTo(14.347, 1e-2));
+      // monotone + capped at 21.
+      expect(strainScore(1e9), closeTo(21.0, 1e-9));
+      expect(strainScore(100) < strainScore(335), isTrue);
+    });
+
+    test('strainScoreMetric is HIGH/EST and absent on null', () {
+      final m = strainScoreMetric(335);
+      expect(m.present, isTrue);
+      expect(m.value, closeTo(14.347, 1e-2));
+      expect(m.tier, 'ESTIMATE');
+      expect(strainScoreMetric(null).present, isFalse);
+    });
+  });
+
+  group('baseline-need signals (need_baseline convention)', () {
+    test('readinessLnRmssd: 1 night -> absent + need note; >=min computes', () {
+      final one = readinessLnRmssd([3.5]);
+      expect(one.present, isFalse);
+      expect(one.confidence, 0);
+      expect(one.note, 'need_baseline:have=1,need=$readinessLnRmssdMinNights');
+      final enough = readinessLnRmssd(
+          List<double>.generate(readinessLnRmssdMinNights, (i) => 3.5 + i * 0.01));
+      expect(enough.present, isTrue);
+    });
+
+    test('illnessCusum: short baseline night carries need note; then evaluates',
+        () {
+      final n = 12;
+      final dates = [for (var i = 0; i < n; i++) 'd$i'];
+      final rhr = [for (var i = 0; i < n; i++) 55.0 + (i.isEven ? 0.0 : 1.0)];
+      final days = illnessCusum(dates, rhr);
+      // First night: have=0 baseline, need=7.
+      expect(days[0].need, 'need_baseline:have=0,need=$illnessCusumMinBaseline');
+      expect(days[0].cusum, isNull);
+      // A night past the minimum baseline is evaluated (no need note).
+      expect(days[illnessCusumMinBaseline].need, isNull);
+      expect(days[illnessCusumMinBaseline].cusum, isNotNull);
+    });
+  });
 }

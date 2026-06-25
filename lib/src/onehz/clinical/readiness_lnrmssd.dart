@@ -40,6 +40,9 @@ class ReadinessLnRmssd {
       };
 }
 
+/// Required minimum nights of lnRMSSD history before this metric computes.
+const int readinessLnRmssdMinNights = 4;
+
 /// Compute the lnRMSSD readiness stack.
 ///
 /// [historyLnRmssd] trailing nightly ln(RMSSD), OLDEST→NEWEST, INCLUDING tonight
@@ -49,14 +52,14 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   List<double> historyLnRmssd, {
   double? meanNnTodayMs,
   int windowDays = 7,
-  int minNights = 4,
+  int minNights = readinessLnRmssdMinNights,
 }) {
   const inputs = ['ln_rmssd_history'];
   if (historyLnRmssd.length < minNights) {
-    return const Metric<ReadinessLnRmssd>.absent(
+    return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'need at least minNights of nightly lnRMSSD',
+      note: needBaselineNote(have: historyLnRmssd.length, need: minNights),
     );
   }
   final today = historyLnRmssd.last;

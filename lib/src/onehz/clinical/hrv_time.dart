@@ -96,6 +96,88 @@ Metric<HrvTime> hrvTime(List<double> nnMs, {List<double>? nnTimesMs}) {
   );
 }
 
+/// Robust NOCTURNAL RMSSD (ms).
+///
+/// A single whole-night RMSSD is dominated by the few high-Δ segments produced
+/// by REM bursts, arousals and stage transitions, inflating it well above the
+/// resting parasympathetic level (~tens of ms). Instead we compute RMSSD WITHIN
+/// each consecutive ~5-min window of the NN series and take the MEDIAN across
+/// windows — a robust estimator far less sensitive to a handful of high-variance
+/// windows. Optionally restrict to NREM / low-motion windows via [stageMaskPerSec].
+///
+/// [nnMs] cleaned NN intervals. [nnTimesMs] beat times (ms, same length) used to
+/// window into 5-min bins; required (returns absent without it). [windowMs] bin
+/// width (default 300 000 = 5 min). [minBeatsPerWindow] min NN diffs a window
+/// needs to contribute (default 5). [stageMaskPerSec] OPTIONAL per-second mask
+/// (true = keep, e.g. NREM & immobile); a window is kept only when the mask is
+/// true at the window's MIDPOINT second.
+///
+/// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
+/// PRV-not-ECG honesty note. Absent when there are too few usable windows.
+Metric<double> nocturnalRmssd(
+  List<double> nnMs,
+  List<double> nnTimesMs, {
+  double windowMs = 300000.0,
+  int minBeatsPerWindow = 5,
+  List<bool>? stageMaskPerSec,
+}) {
+  const inputs = ['rr_cleaned', 'beat_times'];
+  if (nnMs.length != nnTimesMs.length || nnMs.length < minBeatsPerWindow + 1) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'too few NN intervals for windowed nocturnal RMSSD',
+    );
+  }
+  final t0 = nnTimesMs.first;
+  // Bucket NN values by window index, carrying each window's time span so we can
+  // mask it (the successive difference uses consecutive NN within the window).
+  final buckets = <int, List<double>>{};
+  for (var i = 0; i < nnMs.length; i++) {
+    final idx = ((nnTimesMs[i] - t0) / windowMs).floor();
+    (buckets[idx] ??= <double>[]).add(nnMs[i]);
+  }
+  // Compute per-window RMSSD over the windows we keep.
+  final rmssds = <double>[];
+  final indices = buckets.keys.toList()..sort();
+  for (final idx in indices) {
+    if (stageMaskPerSec != null) {
+      final midSec = ((idx + 0.5) * windowMs / 1000.0).floor();
+      final keep = midSec >= 0 &&
+          midSec < stageMaskPerSec.length &&
+          stageMaskPerSec[midSec];
+      if (!keep) continue;
+    }
+    final seg = buckets[idx]!;
+    if (seg.length < minBeatsPerWindow + 1) continue;
+    var ssd = 0.0;
+    for (var i = 1; i < seg.length; i++) {
+      final d = seg[i] - seg[i - 1];
+      ssd += d * d;
+    }
+    rmssds.add(math.sqrt(ssd / (seg.length - 1)));
+  }
+  if (rmssds.isEmpty) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no usable 5-min windows for nocturnal RMSSD',
+    );
+  }
+  final robust = median(rmssds)!;
+  // Confidence scales with how many windows we could median over.
+  final conf = clamp(rmssds.length / 12.0, 0.3, 0.95); // ~1 h ≈ 12 windows
+  return Metric<double>(
+    value: robust,
+    confidence: conf,
+    tier: Tier.high,
+    inputs_used: inputs,
+    note: 'robust nocturnal RMSSD = MEDIAN of ${rmssds.length} consecutive '
+        '5-min-window RMSSDs (REM/arousal-robust). PRV not ECG-HRV; '
+        'RMSSD is quantization-sensitive at 1 Hz.',
+  );
+}
+
 /// Group NN intervals into consecutive 5-minute (300 000 ms) segments by beat
 /// time. Segments with <2 beats are dropped.
 List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
