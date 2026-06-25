@@ -241,6 +241,48 @@ void main() {
       expect(j['in_bed_sec'], s.inBedSec);
       expect(j['tst_sec'], s.tstSec);
       expect(j['confidence'], greaterThan(0));
+
+      // 4-CLASS HYPNOGRAM (Awake/Light/Deep/REM): the per-second stages4 stream
+      // is aligned 1:1 with stages, uses only the four labels, and its Light/Deep
+      // partition of NREM reconciles exactly with the combined nremSec.
+      expect(s.stages4.length, s.stages.length);
+      const allowed = {'wake', 'light', 'deep', 'rem'};
+      var light4 = 0, deep4 = 0, rem4 = 0, wake4 = 0;
+      for (var i = 0; i < s.stages4.length; i++) {
+        final lbl = s.stages4[i];
+        expect(allowed.contains(lbl), isTrue, reason: 'unexpected label $lbl');
+        switch (lbl) {
+          case 'wake':
+            wake4++;
+            expect(s.stages[i], SleepStage.wake);
+            break;
+          case 'light':
+            light4++;
+            expect(s.stages[i], SleepStage.nrem);
+            break;
+          case 'deep':
+            deep4++;
+            expect(s.stages[i], SleepStage.nrem);
+            break;
+          case 'rem':
+            rem4++;
+            expect(s.stages[i], SleepStage.rem);
+            break;
+        }
+      }
+      // Light + Deep == combined NREM; REM/Wake match; parts sum to in-bed.
+      expect(s.lightSec! + s.deepSec!, s.nremSec);
+      expect(s.lightSec, light4);
+      expect(s.deepSec, deep4);
+      expect(rem4, s.remSec);
+      expect(wake4, s.wakeSec);
+      expect(light4 + deep4 + rem4 + wake4, s.inBedSec);
+      // Deep is the LOW-CONFIDENCE overlay — never exceeds its parent NREM, and
+      // the schema flags it honestly.
+      expect(s.deepSec!, lessThanOrEqualTo(s.nremSec!));
+      expect(j['light_sec'], s.lightSec);
+      expect(j['deep_sec'], s.deepSec);
+      expect(j['deep_low_confidence'], isTrue);
     });
 
     test('(b) brief mid-night movements do NOT fragment the window', () {

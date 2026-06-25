@@ -43,8 +43,17 @@ class SleepSegmentation {
   final SleepWindow? window;
 
   /// Per-second 3-class labels over the window [onsetIdx, offsetIdx).
-  /// Empty when absent. `stages.length == inBedSec`.
+  /// Empty when absent. `stages.length == inBedSec`. (Back-compat: wake/nrem/rem;
+  /// NREM here is light+deep combined — the Light/Deep split lives in [stages4].)
   final List<SleepStage> stages;
+
+  /// Per-second 4-class hypnogram-ready labels over the SAME window, aligned 1:1
+  /// with [stages]: 'wake' | 'light' | 'deep' | 'rem'. 'light' and 'deep' are the
+  /// two halves of NREM — 'deep' marks the NREM seconds the LOW-CONFIDENCE
+  /// HR-depth overlay flags as deep (see walch_stager STEP 2); 'light' is the
+  /// remaining NREM. The Light/Deep split is an UNVALIDATED estimate; surface it
+  /// badged low-confidence. Empty when absent.
+  final List<String> stages4;
 
   /// Total sleep time (s): seconds where stage != wake. Null when absent.
   final int? tstSec;
@@ -59,8 +68,16 @@ class SleepSegmentation {
   /// Sleep efficiency (%) = 100 · TST / in-bed. Null when absent.
   final double? efficiencyPct;
 
-  /// NREM seconds (stage == nrem). Null when absent.
+  /// NREM seconds (stage == nrem) = [lightSec] + [deepSec]. Null when absent.
+  /// Kept for back-compat with any reader that still wants combined Core.
   final int? nremSec;
+
+  /// Light-NREM seconds (4-class 'light'). Null when absent.
+  final int? lightSec;
+
+  /// Deep-NREM seconds (4-class 'deep') — LOW CONFIDENCE HR-depth overlay
+  /// (unvalidated; not PSG). Null when absent.
+  final int? deepSec;
 
   /// REM seconds (stage == rem). Null when absent.
   final int? remSec;
@@ -74,11 +91,14 @@ class SleepSegmentation {
   const SleepSegmentation({
     required this.window,
     required this.stages,
+    required this.stages4,
     required this.tstSec,
     required this.wasoSec,
     required this.inBedSec,
     required this.efficiencyPct,
     required this.nremSec,
+    required this.lightSec,
+    required this.deepSec,
     required this.remSec,
     required this.wakeSec,
     required this.confidence,
@@ -88,11 +108,14 @@ class SleepSegmentation {
   static const SleepSegmentation absent = SleepSegmentation(
     window: null,
     stages: <SleepStage>[],
+    stages4: <String>[],
     tstSec: null,
     wasoSec: null,
     inBedSec: null,
     efficiencyPct: null,
     nremSec: null,
+    lightSec: null,
+    deepSec: null,
     remSec: null,
     wakeSec: null,
     confidence: 0,
@@ -108,10 +131,15 @@ class SleepSegmentation {
         'efficiency_pct':
             efficiencyPct == null ? null : round6(efficiencyPct!),
         'nrem_sec': nremSec,
+        'light_sec': lightSec,
+        'deep_sec': deepSec,
         'rem_sec': remSec,
         'wake_sec': wakeSec,
         'epochs': stages.length,
         'confidence': round6(confidence),
+        // Deep is a LOW-CONFIDENCE, unvalidated HR-depth overlay (see
+        // walch_stager STEP 2). Carry the flag so the UI badges it honestly.
+        'deep_low_confidence': true,
       };
 }
 
@@ -176,27 +204,46 @@ SleepSegmentation segmentSleep(
   //    passing a wall-clock hour here would introduce train/serve phase skew.
   final hrSlice = hr1hz.sublist(onset, offset);
   final accelSlice = accel.sublist(onset, offset);
-  final sm = walchStager(hrSlice, accelSlice, clockHourAtStart: null);
-  final st = sm.value;
-  if (st == null) return SleepSegmentation.absent;
+  // Use the DEEP overlay variant: the validated 3-class W/NREM/REM PLUS a per-
+  // epoch LOW-CONFIDENCE Light/Deep split inside NREM. TST/WASO/efficiency are
+  // unchanged (asleep = not wake); the split only refines how NREM is labelled.
+  final wr = walchStagerWithDeep(hrSlice, accelSlice, clockHourAtStart: null);
+  final st = wr.base;
+  if (st.stages.isEmpty) return SleepSegmentation.absent;
 
   // 4. Expand per-epoch stages to PER-SECOND over the window, then derive every
   //    figure from these labels (asleep = stage != wake) — the SINGLE source.
+  //    [perSec] keeps the 3-class enum (back-compat); [stages4] is the parallel
+  //    per-second 4-class hypnogram with NREM split into 'light'/'deep' via the
+  //    per-epoch deepFlag (LOW CONFIDENCE).
   final perSec = _expandToPerSecond(st.stages, st.epochSec, inBed);
-  var tst = 0, waso = 0, nrem = 0, rem = 0, wake = 0;
+  final stages4 = List<String>.filled(inBed, 'wake');
+  var tst = 0, waso = 0, nrem = 0, light = 0, deep = 0, rem = 0, wake = 0;
   var firstSleep = -1, lastSleep = -1;
   for (var i = 0; i < perSec.length; i++) {
+    final epoch = i ~/ st.epochSec;
     switch (perSec[i]) {
       case SleepStage.wake:
         wake++;
+        stages4[i] = 'wake';
         break;
       case SleepStage.nrem:
         nrem++;
         tst++;
+        final isDeep =
+            epoch < wr.deepFlag.length && wr.deepFlag[epoch];
+        if (isDeep) {
+          deep++;
+          stages4[i] = 'deep';
+        } else {
+          light++;
+          stages4[i] = 'light';
+        }
         break;
       case SleepStage.rem:
         rem++;
         tst++;
+        stages4[i] = 'rem';
         break;
     }
     if (perSec[i] != SleepStage.wake) {
@@ -214,8 +261,12 @@ SleepSegmentation segmentSleep(
 
   // Confidence = window conf × staging conf × HR-consensus, bounded by the
   // staging ESTIMATE ceiling (never claim more certainty than the stager).
+  // Walch's honesty-bounded 3-class wrist ESTIMATE ceiling is 0.5 (see
+  // walch_stager: confidence: 0.5); walchStagerWithDeep returns only the staged
+  // result, so we anchor to that documented ceiling here.
+  const stagerConf = 0.5;
   final conf =
-      clamp(wm.confidence * sm.confidence * hrConsensus, 0.0, sm.confidence);
+      clamp(wm.confidence * stagerConf * hrConsensus, 0.0, stagerConf);
 
   return SleepSegmentation(
     window: SleepWindow(
@@ -230,11 +281,14 @@ SleepSegmentation segmentSleep(
       sptSec: inBed,
     ),
     stages: perSec,
+    stages4: stages4,
     tstSec: tst,
     wasoSec: waso,
     inBedSec: inBed,
     efficiencyPct: efficiency,
     nremSec: nrem,
+    lightSec: light,
+    deepSec: deep,
     remSec: rem,
     wakeSec: wake,
     confidence: conf,
