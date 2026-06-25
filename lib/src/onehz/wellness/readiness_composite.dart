@@ -1,5 +1,17 @@
 // WELLNESS — honest glass-box readiness composite.
 //
+// ★ CANONICAL recovery/readiness (ARCHITECTURE_V2 `recovery.score`). ★
+// Per the "one source per concept" invariant there is exactly ONE headline
+// readiness, and this is it: disclosed weights (HRV>RHR>RR>temp) + ranked
+// drivers + personal-baseline robust z-scores (median+MAD `robustZ`) + an
+// SWC/TE gate that will say "no meaningful change". The other readiness
+// function — `glassBoxReadiness` in human/readiness_glassbox.dart — is the
+// DEPRECATED duplicate (ARCHITECTURE_V2 "DROP: the duplicate readiness
+// composite"); it is kept exported for back-compat but is INTERNAL and must not
+// be surfaced as the headline. Reason this one is canonical: it uses
+// personal-baseline z-scores (not percentiles), the exact criterion in the
+// frozen catalog.
+//
 // Catalog: "per-metric percentile/z to personal baseline → sign-orient →
 // weighted sum (HRV>RHR>RR>temp) → SWC/TE gate. Reweight on missing inputs,
 // don't zero." + "always show the per-input breakdown + 'why'."

@@ -3,6 +3,8 @@
 // The 1 Hz-native sleep/circadian stack from docs/ALGORITHM_CATALOG_1HZ.md:
 //
 //   - van Hees / GGIR angle-based sleep window  (van_hees.dart) — the spine.
+//   - segmentSleep SINGLE-SOURCE entry point      (segment.dart) — THE source:
+//       window + per-second stages + TST/WASO/eff all from one staging.
 //   - True Phillips Sleep Regularity Index       (sri.dart)
 //   - Sleep accounting (onset/offset/WASO/TST/eff/cycles) (accounting.dart)
 //   - 3-class autonomic stager (wake/NREM/REM)    (stager.dart) — honesty-bounded
@@ -14,6 +16,7 @@
 // plausibility.
 
 export 'van_hees.dart';
+export 'segment.dart';
 export 'sri.dart';
 export 'accounting.dart';
 export 'stager.dart';

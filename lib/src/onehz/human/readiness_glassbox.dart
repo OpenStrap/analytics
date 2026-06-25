@@ -1,4 +1,14 @@
 // HUMAN LAYER — Glass-box GlassBoxReadiness 0–100 + deterministic narrative.
+//
+// ⚠ DEPRECATED / INTERNAL — NOT the headline readiness. ⚠
+// ARCHITECTURE_V2 mandates ONE readiness ("one source per concept";
+// "DROP: the duplicate readiness composite"). The CANONICAL readiness/recovery
+// is `readinessComposite` in wellness/readiness_composite.dart (personal-baseline
+// robust z-scores + disclosed weights + drivers + SWC gate — the catalog's
+// stated criterion). This percentile-of-you variant is retained only for
+// back-compat and its deterministic-narrative helper; do NOT present it as the
+// headline `recovery`. Kept exported so existing callers/tests don't break.
+//
 // Catalog §D: Glass-box GlassBoxReadiness [PUB HRV centrality; HEUR weighting] and
 // deterministic narrative driver-attribution [HEUR, standard decomposition].
 //

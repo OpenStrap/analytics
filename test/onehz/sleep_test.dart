@@ -130,8 +130,150 @@ void main() {
       expect(a.onsetIdx, 20 * 60);
       expect(a.wasoSec, 30 * 60); // only the mid-night block counts as WASO
       expect(a.tstSec, total - 20 * 60 - 30 * 60);
-      // Efficiency = TST / time-in-bed.
-      expect(a.efficiencyPct, closeTo(100.0 * a.tstSec / total, 1e-6));
+      // Efficiency = TST / in-bed, where in-bed = offset − onset + 1 (the sleep
+      // PERIOD, NOT the whole captured mask). Onset latency is excluded from the
+      // denominator: offset is the last asleep second (total-1), onset=1200.
+      final inBed = a.offsetIdx - a.onsetIdx + 1;
+      expect(inBed, total - 20 * 60); // 20-min latency trimmed off the front
+      expect(a.efficiencyPct, closeTo(100.0 * a.tstSec / inBed, 1e-6));
+      // And NOT the old whole-mask denominator.
+      expect(a.efficiencyPct, isNot(closeTo(100.0 * a.tstSec / total, 1e-6)));
+    });
+  });
+
+  // ----------------------------------------------- segmentSleep (SINGLE SOURCE)
+  group('segmentSleep single-source segmentation', () {
+    // Build a synthetic capture: [dayHours] active day, then [nightHours] of a
+    // still wrist with low sleeping HR, then [tailHours] active again. Movement
+    // is injected at the given relative night-seconds (each a brief reorient).
+    List<AccelSample> _accel(int dayH, int nightH, int tailH,
+        {List<int> moveAt = const []}) {
+      final out = <AccelSample>[];
+      var t = 0.0;
+      void active(int secs) {
+        for (var i = 0; i < secs; i++) {
+          final phase = math.sin(i * 0.5);
+          out.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+          t += 1000.0;
+        }
+      }
+      active(dayH * 3600);
+      final nightStart = out.length;
+      final moves = moveAt.toSet();
+      for (var i = 0; i < nightH * 3600; i++) {
+        if (moves.contains(i)) {
+          // brief 30-s reorientation (position change)
+          out.add(AccelSample(t, 0.5, -0.4, 0.6));
+        } else {
+          out.add(AccelSample(t, 0.02, 0.02, 1.0)); // dead still
+        }
+        t += 1000.0;
+      }
+      active(tailH * 3600);
+      // nightStart returned implicitly via length math by callers if needed.
+      assert(nightStart >= 0);
+      return out;
+    }
+
+    // HR aligned to the accel: daytime ~70, night ~50 (dipped), tail ~70.
+    List<double> _hr(int dayH, int nightH, int tailH) {
+      final hr = <double>[];
+      for (var i = 0; i < dayH * 3600; i++) {
+        hr.add(70 + (i % 5));
+      }
+      for (var i = 0; i < nightH * 3600; i++) {
+        // low, slightly variable sleeping HR
+        hr.add(50 + (i % 3) - 1);
+      }
+      for (var i = 0; i < tailH * 3600; i++) {
+        hr.add(70 + (i % 5));
+      }
+      return hr;
+    }
+
+    test('(a) still + low-HR night → one window, tst≈in-bed, eff high, '
+        'figures consistent', () {
+      final accel = _accel(2, 7, 1);
+      final hr = _hr(2, 7, 1);
+      final baseline = List<double>.filled(60, 70); // daytime HR baseline
+      final s = segmentSleep(accel, hr, hrBaseline: baseline);
+      expect(s.present, isTrue);
+      expect(s.window, isNotNull);
+      // In-bed ~7h.
+      expect(s.inBedSec!, greaterThan(6 * 3600));
+      expect(s.inBedSec!, lessThan(8 * 3600));
+      // Mostly asleep → high efficiency.
+      expect(s.efficiencyPct!, greaterThan(85));
+      expect(s.tstSec!, greaterThan((0.85 * s.inBedSec!).round()));
+      // CONSISTENCY: per-second stage labels reproduce every derived figure.
+      var tst = 0, waso = 0, nrem = 0, rem = 0, wake = 0;
+      var first = -1, last = -1;
+      for (var i = 0; i < s.stages.length; i++) {
+        final st = s.stages[i];
+        if (st == SleepStage.wake) {
+          wake++;
+        } else {
+          tst++;
+          if (st == SleepStage.nrem) nrem++;
+          if (st == SleepStage.rem) rem++;
+          if (first < 0) first = i;
+          last = i;
+        }
+      }
+      for (var i = first; i <= last; i++) {
+        if (s.stages[i] == SleepStage.wake) waso++;
+      }
+      expect(s.stages.length, s.inBedSec);
+      expect(s.tstSec, tst);
+      expect(s.wakeSec, wake);
+      expect(s.nremSec, nrem);
+      expect(s.remSec, rem);
+      expect(s.wasoSec, waso);
+      expect(s.nremSec! + s.remSec! + s.wakeSec!, s.inBedSec);
+      expect(s.efficiencyPct!, closeTo(100.0 * tst / s.inBedSec!, 1e-6));
+      // toJson round-trips the schema.
+      final j = s.toJson();
+      expect(j['in_bed_sec'], s.inBedSec);
+      expect(j['tst_sec'], s.tstSec);
+      expect(j['confidence'], greaterThan(0));
+    });
+
+    test('(b) brief mid-night movements do NOT fragment the window', () {
+      // Three brief reorientations spread across the night.
+      final moves = [2 * 3600, 4 * 3600, 5 * 3600 + 1800];
+      final accel = _accel(2, 7, 1, moveAt: moves);
+      final hr = _hr(2, 7, 1);
+      final s = segmentSleep(accel, hr);
+      expect(s.present, isTrue);
+      // The 30-min bridge keeps it ONE window spanning ~7h, not slivers.
+      expect(s.inBedSec!, greaterThan(6 * 3600));
+    });
+
+    test('(c) no qualifying sleep → honest absent', () {
+      // All-active capture: no inactivity block at all.
+      final rnd = math.Random(7);
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var i = 0; i < 4 * 3600; i++) {
+        accel.add(AccelSample(i * 1000.0, rnd.nextDouble() * 2 - 1,
+            rnd.nextDouble() * 2 - 1, rnd.nextDouble() * 2 - 1));
+        hr.add(75 + rnd.nextDouble() * 10);
+      }
+      final s = segmentSleep(accel, hr);
+      expect(s.present, isFalse);
+      expect(s.confidence, 0);
+      expect(s.tstSec, isNull);
+      expect(s.window, isNull);
+      expect(s.stages, isEmpty);
+    });
+
+    test('(c2) too-short still block (<3h) → absent', () {
+      // Only a 2h still block — below the ~3h qualifying threshold.
+      final accel = _accel(2, 2, 1);
+      final hr = _hr(2, 2, 1);
+      final s = segmentSleep(accel, hr);
+      expect(s.present, isFalse);
+      expect(s.confidence, 0);
     });
   });
 

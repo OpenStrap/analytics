@@ -8,7 +8,9 @@
 //   - multivariateAnomaly  : robust Mahalanobis {RHR↑,HRV↓,temp↑,resp↑} + gates
 //   - cusumChangePoints    : online two-sided CUSUM change detector
 //   - segmentChangePoints  : offline binary-segmentation (BIC, min-seg ≥7)
-//   - readinessComposite   : glass-box weighted readiness w/ "why" breakdown
+//   - readinessComposite   : ★ CANONICAL recovery/readiness — glass-box weighted
+//                            readiness (personal-baseline z-scores) w/ "why"
+//                            breakdown. The single headline (ARCHITECTURE_V2).
 //
 // Honesty: relative temp only (no °C/fever); illness flag cycle-aware; anomaly
 // detectors persistence-gated so they don't cry wolf; readiness weights

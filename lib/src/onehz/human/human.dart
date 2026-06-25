@@ -15,4 +15,7 @@ export 'percentile_of_you.dart';
 export 'circadian_lifestyle.dart';
 export 'sleep_regularity.dart';
 export 'event_detection.dart';
+// readiness_glassbox.dart is DEPRECATED/INTERNAL (duplicate readiness). The
+// canonical readiness is wellness/readiness_composite.dart. Kept exported only
+// for back-compat — do NOT surface as the headline.
 export 'readiness_glassbox.dart';

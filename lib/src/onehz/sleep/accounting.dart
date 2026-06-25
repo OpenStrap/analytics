@@ -8,7 +8,10 @@
 //   - TST    = total sleep time (sum of sleep seconds in [onset, offset])
 //   - WASO   = wake after sleep onset (wake seconds in [onset, offset])
 //   - SPT    = sleep-period time (offset − onset)
-//   - efficiency = TST / (offset − window_start), per the window we were given
+//   - efficiency = TST / in-bed, where in-bed = (offset − onset + 1), the sleep
+//     PERIOD itself (NOT the whole captured mask). Per ARCHITECTURE_V2:
+//     "efficiency = TST/in-bed". Onset latency and post-offset tail are excluded
+//     from the denominator so efficiency reflects [onset..offset] only.
 //
 // NREM–REM cycle detection (~90 min ultradian): we count cycles as the number
 // of REM episodes (or, if no stage labels, the number of distinct sleep bouts
@@ -51,8 +54,9 @@ class SleepAccounting {
 }
 
 /// Compute sleep accounting from a per-second sleep/wake classification of the
-/// in-bed window. [asleep] = true where the second is classified sleep. The
-/// vector covers the WHOLE time-in-bed window (so efficiency uses its length).
+/// in-bed window. [asleep] = true where the second is classified sleep.
+/// Efficiency = TST / in-bed, where in-bed = (offset − onset + 1) — the sleep
+/// PERIOD bounded by first/last sleep second, NOT the length of [asleep].
 /// [stages] optional per-second 3-class labels (same length); when supplied,
 /// REM episode count drives the cycle estimate.
 Metric<SleepAccounting> sleepAccounting(
@@ -90,7 +94,7 @@ Metric<SleepAccounting> sleepAccounting(
     );
   }
 
-  final spt = offset - onset; // sleep-period time
+  final spt = offset - onset; // sleep-period time (offset − onset)
   var tst = 0, waso = 0;
   for (var i = onset; i <= offset; i++) {
     if (asleep[i]) {
@@ -99,7 +103,10 @@ Metric<SleepAccounting> sleepAccounting(
       waso++;
     }
   }
-  final efficiency = n > 0 ? 100.0 * tst / n : 0.0;
+  // efficiency = TST / in-bed, where in-bed = [onset..offset] inclusive
+  // (offset − onset + 1), the sleep PERIOD — NOT the whole captured mask `n`.
+  final inBed = offset - onset + 1;
+  final efficiency = inBed > 0 ? 100.0 * tst / inBed : 0.0;
 
   // Cycle count.
   int cycles;
