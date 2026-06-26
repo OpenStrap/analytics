@@ -47,17 +47,17 @@ class StagerResult {
 
 /// 3-class autonomic stager.
 ///
-/// DEPRECATED: superseded by [walchStager] (Walch et al. 2019), which
-/// `segmentSleep` now uses. This hand-rolled deterministic stager is retained
-/// for backward compatibility (and its proven Webster-rescore +
-/// [consolidateSleepStages] post-processing, which walch_stager reuses), but is
-/// no longer the segmentation engine. Prefer [walchStager] for new code.
+/// DEPRECATED: superseded by [cardioStager] (transparent motion+HR+RMSSD rule
+/// stager), which `segmentSleep` now uses. This hand-rolled deterministic stager
+/// is retained only for its proven Webster-rescore + [consolidateSleepStages]
+/// post-processing (which the cardio stager reuses); it is no longer the
+/// segmentation engine. Prefer [cardioStager] for new code.
 ///
 /// [hr] per-second HR (bpm; 0 = off-skin). [immobile] per-second van Hees
 /// immobility mask (same length). [epochSec] epoch granularity (default 30 s).
 /// All inputs are within the in-bed window. RR is optional — when absent we use
 /// per-epoch HR dispersion as the variability proxy (honest, coarser).
-@Deprecated('Use walchStager (Walch et al. 2019); kept for back-compat.')
+@Deprecated('Use cardioStager (motion+HR+RMSSD rule stager); kept for back-compat.')
 Metric<StagerResult> autonomicStager(
   List<double> hr,
   List<bool> immobile, {

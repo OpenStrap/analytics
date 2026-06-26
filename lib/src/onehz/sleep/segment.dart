@@ -13,7 +13,7 @@
 //      supplied, confirm/refine onset & offset to where HR sustains below the
 //      baseline (the cardiac signature of sleep), tightening — never widening —
 //      the accel window. This is a CONSENSUS refinement, not a second detector.
-//   3. walchStager (Walch et al. 2019) over the WINDOW SLICE ONLY (hr + accel
+//   3. cardioStager (motion+HR+RMSSD rule stager) over the WINDOW SLICE ONLY (hr + accel
 //      sliced to [onsetIdx, offsetIdx)) → validated 3-class wake/NREM/REM per
 //      epoch. (Replaces the deprecated hand-rolled autonomicStager.)
 //   4. Expand the per-epoch stages to PER-SECOND labels over the window, and
@@ -29,7 +29,7 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
 import 'van_hees.dart';
-import 'walch_stager.dart';
+import 'cardio_stager.dart';
 import 'accounting.dart' show SleepStage;
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
@@ -153,6 +153,8 @@ SleepSegmentation segmentSleep(
   List<AccelSample> accel,
   List<double> hr1hz, {
   List<double>? hrBaseline,
+  List<double> rrMs = const [],
+  List<double> rrTsMs = const [],
 }) {
   // 1. van Hees REST window (30-min bridge baked into vanHeesSleepWindow).
   final wm = vanHeesSleepWindow(accel);
@@ -163,10 +165,16 @@ SleepSegmentation segmentSleep(
   var offset = math.min(w.offsetIdx, math.min(accel.length, hr1hz.length));
   if (offset <= onset) return SleepSegmentation.absent;
 
-  // 2. Optional nocturnal-HR-dip consensus: tighten (never widen) onset/offset
-  //    to where HR sustains below the daytime baseline. The cardiac trough is
-  //    the physiological confirmation of sleep; this trims pre-sleep / post-wake
-  //    lying-still that the accel window can over-include.
+  // 2. Optional nocturnal-HR-dip CONSENSUS — confidence only, never relocation.
+  //    The cardiac trough is physiological confirmation that the accel REST
+  //    window really is sleep. We deliberately do NOT trim onset/offset to the
+  //    dip: validated on real data (Jun-25→26), trimming to the first sustained
+  //    sub-threshold HR run shoved a true 02:15 onset to 02:41 — discarding ~26
+  //    min of real early sleep, because HR keeps settling for a while after you
+  //    lie down. The accel REST window already bounds "in bed"; the stager
+  //    (step 3) decides wake-vs-sleep WITHIN it (so any pre-sleep lying-still is
+  //    classified as wake, not silently dropped). The dip only adjusts how much
+  //    we TRUST the window.
   var hrConsensus = 1.0;
   if (hrBaseline != null) {
     final baseValid = hrBaseline.where((h) => h > 0).toList();
@@ -175,40 +183,28 @@ SleepSegmentation segmentSleep(
       // Sleep HR is sustained below the daytime median (a conservative dip
       // threshold of ~95% of the daytime median; sleep HR typically dips ≥10%).
       final thresh = 0.95 * baseMed;
-      const sustain = 300; // 5-min sustained below-baseline to confirm a bound
-      final refined =
-          _refineByHrDip(hr1hz, onset, offset, thresh, sustain);
-      if (refined != null) {
-        onset = refined[0];
-        offset = refined[1];
-        hrConsensus = 0.95; // agreement found
-      } else {
-        // No sustained cardiac dip inside the window: keep the accel window but
-        // lower confidence (honest — the two signals disagree).
-        hrConsensus = 0.6;
-      }
+      const sustain = 300; // 5-min sustained below-baseline to confirm sleep
+      final refined = _refineByHrDip(hr1hz, onset, offset, thresh, sustain);
+      // A sustained cardiac dip inside the window → high confidence; none →
+      // the two signals disagree, so keep the accel window but lower confidence.
+      hrConsensus = refined != null ? 0.95 : 0.6;
     }
   }
 
   final inBed = offset - onset;
   if (inBed < _minQualifyingSleepSec) return SleepSegmentation.absent;
 
-  // 3. Stager over the WINDOW SLICE ONLY — Walch et al. 2019 (validated 3-class
-  //    wrist stager) replaces the hand-rolled autonomicStager. Walch consumes
-  //    HR + raw accel (it derives its own motion/HR/cosine features). The
-  //    cosine sleep-drive feature is anchored to ELAPSED time from window onset
-  //    (clockHourAtStart = null), EXACTLY matching Walch's `build_cosine`
-  //    (cosine_proxy of epoch.timestamp − first_timestamp): the window onset IS
-  //    the model's t0, so the sleep-drive cosine sweeps toward its trough ~5 h
-  //    in. This is the convention the embedded coefficients were trained under;
-  //    passing a wall-clock hour here would introduce train/serve phase skew.
+  // 3. Stager over the WINDOW SLICE ONLY — transparent cardiorespiratory rule
+  //    stager (cardio_stager.dart): motion + HR + RMSSD vs the night's own
+  //    baseline. Replaces the Walch ML model, which over-called wake and ignored
+  //    RR (our best signal). RR is matched to the window by ABSOLUTE time inside
+  //    the stager, so we hand it the whole segment's RR and it picks the beats
+  //    that fall in each epoch's window. Returns W/NREM/REM + a low-confidence
+  //    Deep-NREM flag. TST/WASO/efficiency derive from asleep = not wake.
   final hrSlice = hr1hz.sublist(onset, offset);
   final accelSlice = accel.sublist(onset, offset);
-  // Use the DEEP overlay variant: the validated 3-class W/NREM/REM PLUS a per-
-  // epoch LOW-CONFIDENCE Light/Deep split inside NREM. TST/WASO/efficiency are
-  // unchanged (asleep = not wake); the split only refines how NREM is labelled.
-  final wr = walchStagerWithDeep(hrSlice, accelSlice, clockHourAtStart: null);
-  final st = wr.base;
+  final cr = cardioStager(hrSlice, accelSlice, rrMs: rrMs, rrTsMs: rrTsMs);
+  final st = cr.base;
   if (st.stages.isEmpty) return SleepSegmentation.absent;
 
   // 4. Expand per-epoch stages to PER-SECOND over the window, then derive every
@@ -231,7 +227,7 @@ SleepSegmentation segmentSleep(
         nrem++;
         tst++;
         final isDeep =
-            epoch < wr.deepFlag.length && wr.deepFlag[epoch];
+            epoch < cr.deepFlag.length && cr.deepFlag[epoch];
         if (isDeep) {
           deep++;
           stages4[i] = 'deep';
@@ -260,11 +256,10 @@ SleepSegmentation segmentSleep(
   final efficiency = inBed > 0 ? 100.0 * tst / inBed : 0.0;
 
   // Confidence = window conf × staging conf × HR-consensus, bounded by the
-  // staging ESTIMATE ceiling (never claim more certainty than the stager).
-  // Walch's honesty-bounded 3-class wrist ESTIMATE ceiling is 0.5 (see
-  // walch_stager: confidence: 0.5); walchStagerWithDeep returns only the staged
-  // result, so we anchor to that documented ceiling here.
-  const stagerConf = 0.5;
+  // staging ESTIMATE ceiling. The cardio stager reports its OWN confidence
+  // (scaled by RR coverage — RMSSD is what makes REM/deep honest), so we anchor
+  // to that instead of a fixed constant.
+  final stagerConf = cr.confidence;
   final conf =
       clamp(wm.confidence * stagerConf * hrConsensus, 0.0, stagerConf);
 
