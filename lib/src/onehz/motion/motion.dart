@@ -14,13 +14,16 @@
 ///     → energy_fusion.dart
 ///
 /// ─────────────────────────────────────────────────────────────────────────
-/// DEFERRED TO A FUTURE FOREGROUND MODULE (NOT implemented here, NOT faked):
-/// these are physically impossible on a 1 Hz stream (Nyquist limit = 0.5 Hz;
-/// human gait is 1.4–2.5 Hz) and require the ~100 Hz foreground accel/gyro:
-///   - Step / cadence counting + autocorrelation gait regularity (Moe-Nilssen
-///     2004; AN-2554 peak-detection).
-///   - Madgwick / Mahony quaternion (dynamic) orientation for limb tracking.
-///   - Frequency-domain activity TYPE classification (walk vs run vs cycle).
+/// STEPS — the honest hybrid (see steps.dart). True per-step counting is
+/// physically impossible on the 1 Hz substrate (Nyquist 0.5 Hz < gait
+/// 1.4–2.5 Hz), so:
+///   * [livePedometer] counts REAL steps on the ~100 Hz foreground accel
+///     (R10 / 0x2B) — adaptive-threshold peak detection (AN-2554 family).
+///   * [dailyStepEstimate] gives a 24/7 ESTIMATE from the 1 Hz substrate
+///     (ambulatory-minutes × cadence) — an estimate, never a count.
+///   * [calibrateCadence] lets the live path personalize the 1 Hz estimate.
+/// Still genuinely impossible / not faked: dynamic-orientation limb tracking,
+/// frequency-domain activity TYPE classification (walk vs run vs cycle).
 /// At 1 Hz only an AMPLITUDE index + STATIC orientation are recoverable, and
 /// intensity is RELATIVE-to-you, never absolute METs.
 /// ─────────────────────────────────────────────────────────────────────────
@@ -29,3 +32,4 @@ library onehz_motion;
 export 'enmo.dart';
 export 'orientation.dart';
 export 'energy_fusion.dart';
+export 'steps.dart';

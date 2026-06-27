@@ -125,6 +125,75 @@ class Calories {
     return math.max(0.0, eeKjMin) / workoutDivisor;
   }
 
+  /// Basal metabolic rate (kcal/DAY) — Mifflin–St Jeor 1990. More accurate on
+  /// modern populations than revised Harris–Benedict, and the standard floor for
+  /// total daily energy expenditure (TDEE).
+  ///
+  ///   men:   10·kg + 6.25·cm − 5·age + 5
+  ///   women: 10·kg + 6.25·cm − 5·age − 161
+  ///   nonbinary / unknown: the mean of the two sex constants (−78).
+  static double mifflinBmrKcalDay(
+      double weightKg, double heightCm, double age, String sex) {
+    final base = 10.0 * weightKg + 6.25 * heightCm - 5.0 * age;
+    final double sexConst;
+    switch (sex.toLowerCase()) {
+      case 'male':
+        sexConst = 5.0;
+        break;
+      case 'female':
+        sexConst = -161.0;
+        break;
+      default:
+        sexConst = -78.0; // mean of +5 / −161
+    }
+    return math.max(0.0, base + sexConst);
+  }
+
+  /// Total daily energy expenditure (kcal) via the HR-FLEX method
+  /// (Spurr 1988 / Ceesay 1989): for each minute, energy is the GREATER of the
+  /// basal rate and the HR-derived active rate — so resting time burns BMR and
+  /// active time burns the Keytel rate, with no double counting.
+  ///
+  /// Returns (total, active, basal):
+  ///   * basal  = BMR over the WHOLE day (kcal/day, pro-rated by [dayMinutes]).
+  ///   * active = Σ max(0, keytel(HR) − basalPerMin) over minutes with HR.
+  ///   * total  = basal + active  ≡  Σ max(basalPerMin, keytel(HR)) with BMR
+  ///              filling any minute that has no HR sample.
+  ///
+  /// [hrPerMin] is per-minute mean HR (bpm); 0/absent minutes fall back to BMR.
+  /// [activeFraction] is the HR-flex point as a fraction of HRmax (default 0.50,
+  /// matching the edge pipeline): minutes below it burn BMR only, so a quiet day
+  /// reads ≈ basal and Keytel's low-HR over-estimate can't inflate "active".
+  /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
+  static ({double total, double active, double basal}) dailyEnergy(
+    List<double> hrPerMin, {
+    required WorkoutUserProfile profile,
+    double? hrmax,
+    double activeFraction = 0.50,
+    int dayMinutes = 1440,
+  }) {
+    final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
+    final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
+    final age = profile.age > 0 ? profile.age : 30.0;
+    final coeffs = resolveCoeffs(profile.sex);
+    final effHRmax = hrmax ?? (220.0 - age);
+    final flexHr = activeFraction * effHRmax;
+
+    final bmrDay = mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex);
+    final basalPerMin = bmrDay / 1440.0;
+
+    var active = 0.0;
+    for (final hr in hrPerMin) {
+      if (hr < flexHr) continue; // below flex point → basal only
+      final activePerMin =
+          activeKcalPerS(coeffs, hr, effHRmax, weightKg, age) * 60.0;
+      final surplus = activePerMin - basalPerMin;
+      if (surplus > 0) active += surplus;
+    }
+    final basal = basalPerMin * dayMinutes;
+    return (total: basal + active, active: active, basal: basal);
+  }
+
   /// Estimate (kcal, kJ) for a workout bout. Each sample is weighted by the
   /// ELAPSED time to the next sample (capped at [mergeGapCapS] = mergeGapS, 150 s),
   /// so a sparse stream is counted over real seconds.
