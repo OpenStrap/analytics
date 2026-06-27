@@ -1,0 +1,296 @@
+// auto_detect.dart — opt-in "did you just work out?" SUGGESTION detector.
+//
+// Opt-in workout suggestion detector (ported from AutoWorkoutDetector.swift).
+// DELIBERATELY conservative (low sensitivity): a sustained ≥12-min
+// elevation of HR ≥ resting+30 bpm, brief (≤90 s) dips tolerated, near windows
+// merged, optional motion confirmation, overlap-excluded against saved spans.
+//
+// This NEVER writes a row — it only ever SUGGESTS. It is separate from the
+// persistent per-day [WorkoutDetector] (workout_detect.dart), which computes
+// calories/zones/strain for the durable "detected" rows.
+//
+// HYBRID SEAM: every surviving bout is run through a [SportClassifier]; the
+// default returns "detected" (no sport typing). OpenStrap's motion-based HAR typer
+// can be injected to type each bout when high-rate accel features exist.
+//
+// Pure / headless: no I/O, no clock, dart:math only. All ts/start/end are unix
+// SECONDS. NOT medical advice.
+
+import 'dart:math' as math;
+
+import '../types.dart';
+import 'sport.dart';
+
+/// A candidate workout window the user can accept (Save) or reject (dismiss).
+/// All fields derived purely from the HR samples inside the window.
+class DetectedWorkout {
+  final int startSec;
+  final int endSec;
+  final int avgBpm;
+  final int peakBpm;
+
+  /// Whole minutes, floor of (endSec - startSec) / 60.
+  final int durationMin;
+
+  /// Sport label from the [SportClassifier] ("detected" by default).
+  final String sport;
+
+  const DetectedWorkout({
+    required this.startSec,
+    required this.endSec,
+    required this.avgBpm,
+    required this.peakBpm,
+    required this.durationMin,
+    this.sport = defaultSportLabel,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'start_sec': startSec,
+        'end_sec': endSec,
+        'avg_bpm': avgBpm,
+        'peak_bpm': peakBpm,
+        'duration_min': durationMin,
+        'sport': sport,
+      };
+}
+
+/// A [startSec, endSec] span of an already-saved workout, used to exclude windows
+/// that overlap a session the user has already logged.
+class SavedWorkoutSpan {
+  final int startSec;
+  final int endSec;
+  const SavedWorkoutSpan(this.startSec, this.endSec);
+}
+
+/// One motion-intensity reading aligned to the HR timeline (optional confirmation
+/// signal). [intensity] is L2 gravity-delta vs the previous record.
+class MotionPoint {
+  final int ts;
+  final double intensity;
+  const MotionPoint(this.ts, this.intensity);
+}
+
+/// Opt-in suggestion detector.
+class AutoWorkoutDetector {
+  // ── Constants ─────────────────────────────────────────────────────────────
+
+  /// Elevated gate: bpm ≥ restingHR + this margin counts as "working".
+  static const int elevatedMarginBPM = 30;
+
+  /// A candidate must hold the gate for a contiguous span ≥ this (12 min).
+  static const double minSustainedMin = 12.0;
+
+  /// A dip below the gate no longer than this does NOT break the span.
+  static const int maxDipS = 90;
+
+  /// Two windows whose gap is strictly < this are merged (5 min).
+  static const int mergeGapS = 5 * 60;
+
+  /// When a motion series is supplied, the window's mean per-second motion
+  /// intensity must be ≥ this to qualify. Ignored in HR-only mode.
+  static const double motionConfirmMean = 0.05;
+
+  /// Resting-HR fallback when the caller has no nightly RHR.
+  static const int defaultRestingHR = 60;
+
+  /// Per-second motion intensity = L2 magnitude of the gravity change vs the
+  /// previous record. First row → 0. Empty input → [].
+  /// [gravTs]/[gx]/[gy]/[gz] are parallel arrays for building the optional [motion] argument.
+  /// [gravTs]/[gx]/[gy]/[gz] are parallel arrays (any order; sorted internally).
+  static List<MotionPoint> motionPoints(
+      List<int> gravTs, List<double> gx, List<double> gy, List<double> gz) {
+    final n = gravTs.length;
+    if (n == 0) return const [];
+    final idx = List<int>.generate(n, (i) => i)
+      ..sort((a, b) => gravTs[a].compareTo(gravTs[b]));
+    final out = <MotionPoint>[];
+    double? px, py, pz;
+    for (var k = 0; k < n; k++) {
+      final i = idx[k];
+      final double intensity;
+      if (k == 0 || px == null) {
+        intensity = 0.0;
+      } else {
+        final dx = gx[i] - px;
+        final dy = gy[i] - py!;
+        final dz = gz[i] - pz!;
+        intensity = math.sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      out.add(MotionPoint(gravTs[i], intensity));
+      px = gx[i];
+      py = gy[i];
+      pz = gz[i];
+    }
+    return out;
+  }
+
+  /// Detect candidate sustained-elevated-HR workout windows.
+  ///
+  /// [hrTs]/[hrBpm] the day's HR samples (parallel, any order; empty → []).
+  /// [restingBpm] nightly resting HR for the day; null → [defaultRestingHR] (60).
+  /// [motion] OPTIONAL continuous motion series for confirmation; null/empty →
+  /// HR-only. [savedSpans] already-saved windows to exclude by overlap.
+  /// [classify] the sport seam — runs on each surviving bout; default
+  /// [defaultSportClassifier] returns "detected" (no sport typing).
+  static List<DetectedWorkout> detect({
+    required List<int> hrTs,
+    required List<int> hrBpm,
+    int? restingBpm,
+    List<MotionPoint>? motion,
+    List<SavedWorkoutSpan> savedSpans = const [],
+    SportClassifier classify = defaultSportClassifier,
+  }) {
+    final n = hrTs.length;
+    if (n == 0) return const [];
+    final order = List<int>.generate(n, (i) => i)
+      ..sort((a, b) => hrTs[a].compareTo(hrTs[b]));
+    final ts = [for (final i in order) hrTs[i]];
+    final bpm = [for (final i in order) hrBpm[i]];
+
+    final floor = (restingBpm ?? defaultRestingHR) + elevatedMarginBPM;
+
+    // --- 1+2+3: grow sustained spans tolerating brief dips ---
+    final spans = <List<int>>[]; // [start, end]
+    int? spanStart;
+    var spanEnd = 0;
+    int? dipStart;
+
+    void closeSpan() {
+      if (spanStart != null &&
+          (spanEnd - spanStart!).toDouble() >= minSustainedMin * 60.0) {
+        spans.add([spanStart!, spanEnd]);
+      }
+      spanStart = null;
+      dipStart = null;
+    }
+
+    for (var k = 0; k < n; k++) {
+      if (bpm[k] >= floor) {
+        spanStart ??= ts[k];
+        spanEnd = ts[k];
+        dipStart = null; // the dip (if any) is bridged
+      } else if (spanStart != null) {
+        dipStart ??= ts[k];
+        if (ts[k] - dipStart! > maxDipS) closeSpan();
+      }
+    }
+    closeSpan();
+
+    if (spans.isEmpty) return const [];
+
+    // --- 4: merge spans whose gap is strictly < mergeGapS ---
+    final merged = <List<int>>[];
+    var curStart = spans[0][0];
+    var curEnd = spans[0][1];
+    for (var k = 1; k < spans.length; k++) {
+      final next = spans[k];
+      if (next[0] - curEnd < mergeGapS) {
+        curEnd = math.max(curEnd, next[1]);
+      } else {
+        merged.add([curStart, curEnd]);
+        curStart = next[0];
+        curEnd = next[1];
+      }
+    }
+    merged.add([curStart, curEnd]);
+
+    // --- 5+6+7 ---
+    final motionSeries =
+        (motion == null || motion.isEmpty) ? null : motion;
+    final results = <DetectedWorkout>[];
+    for (final span in merged) {
+      final start = span[0], end = span[1];
+
+      // 6: never re-suggest a window overlapping a saved workout.
+      if (savedSpans.any((s) => _overlaps(start, end, s.startSec, s.endSec))) {
+        continue;
+      }
+
+      // window HR samples
+      final winBpm = <int>[];
+      for (var k = 0; k < n; k++) {
+        if (ts[k] >= start && ts[k] <= end) winBpm.add(bpm[k]);
+      }
+      if (winBpm.isEmpty) continue;
+
+      // 5: motion confirmation when a continuous motion series was supplied.
+      double? meanMotion;
+      if (motionSeries != null) {
+        var sum = 0.0;
+        var cnt = 0;
+        for (final p in motionSeries) {
+          if (p.ts >= start && p.ts <= end) {
+            sum += p.intensity;
+            cnt++;
+          }
+        }
+        meanMotion = cnt == 0 ? 0.0 : sum / cnt;
+        if (meanMotion < motionConfirmMean) continue;
+      }
+
+      var sum = 0;
+      var peak = winBpm.first;
+      for (final v in winBpm) {
+        sum += v;
+        if (v > peak) peak = v;
+      }
+      final avg = (sum / winBpm.length).round();
+      final durMin = (end - start) ~/ 60;
+
+      // HYBRID SEAM: type the bout. Default classifier returns "detected".
+      final bout = WorkoutBout(
+        startSec: start,
+        endSec: end,
+        avgBpm: avg.toDouble(),
+        peakBpm: peak.toDouble(),
+        durationS: (end - start).toDouble(),
+      );
+      final feats = meanMotion == null
+          ? null
+          : MotionFeatures(meanIntensity: meanMotion);
+      final sport = classify(bout, feats);
+
+      results.add(DetectedWorkout(
+        startSec: start,
+        endSec: end,
+        avgBpm: avg,
+        peakBpm: peak,
+        durationMin: durMin,
+        sport: sport,
+      ));
+    }
+    return results;
+  }
+
+  /// Closed-interval overlap (touching endpoints count).
+  static bool _overlaps(int aStart, int aEnd, int bStart, int bEnd) =>
+      aStart <= bEnd && bStart <= aEnd;
+}
+
+/// Wrap a list of [DetectedWorkout] in the honesty envelope. Always present
+/// (an empty list is a valid, honest "no suggested workouts" answer).
+Metric<List<DetectedWorkout>> autoDetectWorkouts({
+  required List<int> hrTs,
+  required List<int> hrBpm,
+  int? restingBpm,
+  List<MotionPoint>? motion,
+  List<SavedWorkoutSpan> savedSpans = const [],
+  SportClassifier classify = defaultSportClassifier,
+}) {
+  final list = AutoWorkoutDetector.detect(
+    hrTs: hrTs,
+    hrBpm: hrBpm,
+    restingBpm: restingBpm,
+    motion: motion,
+    savedSpans: savedSpans,
+    classify: classify,
+  );
+  return Metric<List<DetectedWorkout>>(
+    value: list,
+    confidence: list.isEmpty ? 0.0 : 0.6,
+    tier: Tier.estimate,
+    inputs_used: const ['hr_1hz', 'resting_hr', 'motion_1hz'],
+    note: 'opt-in workout suggestion (HR ≥ RHR+30 sustained ≥12 min); '
+        'wrist-HR ESTIMATE, not medical advice',
+  );
+}

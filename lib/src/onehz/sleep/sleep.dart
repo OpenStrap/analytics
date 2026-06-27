@@ -17,6 +17,7 @@
 
 export 'van_hees.dart';
 export 'segment.dart';
+export 'advanced_stager.dart';
 export 'sri.dart';
 export 'accounting.dart';
 export 'stager.dart';

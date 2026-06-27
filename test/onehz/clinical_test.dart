@@ -286,6 +286,95 @@ void main() {
     });
   });
 
+  group('StrainScorer (Edwards/Banister TRIMP → 0–100)', () {
+    test('trimpToStrain pins: 0→0, 7200→~100, monotone, 2dp', () {
+      expect(StrainScorer.trimpToStrain(0), 0.0);
+      // ln(7201)/ln(7201)=1 → 100.
+      expect(StrainScorer.trimpToStrain(7200), closeTo(100.0, 1e-9));
+      expect(StrainScorer.trimpToStrain(100) < StrainScorer.trimpToStrain(335),
+          isTrue);
+      // Rounded to 2 decimals.
+      final v = StrainScorer.trimpToStrain(123.456);
+      expect((v * 100).round() / 100, v);
+    });
+
+    test('Edwards zone weight at %HRR boundaries (RHR=0,reserve=100 → bpm=%HRR)', () {
+      int w(double pct) => StrainScorer.zoneWeight(pct, 0, 100);
+      expect(w(49), 0);
+      expect(w(50), 1);
+      expect(w(60), 2);
+      expect(w(70), 3);
+      expect(w(80), 4);
+      expect(w(90), 5);
+      expect(w(100), 5);
+    });
+
+    test('Banister monotonic increasing in intensity', () {
+      // Two same-length streams, one strictly higher HR → more Banister TRIMP.
+      final lo = List<double>.filled(30, 100.0);
+      final hi = List<double>.filled(30, 150.0);
+      final ts = [for (var i = 0; i < 30; i++) i.toDouble()];
+      final tLo = StrainScorer.banisterTRIMP(
+          lo, 50, 150, StrainScorer.sampleDurationMinutes(ts),
+          StrainScorer.banisterBMen);
+      final tHi = StrainScorer.banisterTRIMP(
+          hi, 50, 150, StrainScorer.sampleDurationMinutes(ts),
+          StrainScorer.banisterBMen);
+      expect(tHi, greaterThan(tLo));
+    });
+
+    test('Tanaka HRmax = 208 − 0.7·age', () {
+      expect(StrainScorer.tanakaHRmax(30), closeTo(187.0, 1e-9));
+      expect(StrainScorer.tanakaHRmax(40), closeTo(180.0, 1e-9));
+    });
+
+    test('estimateHRmax: observed≥600 wins over Tanaka, else Tanaka', () {
+      // <600 samples → Tanaka.
+      final (h1, src1) = StrainScorer.estimateHRmax([180, 185], 30);
+      expect(src1, 'tanaka');
+      expect(h1, closeTo(187.0, 1e-9));
+      // ≥600 samples with a high observed 99.5pct (>Tanaka) → observed.
+      final hist = [for (var i = 0; i < 700; i++) 100.0 + (i % 100)];
+      final (h2, src2) = StrainScorer.estimateHRmax(hist, 30);
+      expect(src2, 'observed');
+      expect(h2, greaterThan(StrainScorer.tanakaHRmax(30)));
+    });
+
+    test('gating: too few samples → null; spanning ≥600s with ≥20 → computes', () {
+      // 30 samples but spanning only 30s → fails sparse-span gate → null.
+      final ts30 = [for (var i = 0; i < 30; i++) i.toDouble()];
+      expect(
+          StrainScorer.strain(List<double>.filled(30, 150), ts30,
+              maxHR: 190, restingHR: 50),
+          isNull);
+      // 20 samples spanning 600s → qualifies.
+      final tsSpan = [for (var i = 0; i < 20; i++) i * 32.0]; // 19*32=608s
+      final s = StrainScorer.strain(List<double>.filled(20, 150), tsSpan,
+          maxHR: 190, restingHR: 50);
+      expect(s, isNotNull);
+    });
+
+    test('maxHR ≤ restingHR → null (invalid HRR)', () {
+      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
+      expect(
+          StrainScorer.strain(List<double>.filled(700, 100), ts,
+              maxHR: 50, restingHR: 60),
+          isNull);
+    });
+
+    test('trimpStrain envelope: present/ESTIMATE on enough data, absent otherwise', () {
+      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
+      final m = trimpStrain(List<double>.filled(700, 140), ts,
+          maxHr: 190, restingHr: 50);
+      expect(m.present, isTrue);
+      expect(m.tier, 'ESTIMATE');
+      expect(m.value!, greaterThan(0));
+      final absent = trimpStrain([100, 110], [0, 1], maxHr: 190, restingHr: 50);
+      expect(absent.present, isFalse);
+      expect(absent.confidence, 0);
+    });
+  });
+
   group('baseline-need signals (need_baseline convention)', () {
     test('readinessLnRmssd: 1 night -> absent + need note; >=min computes', () {
       final one = readinessLnRmssd([3.5]);

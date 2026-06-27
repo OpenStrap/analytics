@@ -18,6 +18,7 @@ export 'src/onehz/util.dart';
 export 'src/onehz/foundations/rr_correction.dart';
 export 'src/onehz/foundations/ppg_sqi.dart';
 export 'src/onehz/foundations/baseline.dart';
+export 'src/onehz/foundations/ewma_baselines.dart';
 export 'src/onehz/foundations/fusion.dart';
 
 // Tier-1 clinical.
@@ -35,5 +36,6 @@ export 'src/onehz/clinical/stress_si.dart';
 export 'src/onehz/sleep/sleep.dart';
 export 'src/onehz/respiration/respiration.dart';
 export 'src/onehz/motion/motion.dart';
+export 'src/onehz/workout/workout.dart';
 export 'src/onehz/wellness/wellness.dart';
 export 'src/onehz/human/human.dart';

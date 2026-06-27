@@ -3,6 +3,91 @@ import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
 void main() {
+  group('Winsorized-EWMA baselines', () {
+    final cfg = Baselines.hrvCfg; // min5 max250 floor5 hlB14 hlS21
+
+    test('first valid night seeds at the value, floor spread, calibrating', () {
+      final s = Baselines.update(null, 60.0, cfg);
+      expect(s.baseline, 60.0);
+      expect(s.spread, cfg.floorSpread);
+      expect(s.nValid, 1);
+      expect(s.status, BaselineStatus.calibrating);
+    });
+
+    test('out-of-range first night seeds at midpoint, nValid 0', () {
+      final s = Baselines.update(null, 999.0, cfg); // > maxVal
+      expect(s.baseline, (cfg.minVal + cfg.maxVal) / 2.0);
+      expect(s.nValid, 0);
+      expect(s.nightsSinceUpdate, 1);
+    });
+
+    test('hard-outlier night past early life is SEEN but NOT folded', () {
+      // Build a settled (non-young, nValid>=8) flat baseline at 60.
+      final vals = <double?>[for (var i = 0; i < 10; i++) 60.0];
+      final settled = Baselines.foldHistory(vals, cfg);
+      expect(settled.nValid, 10);
+      expect(settled.baseline, closeTo(60.0, 1e-9));
+      // spread is at the floor (flat history), so a value > 5*floor away is hard-rejected.
+      final before = settled.baseline;
+      final after = Baselines.update(settled, 60.0 + 6 * cfg.floorSpread, cfg);
+      expect(after.baseline, before, reason: 'hard outlier not folded');
+      expect(after.nValid, settled.nValid, reason: 'nValid unchanged on reject');
+    });
+
+    test('early-life fast adapt: a high seed is pulled toward reality in days', () {
+      // Seed high at 90, then feed true lower nights at 55. Young (nValid<8) uses
+      // halfLife 3 and a suspended hard-outlier gate, so it tracks down fast.
+      var s = Baselines.update(null, 90.0, cfg);
+      for (var i = 0; i < 4; i++) {
+        s = Baselines.update(s, 55.0, cfg);
+      }
+      // With earlyHalfLifeB=3 (λ≈0.206) over 4 nights from 90 toward 55,
+      // it should drop well below the midpoint, proving the anti-anchoring fix.
+      expect(s.baseline, lessThan(80.0));
+      expect(s.baseline, greaterThan(55.0));
+    });
+
+    test('deviation z = (v-baseline)/(1.253*spread)', () {
+      final s = BaselineState(
+          baseline: 60.0,
+          spread: 5.0,
+          nValid: 14,
+          nightsSinceUpdate: 0,
+          status: BaselineStatus.trusted);
+      final d = Baselines.deviation(60.0 + 1.253 * 5.0, s);
+      expect(d.z, closeTo(1.0, 1e-9));
+      expect(d.delta, closeTo(1.253 * 5.0, 1e-9));
+      // A value comfortably inside ±σ is in-normal-range.
+      expect(Baselines.deviation(62.0, s).inNormalRange, isTrue);
+      final d2 = Baselines.deviation(60.0 + 2 * 1.253 * 5.0, s);
+      expect(d2.inNormalRange, isFalse);
+    });
+
+    test('status thresholds calibrating<4<=provisional<14<=trusted; stale', () {
+      expect(Baselines.computeStatus(3, 0), BaselineStatus.calibrating);
+      expect(Baselines.computeStatus(4, 0), BaselineStatus.provisional);
+      expect(Baselines.computeStatus(14, 0), BaselineStatus.trusted);
+      expect(Baselines.computeStatus(14, 15), BaselineStatus.stale);
+    });
+
+    test('skip-and-hold on null night increments nightsSinceUpdate', () {
+      final seeded = Baselines.update(null, 60.0, cfg);
+      final held = Baselines.update(seeded, null, cfg);
+      expect(held.baseline, seeded.baseline);
+      expect(held.nValid, seeded.nValid);
+      expect(held.nightsSinceUpdate, 1);
+    });
+
+    test('trailing-30 fallback: mean + sample SD, σ floor, internal spread', () {
+      final vals = <double?>[50.0, 60.0, 70.0]; // mean 60, SD=10
+      final s = Baselines.rollingMeanSD(vals, cfg);
+      expect(s.baseline, closeTo(60.0, 1e-9));
+      // SD=10 > floor σ (5); stored as SD/1.253.
+      expect(s.spread, closeTo(10.0 / 1.253, 1e-9));
+      expect(s.nValid, 3);
+    });
+  });
+
   group('RR artifact correction (Lipponen-Tarvainen)', () {
     test('clean physiological series classifies all normal', () {
       // 60 beats around 1000 ms with small +/-15 ms wobble (HRV).
