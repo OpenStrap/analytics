@@ -29,8 +29,8 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
 import 'van_hees.dart';
-import 'cardio_stager.dart';
 import 'accounting.dart' show SleepStage;
+import 'advanced_stager.dart';
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
 const int _minQualifyingSleepSec = 3 * 3600;
@@ -155,91 +155,97 @@ SleepSegmentation segmentSleep(
   List<double>? hrBaseline,
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
+  int? habitualMidsleepSec,
 }) {
-  // 1. van Hees REST window (30-min bridge baked into vanHeesSleepWindow).
-  final wm = vanHeesSleepWindow(accel);
-  final w = wm.value;
-  if (w == null) return SleepSegmentation.absent;
+  final n = math.min(accel.length, hr1hz.length);
+  if (n < _minQualifyingSleepSec) return SleepSegmentation.absent;
 
-  var onset = w.onsetIdx;
-  var offset = math.min(w.offsetIdx, math.min(accel.length, hr1hz.length));
-  if (offset <= onset) return SleepSegmentation.absent;
+  final trimmedAccel = accel.sublist(0, n);
+  final trimmedHr = hr1hz.sublist(0, n);
+  final wm = vanHeesSleepWindow(trimmedAccel);
+  final fallbackWindow = wm.value;
 
-  // 2. Optional nocturnal-HR-dip CONSENSUS — confidence only, never relocation.
-  //    The cardiac trough is physiological confirmation that the accel REST
-  //    window really is sleep. We deliberately do NOT trim onset/offset to the
-  //    dip: validated on real data (Jun-25→26), trimming to the first sustained
-  //    sub-threshold HR run shoved a true 02:15 onset to 02:41 — discarding ~26
-  //    min of real early sleep, because HR keeps settling for a while after you
-  //    lie down. The accel REST window already bounds "in bed"; the stager
-  //    (step 3) decides wake-vs-sleep WITHIN it (so any pre-sleep lying-still is
-  //    classified as wake, not silently dropped). The dip only adjusts how much
-  //    we TRUST the window.
-  var hrConsensus = 1.0;
-  if (hrBaseline != null) {
-    final baseValid = hrBaseline.where((h) => h > 0).toList();
-    final baseMed = median(baseValid);
-    if (baseMed != null && baseValid.length >= 3) {
-      // Sleep HR is sustained below the daytime median (a conservative dip
-      // threshold of ~95% of the daytime median; sleep HR typically dips ≥10%).
-      final thresh = 0.95 * baseMed;
-      const sustain = 300; // 5-min sustained below-baseline to confirm sleep
-      final refined = _refineByHrDip(hr1hz, onset, offset, thresh, sustain);
-      // A sustained cardiac dip inside the window → high confidence; none →
-      // the two signals disagree, so keep the accel window but lower confidence.
-      hrConsensus = refined != null ? 0.95 : 0.6;
+  final tzOffsetSeconds = DateTime.fromMillisecondsSinceEpoch(
+    trimmedAccel.first.tsMs.toInt(),
+    isUtc: false,
+  ).timeZoneOffset.inSeconds;
+  final grav = <GravTs>[
+    for (var i = 0; i < n; i++)
+      GravTs(
+        trimmedAccel[i].tsMs ~/ 1000,
+        trimmedAccel[i].x,
+        trimmedAccel[i].y,
+        trimmedAccel[i].z,
+      ),
+  ];
+  final hr = <HrTs>[
+    for (var i = 0; i < n; i++)
+      if (trimmedHr[i] > 0) HrTs(trimmedAccel[i].tsMs ~/ 1000, trimmedHr[i])
+  ];
+  final rr = <RrTs>[
+    for (var i = 0; i < math.min(rrMs.length, rrTsMs.length); i++)
+      if (rrMs[i].isFinite && rrMs[i] > 0)
+        RrTs((rrTsMs[i] / 1000.0).round(), rrMs[i])
+  ];
+
+  final sessions = AdvancedSleepStager.detectSleep(
+    grav,
+    hr,
+    rr: rr,
+    tzOffsetSec: tzOffsetSeconds,
+  );
+  if (sessions.isEmpty) return SleepSegmentation.absent;
+
+  final chosen = _pickMainSleepGroup(
+    _bridgeAdjacentSessions(sessions),
+    tzOffsetSeconds,
+    habitualMidsleepSec: habitualMidsleepSec,
+  );
+  if (chosen == null) return SleepSegmentation.absent;
+
+  final tsSec = [for (final a in trimmedAccel) a.tsMs ~/ 1000];
+  final onset = _lowerBoundInt(tsSec, chosen.start);
+  final offset = _lowerBoundInt(tsSec, chosen.end);
+  final inBed = chosen.end - chosen.start;
+  if (offset <= onset || inBed < _minQualifyingSleepSec) {
+    return SleepSegmentation.absent;
+  }
+
+  final stages4 = List<String>.filled(inBed, 'wake');
+  for (final session in chosen.sessions) {
+    for (final seg in session.stages) {
+      final lo = math.max(0, seg.start - chosen.start);
+      final hi = math.min(inBed, seg.end - chosen.start);
+      for (var i = lo; i < hi; i++) {
+        stages4[i] = seg.stage;
+      }
     }
   }
 
-  final inBed = offset - onset;
-  if (inBed < _minQualifyingSleepSec) return SleepSegmentation.absent;
-
-  // 3. Stager over the WINDOW SLICE ONLY — transparent cardiorespiratory rule
-  //    stager (cardio_stager.dart): motion + HR + RMSSD vs the night's own
-  //    baseline. Replaces the Walch ML model, which over-called wake and ignored
-  //    RR (our best signal). RR is matched to the window by ABSOLUTE time inside
-  //    the stager, so we hand it the whole segment's RR and it picks the beats
-  //    that fall in each epoch's window. Returns W/NREM/REM + a low-confidence
-  //    Deep-NREM flag. TST/WASO/efficiency derive from asleep = not wake.
-  final hrSlice = hr1hz.sublist(onset, offset);
-  final accelSlice = accel.sublist(onset, offset);
-  final cr = cardioStager(hrSlice, accelSlice, rrMs: rrMs, rrTsMs: rrTsMs);
-  final st = cr.base;
-  if (st.stages.isEmpty) return SleepSegmentation.absent;
-
-  // 4. Expand per-epoch stages to PER-SECOND over the window, then derive every
-  //    figure from these labels (asleep = stage != wake) — the SINGLE source.
-  //    [perSec] keeps the 3-class enum (back-compat); [stages4] is the parallel
-  //    per-second 4-class hypnogram with NREM split into 'light'/'deep' via the
-  //    per-epoch deepFlag (LOW CONFIDENCE).
-  final perSec = _expandToPerSecond(st.stages, st.epochSec, inBed);
-  final stages4 = List<String>.filled(inBed, 'wake');
+  final perSec = List<SleepStage>.generate(
+    inBed,
+    (i) => _sleepStageFor(stages4[i]),
+    growable: false,
+  );
   var tst = 0, waso = 0, nrem = 0, light = 0, deep = 0, rem = 0, wake = 0;
   var firstSleep = -1, lastSleep = -1;
   for (var i = 0; i < perSec.length; i++) {
-    final epoch = i ~/ st.epochSec;
     switch (perSec[i]) {
       case SleepStage.wake:
         wake++;
-        stages4[i] = 'wake';
         break;
       case SleepStage.nrem:
         nrem++;
         tst++;
-        final isDeep =
-            epoch < cr.deepFlag.length && cr.deepFlag[epoch];
-        if (isDeep) {
+        if (stages4[i] == 'deep') {
           deep++;
-          stages4[i] = 'deep';
         } else {
           light++;
-          stages4[i] = 'light';
         }
         break;
       case SleepStage.rem:
         rem++;
         tst++;
-        stages4[i] = 'rem';
         break;
     }
     if (perSec[i] != SleepStage.wake) {
@@ -247,32 +253,24 @@ SleepSegmentation segmentSleep(
       lastSleep = i;
     }
   }
-  // WASO = wake seconds strictly between first and last asleep second.
   if (firstSleep >= 0) {
     for (var i = firstSleep; i <= lastSleep; i++) {
       if (perSec[i] == SleepStage.wake) waso++;
     }
   }
   final efficiency = inBed > 0 ? 100.0 * tst / inBed : 0.0;
-
-  // Confidence = window conf × staging conf × HR-consensus, bounded by the
-  // staging ESTIMATE ceiling. The cardio stager reports its OWN confidence
-  // (scaled by RR coverage — RMSSD is what makes REM/deep honest), so we anchor
-  // to that instead of a fixed constant.
-  final stagerConf = cr.confidence;
-  final conf =
-      clamp(wm.confidence * stagerConf * hrConsensus, 0.0, stagerConf);
+  final conf = clamp(((wm.confidence > 0 ? wm.confidence : 0.45) + 0.5) / 2.0, 0.0, 0.6);
 
   return SleepSegmentation(
     window: SleepWindow(
       onsetIdx: onset,
       offsetIdx: offset,
-      onsetMs: onset < accel.length ? accel[onset].tsMs : w.onsetMs,
-      offsetMs: (offset - 1) < accel.length && (offset - 1) >= 0
-          ? accel[offset - 1].tsMs
-          : w.offsetMs,
-      immobile: w.immobile,
-      zAngleDeg: w.zAngleDeg,
+      onsetMs: chosen.start * 1000.0,
+      offsetMs: chosen.end * 1000.0,
+      immobile:
+          fallbackWindow?.immobile ?? List<bool>.filled(trimmedAccel.length, false),
+      zAngleDeg:
+          fallbackWindow?.zAngleDeg ?? List<double>.filled(trimmedAccel.length, 0.0),
       sptSec: inBed,
     ),
     stages: perSec,
@@ -290,43 +288,196 @@ SleepSegmentation segmentSleep(
   );
 }
 
-/// Tighten [onset,offset) to the first/last second of a sustained (≥[sustain] s)
-/// run of HR below [thresh]. Returns null if no such sustained dip exists in the
-/// window (signals disagree). HR=0 (off-skin) does not count as "below".
-List<int>? _refineByHrDip(
-    List<double> hr, int onset, int offset, double thresh, int sustain) {
-  // below[i] = valid HR sample under the dip threshold.
-  int? firstDip, lastDip;
-  var run = 0;
-  for (var i = onset; i < offset; i++) {
-    final h = i < hr.length ? hr[i] : 0.0;
-    final below = h > 0 && h < thresh;
-    if (below) {
-      run++;
-      if (run >= sustain) {
-        firstDip ??= i - run + 1;
-        lastDip = i;
-      }
-    } else {
-      run = 0;
-    }
-  }
-  if (firstDip == null || lastDip == null) return null;
-  // Tighten only: never push the bound outward past the accel window.
-  final newOnset = math.max(onset, firstDip);
-  final newOffset = math.min(offset, lastDip + 1);
-  if (newOffset <= newOnset) return null;
-  return [newOnset, newOffset];
+class _SleepGroup {
+  final List<SleepSession> sessions;
+  final int start;
+  final int end;
+  final double asleepMin;
+  final int inBedSec;
+
+  const _SleepGroup({
+    required this.sessions,
+    required this.start,
+    required this.end,
+    required this.asleepMin,
+    required this.inBedSec,
+  });
 }
 
-/// Expand per-epoch [stages] (each [epochSec] long) to a per-second vector of
-/// length [lenSec], clamping the final partial epoch.
-List<SleepStage> _expandToPerSecond(
-    List<SleepStage> stages, int epochSec, int lenSec) {
-  final out = List<SleepStage>.filled(lenSec, SleepStage.wake);
-  for (var i = 0; i < lenSec; i++) {
-    final e = i ~/ epochSec;
-    out[i] = e < stages.length ? stages[e] : SleepStage.wake;
+List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
+  if (sessions.isEmpty) return const [];
+  final sorted = [...sessions]..sort((a, b) => a.start.compareTo(b.start));
+  const bridgeGapSec = 60 * 60;
+  final out = <_SleepGroup>[];
+  for (final session in sorted) {
+    final asleepMin = AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0;
+    if (out.isEmpty) {
+      out.add(
+        _SleepGroup(
+          sessions: [session],
+          start: session.start,
+          end: session.end,
+          asleepMin: asleepMin,
+          inBedSec: session.end - session.start,
+        ),
+      );
+      continue;
+    }
+    final last = out.removeLast();
+    final gap = session.start - last.end;
+    if (gap >= 0 && gap < bridgeGapSec) {
+      out.add(
+        _SleepGroup(
+          sessions: [...last.sessions, session],
+          start: last.start,
+          end: math.max(last.end, session.end),
+          asleepMin: last.asleepMin + asleepMin,
+          inBedSec: last.inBedSec + (session.end - session.start),
+        ),
+      );
+    } else {
+      out.add(last);
+      out.add(
+        _SleepGroup(
+          sessions: [session],
+          start: session.start,
+          end: session.end,
+          asleepMin: asleepMin,
+          inBedSec: session.end - session.start,
+        ),
+      );
+    }
   }
   return out;
+}
+
+_SleepGroup? _pickMainSleepGroup(
+  List<_SleepGroup> groups,
+  int tzOffsetSeconds, {
+  int? habitualMidsleepSec,
+}) {
+  if (groups.isEmpty) return null;
+  const alignmentBonusMin = 90.0;
+  const fullWindowSec = 2 * 3600;
+  const zeroWindowSec = 5 * 3600;
+  const overnightStartHour = 20;
+  const overnightEndHour = 11;
+  const secondsPerDay = 86400;
+  final overnightSpanSec =
+      (((overnightEndHour - overnightStartHour) * 3600) + secondsPerDay) %
+          secondsPerDay;
+  final coldStartAnchorSec =
+      ((overnightStartHour * 3600) + overnightSpanSec ~/ 2) % secondsPerDay;
+  final targetMidsleepSec = habitualMidsleepSec ?? coldStartAnchorSec;
+
+  int localSecOfDay(int ts) {
+    final local = ts + tzOffsetSeconds;
+    return ((local % secondsPerDay) + secondsPerDay) % secondsPerDay;
+  }
+
+  int circularDistanceSec(int a, int b) {
+    final raw = (a - b).abs() % secondsPerDay;
+    return math.min(raw, secondsPerDay - raw);
+  }
+
+  double alignmentBonusFor(_SleepGroup g) {
+    final mid = g.start + (g.inBedSec ~/ 2);
+    final dist = circularDistanceSec(localSecOfDay(mid), targetMidsleepSec);
+    if (dist <= fullWindowSec) return alignmentBonusMin;
+    if (dist >= zeroWindowSec) return 0.0;
+    final frac = (zeroWindowSec - dist) / (zeroWindowSec - fullWindowSec);
+    return alignmentBonusMin * frac;
+  }
+
+  _SleepGroup winner = groups.first;
+  var bestScore = winner.asleepMin + alignmentBonusFor(winner);
+  for (final g in groups.skip(1)) {
+    final score = g.asleepMin + alignmentBonusFor(g);
+    if (score > bestScore ||
+        (score == bestScore &&
+            g.start < winner.start)) {
+      winner = g;
+      bestScore = score;
+    }
+  }
+  return winner;
+}
+
+int? habitualMidsleepSecFromHistory(
+  List<({int startSec, int endSec, String dayKey})> history, {
+  required int tzOffsetSeconds,
+  int minDays = 14,
+}) {
+  if (history.isEmpty) return null;
+  final longestByDay = <String, ({int startSec, int endSec, String dayKey})>{};
+  for (final block in history) {
+    final cur = longestByDay[block.dayKey];
+    final dur = block.endSec - block.startSec;
+    final curDur = cur == null ? -1 : cur.endSec - cur.startSec;
+    if (cur == null ||
+        dur > curDur ||
+        (dur == curDur && block.startSec < cur.startSec)) {
+      longestByDay[block.dayKey] = block;
+    }
+  }
+  if (longestByDay.length < minDays) return null;
+  final mids = [
+    for (final block in longestByDay.values)
+      _localSecOfDay(
+        block.startSec + ((block.endSec - block.startSec) ~/ 2),
+        tzOffsetSeconds,
+      ),
+  ];
+  return _circularMeanSec(mids);
+}
+
+int _localSecOfDay(int ts, int offsetSec) {
+  const secondsPerDay = 86400;
+  final local = ts + offsetSec;
+  return ((local % secondsPerDay) + secondsPerDay) % secondsPerDay;
+}
+
+int? _circularMeanSec(List<int> secs) {
+  if (secs.isEmpty) return null;
+  const secondsPerDay = 86400;
+  const minResultant = 1e-9;
+  var sumSin = 0.0;
+  var sumCos = 0.0;
+  final k = 2.0 * math.pi / secondsPerDay;
+  for (final s in secs) {
+    final a = s * k;
+    sumSin += math.sin(a);
+    sumCos += math.cos(a);
+  }
+  final resultant = math.sqrt(sumSin * sumSin + sumCos * sumCos) / secs.length;
+  if (resultant < minResultant) return null;
+  var ang = math.atan2(sumSin, sumCos);
+  if (ang < 0) ang += 2.0 * math.pi;
+  final sec = (ang / k).round() % secondsPerDay;
+  return ((sec % secondsPerDay) + secondsPerDay) % secondsPerDay;
+}
+
+SleepStage _sleepStageFor(String label) {
+  switch (label) {
+    case 'rem':
+      return SleepStage.rem;
+    case 'light':
+    case 'deep':
+      return SleepStage.nrem;
+    default:
+      return SleepStage.wake;
+  }
+}
+
+int _lowerBoundInt(List<int> xs, int target) {
+  var lo = 0, hi = xs.length;
+  while (lo < hi) {
+    final mid = (lo + hi) >> 1;
+    if (xs[mid] < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
 }

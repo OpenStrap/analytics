@@ -323,6 +323,77 @@ void main() {
       expect(s.confidence, 0);
     });
 
+    test('(c3) overnight main sleep beats a longer daytime nap', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0.0;
+      void active(int secs) {
+        for (var i = 0; i < secs; i++) {
+          final phase = math.sin(i * 0.5);
+          accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+          hr.add(72 + 2 * math.sin(i / 600.0));
+          t += 1000.0;
+        }
+      }
+
+      void stillSleep(int secs, {double bpm = 50}) {
+        for (var i = 0; i < secs; i++) {
+          accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+          hr.add(bpm + 1.5 * math.sin(i / 1800.0));
+          t += 1000.0;
+        }
+      }
+
+      // Previous evening → 4h overnight sleep, daytime activity, then a 5h nap.
+      active(2 * 3600);
+      stillSleep(4 * 3600, bpm: 49);
+      active(6 * 3600);
+      stillSleep(5 * 3600, bpm: 52);
+      active(2 * 3600);
+
+      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
+      expect(s.present, isTrue);
+      // The overnight block earns the timing bonus, so the chosen in-bed span is
+      // the ~4h night rather than the longer daytime nap.
+      expect(s.inBedSec!, lessThan(5 * 3600));
+      expect(s.inBedSec!, greaterThan(3 * 3600));
+    });
+
+    test('(c4) split overnight fragments are grouped into one main sleep', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0.0;
+      void active(int secs, {double baseHr = 72}) {
+        for (var i = 0; i < secs; i++) {
+          final phase = math.sin(i * 0.5);
+          accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+          hr.add(baseHr + 2 * math.sin(i / 600.0));
+          t += 1000.0;
+        }
+      }
+
+      void stillSleep(int secs, {double bpm = 50}) {
+        for (var i = 0; i < secs; i++) {
+          accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+          hr.add(bpm + 1.5 * math.sin(i / 1800.0));
+          t += 1000.0;
+        }
+      }
+
+      active(2 * 3600);
+      stillSleep(3 * 3600, bpm: 49);
+      active(30 * 60, baseHr: 85); // real wake gap: preserved as WASO, not new day
+      stillSleep(2 * 3600, bpm: 50);
+      active(4 * 3600);
+
+      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
+      expect(s.present, isTrue);
+      // The selector bridges adjacent overnight fragments (<60 min gap) into
+      // one main sleep span rather than picking only the longest fragment.
+      expect(s.inBedSec!, greaterThan(5 * 3600));
+      expect(s.wasoSec!, greaterThan(20 * 60));
+    });
+
     // --- Webster/Cole-Kripke sleep-continuity rescoring regression -----------
     // These pin the over-wake fix: brief arousals (motion blips that the van
     // Hees 5-min forward window smears, or short HR bumps) must be rescored to
