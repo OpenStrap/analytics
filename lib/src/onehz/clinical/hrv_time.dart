@@ -178,20 +178,21 @@ Metric<double> nocturnalRmssd(
   );
 }
 
-/// NOOP-compatible nightly RMSSD (ms).
+/// Sleep-session nightly RMSSD (ms) as the arithmetic mean of cleaned
+/// consecutive 5-minute window RMSSDs.
 ///
-/// Mirrors NOOP's `sessionAvgHRV`: split the detected sleep session into
-/// consecutive 5-minute windows, apply the simple NOOP cleaner
-/// (range-filter [300, 2000] ms + Malik-style ectopic rejection against a local
-/// median), compute RMSSD inside each valid window, then return the ARITHMETIC
-/// MEAN across windows. This is intentionally distinct from [nocturnalRmssd],
-/// which uses cleaned NN + median-of-windows robustness.
+/// Split the detected sleep session into consecutive 5-minute windows, apply a
+/// simple RR cleaner (range-filter [300, 2000] ms + Malik-style ectopic
+/// rejection against a local median), compute RMSSD inside each valid window,
+/// then return the ARITHMETIC MEAN across windows. This is intentionally
+/// distinct from [nocturnalRmssd], which uses cleaned NN +
+/// median-of-windows robustness.
 ///
 /// [rrMs]/[rrTsMs] are the raw RR intervals and their beat-end epoch times in
 /// milliseconds. [startSec]/[endSec] bound the chosen sleep session in epoch
 /// seconds. The implementation is one-pass over the time-sorted RR stream:
 /// beats are bucketed once by `(tsSec - startSec) ~/ windowSec`.
-Metric<double> noopNightlyRmssd(
+Metric<double> sleepSessionWindowedRmssd(
   List<double> rrMs,
   List<double> rrTsMs, {
   required int startSec,
@@ -230,7 +231,7 @@ Metric<double> noopNightlyRmssd(
   final rmssds = <double>[];
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
-    final cleaned = _noopCleanRr(buckets[idx]!);
+    final cleaned = _cleanWindowRr(buckets[idx]!);
     if (cleaned.length < 2) continue;
     final rmssd = _rmssdRaw(cleaned);
     if (rmssd != null) rmssds.add(rmssd);
@@ -240,7 +241,7 @@ Metric<double> noopNightlyRmssd(
     return const Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'no valid 5-min windows for noop nightly RMSSD',
+      note: 'no valid 5-min windows for sleep-session RMSSD',
     );
   }
 
@@ -251,7 +252,7 @@ Metric<double> noopNightlyRmssd(
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'NOOP nightly HRV: mean RMSSD over cleaned 5-min sleep-session windows.',
+    note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows.',
   );
 }
 
@@ -277,10 +278,10 @@ List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
   return out;
 }
 
-List<double> _noopCleanRr(List<double> rr) =>
-    _noopRejectEctopic([for (final v in rr) if (v >= 300 && v <= 2000) v]);
+List<double> _cleanWindowRr(List<double> rr) =>
+    _rejectWindowEctopic([for (final v in rr) if (v >= 300 && v <= 2000) v]);
 
-List<double> _noopRejectEctopic(List<double> nn) {
+List<double> _rejectWindowEctopic(List<double> nn) {
   const radius = 2;
   const threshold = 0.20;
   if (nn.length <= radius) return nn;

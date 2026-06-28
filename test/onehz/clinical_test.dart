@@ -268,7 +268,7 @@ void main() {
     });
   });
 
-  group('NOOP nightly RMSSD (mean of cleaned 5-min windows)', () {
+  group('sleep-session nightly RMSSD (mean of cleaned 5-min windows)', () {
     test('matches the arithmetic mean of per-window RMSSDs', () {
       final rr = <double>[];
       final ts = <double>[];
@@ -286,7 +286,7 @@ void main() {
       addWindow([1000, 1010, 990], 1000.0); // bucket 0, RMSSD = 15.8113883...
       addWindow([1000, 1050, 950], 301000.0); // bucket 1, RMSSD = 79.0569415...
 
-      final m = noopNightlyRmssd(
+      final m = sleepSessionWindowedRmssd(
         rr,
         ts,
         startSec: 1,
@@ -300,7 +300,7 @@ void main() {
     test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
       final rr = <double>[1000, 1000, 200, 1000, 1000];
       final ts = <double>[1000, 2000, 3000, 4000, 5000];
-      final m = noopNightlyRmssd(rr, ts, startSec: 1, endSec: 301);
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
     });
