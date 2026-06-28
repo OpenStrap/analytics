@@ -207,6 +207,49 @@ void main() {
     });
   });
 
+  group('display heart-rate zones', () {
+    test('builds Tanaka %HRmax zones and includes HRmax in zone 5', () {
+      final zones = HeartRateZones.zones(age: 40);
+      expect(zones.source, 'tanaka');
+      expect(zones.maxHr, closeTo(180.0, 1e-9));
+      expect(zones.zoneNumber(89.9), 0);
+      expect(zones.zoneNumber(90.0), 1);
+      expect(zones.zoneNumber(108.0), 2);
+      expect(zones.zoneNumber(180.0), 5);
+    });
+
+    test('accumulates duration until next sample and rounds to zone minutes', () {
+      final zoneSet = HeartRateZones.zonesFromMaxHr(200);
+      final time = HeartRateZones.timeInZone([
+        const HrSample(0, 110), // z1 for 60 s
+        const HrSample(60000, 130), // z2 for 60 s
+        const HrSample(120000, 150), // z3 for 60 s
+        const HrSample(180000, 170), // z4 for 60 s
+        const HrSample(240000, 190), // z5 for tail median 60 s
+      ], zoneSet);
+      expect(time.secondsInZone(1), closeTo(60, 1e-9));
+      expect(time.secondsInZone(2), closeTo(60, 1e-9));
+      expect(time.secondsInZone(3), closeTo(60, 1e-9));
+      expect(time.secondsInZone(4), closeTo(60, 1e-9));
+      expect(time.secondsInZone(5), closeTo(60, 1e-9));
+      expect(time.toRoundedMinuteMap(),
+          {'z1': 1, 'z2': 1, 'z3': 1, 'z4': 1, 'z5': 1});
+    });
+
+    test('caps pathological gaps at the median plausible interval', () {
+      final zoneSet = HeartRateZones.zonesFromMaxHr(200);
+      final time = HeartRateZones.timeInZone([
+        const HrSample(0, 130), // z2
+        const HrSample(1000, 150), // z3
+        const HrSample(2000, 190), // z5, next gap huge
+        const HrSample(700000, 190), // huge gap capped to 1 s
+      ], zoneSet);
+      expect(time.secondsInZone(2), closeTo(1, 1e-9));
+      expect(time.secondsInZone(3), closeTo(1, 1e-9));
+      expect(time.secondsInZone(5), closeTo(2, 1e-9));
+    });
+  });
+
   group('robust nocturnal RMSSD (median-of-5min-windows)', () {
     test('robust RMSSD tracks the stable level while whole-night is inflated',
         () {
