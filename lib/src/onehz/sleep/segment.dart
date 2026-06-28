@@ -155,6 +155,7 @@ SleepSegmentation segmentSleep(
   List<double>? hrBaseline,
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
+  int? habitualMidsleepSec,
 }) {
   final n = math.min(accel.length, hr1hz.length);
   if (n < _minQualifyingSleepSec) return SleepSegmentation.absent;
@@ -198,6 +199,7 @@ SleepSegmentation segmentSleep(
   final chosen = _pickMainSleepGroup(
     _bridgeAdjacentSessions(sessions),
     tzOffsetSeconds,
+    habitualMidsleepSec: habitualMidsleepSec,
   );
   if (chosen == null) return SleepSegmentation.absent;
 
@@ -291,12 +293,14 @@ class _SleepGroup {
   final int start;
   final int end;
   final double asleepMin;
+  final int inBedSec;
 
   const _SleepGroup({
     required this.sessions,
     required this.start,
     required this.end,
     required this.asleepMin,
+    required this.inBedSec,
   });
 }
 
@@ -314,6 +318,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: session.start,
           end: session.end,
           asleepMin: asleepMin,
+          inBedSec: session.end - session.start,
         ),
       );
       continue;
@@ -327,6 +332,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: last.start,
           end: math.max(last.end, session.end),
           asleepMin: last.asleepMin + asleepMin,
+          inBedSec: last.inBedSec + (session.end - session.start),
         ),
       );
     } else {
@@ -337,6 +343,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: session.start,
           end: session.end,
           asleepMin: asleepMin,
+          inBedSec: session.end - session.start,
         ),
       );
     }
@@ -344,7 +351,11 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
   return out;
 }
 
-_SleepGroup? _pickMainSleepGroup(List<_SleepGroup> groups, int tzOffsetSeconds) {
+_SleepGroup? _pickMainSleepGroup(
+  List<_SleepGroup> groups,
+  int tzOffsetSeconds, {
+  int? habitualMidsleepSec,
+}) {
   if (groups.isEmpty) return null;
   const alignmentBonusMin = 90.0;
   const fullWindowSec = 2 * 3600;
@@ -357,6 +368,7 @@ _SleepGroup? _pickMainSleepGroup(List<_SleepGroup> groups, int tzOffsetSeconds) 
           secondsPerDay;
   final coldStartAnchorSec =
       ((overnightStartHour * 3600) + overnightSpanSec ~/ 2) % secondsPerDay;
+  final targetMidsleepSec = habitualMidsleepSec ?? coldStartAnchorSec;
 
   int localSecOfDay(int ts) {
     final local = ts + tzOffsetSeconds;
@@ -369,8 +381,8 @@ _SleepGroup? _pickMainSleepGroup(List<_SleepGroup> groups, int tzOffsetSeconds) 
   }
 
   double alignmentBonusFor(_SleepGroup g) {
-    final mid = g.start + ((g.end - g.start) ~/ 2);
-    final dist = circularDistanceSec(localSecOfDay(mid), coldStartAnchorSec);
+    final mid = g.start + (g.inBedSec ~/ 2);
+    final dist = circularDistanceSec(localSecOfDay(mid), targetMidsleepSec);
     if (dist <= fullWindowSec) return alignmentBonusMin;
     if (dist >= zeroWindowSec) return 0.0;
     final frac = (zeroWindowSec - dist) / (zeroWindowSec - fullWindowSec);
@@ -383,12 +395,66 @@ _SleepGroup? _pickMainSleepGroup(List<_SleepGroup> groups, int tzOffsetSeconds) 
     final score = g.asleepMin + alignmentBonusFor(g);
     if (score > bestScore ||
         (score == bestScore &&
-            (g.end - g.start) > (winner.end - winner.start))) {
+            g.start < winner.start)) {
       winner = g;
       bestScore = score;
     }
   }
   return winner;
+}
+
+int? habitualMidsleepSecFromHistory(
+  List<({int startSec, int endSec, String dayKey})> history, {
+  required int tzOffsetSeconds,
+  int minDays = 14,
+}) {
+  if (history.isEmpty) return null;
+  final longestByDay = <String, ({int startSec, int endSec, String dayKey})>{};
+  for (final block in history) {
+    final cur = longestByDay[block.dayKey];
+    final dur = block.endSec - block.startSec;
+    final curDur = cur == null ? -1 : cur.endSec - cur.startSec;
+    if (cur == null ||
+        dur > curDur ||
+        (dur == curDur && block.startSec < cur.startSec)) {
+      longestByDay[block.dayKey] = block;
+    }
+  }
+  if (longestByDay.length < minDays) return null;
+  final mids = [
+    for (final block in longestByDay.values)
+      _localSecOfDay(
+        block.startSec + ((block.endSec - block.startSec) ~/ 2),
+        tzOffsetSeconds,
+      ),
+  ];
+  return _circularMeanSec(mids);
+}
+
+int _localSecOfDay(int ts, int offsetSec) {
+  const secondsPerDay = 86400;
+  final local = ts + offsetSec;
+  return ((local % secondsPerDay) + secondsPerDay) % secondsPerDay;
+}
+
+int? _circularMeanSec(List<int> secs) {
+  if (secs.isEmpty) return null;
+  const secondsPerDay = 86400;
+  const minResultant = 1e-9;
+  var sumSin = 0.0;
+  var sumCos = 0.0;
+  final k = 2.0 * math.pi / secondsPerDay;
+  for (final s in secs) {
+    final a = s * k;
+    sumSin += math.sin(a);
+    sumCos += math.cos(a);
+  }
+  final resultant = math.sqrt(sumSin * sumSin + sumCos * sumCos) / secs.length;
+  if (resultant < minResultant) return null;
+  var ang = math.atan2(sumSin, sumCos);
+  if (ang < 0) ang += 2.0 * math.pi;
+  final sec = (ang / k).round() % secondsPerDay;
+  return ((sec % secondsPerDay) + secondsPerDay) % secondsPerDay;
 }
 
 SleepStage _sleepStageFor(String label) {
