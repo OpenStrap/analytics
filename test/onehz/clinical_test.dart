@@ -268,6 +268,44 @@ void main() {
     });
   });
 
+  group('NOOP nightly RMSSD (mean of cleaned 5-min windows)', () {
+    test('matches the arithmetic mean of per-window RMSSDs', () {
+      final rr = <double>[];
+      final ts = <double>[];
+      var beatTsMs = 0.0;
+
+      void addWindow(List<double> vals, double startTsMs) {
+        beatTsMs = startTsMs;
+        for (final v in vals) {
+          rr.add(v);
+          ts.add(beatTsMs);
+          beatTsMs += 1000.0;
+        }
+      }
+
+      addWindow([1000, 1010, 990], 1000.0); // bucket 0, RMSSD = 15.8113883...
+      addWindow([1000, 1050, 950], 301000.0); // bucket 1, RMSSD = 79.0569415...
+
+      final m = noopNightlyRmssd(
+        rr,
+        ts,
+        startSec: 1,
+        endSec: 601,
+        windowSec: 300,
+      );
+      expect(m.present, isTrue);
+      expect(m.value, closeTo((15.8113883 + 79.0569415) / 2.0, 1e-6));
+    });
+
+    test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
+      final rr = <double>[1000, 1000, 200, 1000, 1000];
+      final ts = <double>[1000, 2000, 3000, 4000, 5000];
+      final m = noopNightlyRmssd(rr, ts, startSec: 1, endSec: 301);
+      expect(m.present, isTrue);
+      expect(m.value, closeTo(0.0, 1e-9));
+    });
+  });
+
   group('strain score (0-21 log-squash of TRIMP)', () {
     test('pins TRIMP -> strain check-points', () {
       expect(strainScore(0), closeTo(0.0, 1e-9));

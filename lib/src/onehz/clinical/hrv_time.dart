@@ -178,6 +178,83 @@ Metric<double> nocturnalRmssd(
   );
 }
 
+/// NOOP-compatible nightly RMSSD (ms).
+///
+/// Mirrors NOOP's `sessionAvgHRV`: split the detected sleep session into
+/// consecutive 5-minute windows, apply the simple NOOP cleaner
+/// (range-filter [300, 2000] ms + Malik-style ectopic rejection against a local
+/// median), compute RMSSD inside each valid window, then return the ARITHMETIC
+/// MEAN across windows. This is intentionally distinct from [nocturnalRmssd],
+/// which uses cleaned NN + median-of-windows robustness.
+///
+/// [rrMs]/[rrTsMs] are the raw RR intervals and their beat-end epoch times in
+/// milliseconds. [startSec]/[endSec] bound the chosen sleep session in epoch
+/// seconds. The implementation is one-pass over the time-sorted RR stream:
+/// beats are bucketed once by `(tsSec - startSec) ~/ windowSec`.
+Metric<double> noopNightlyRmssd(
+  List<double> rrMs,
+  List<double> rrTsMs, {
+  required int startSec,
+  required int endSec,
+  int windowSec = 300,
+}) {
+  const inputs = ['rr_sleep_window'];
+  if (startSec <= 0 ||
+      endSec <= startSec ||
+      rrMs.isEmpty ||
+      rrTsMs.isEmpty ||
+      rrMs.length != rrTsMs.length) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'invalid or empty RR session window',
+    );
+  }
+
+  final buckets = <int, List<double>>{};
+  for (var i = 0; i < rrMs.length; i++) {
+    final tsSec = (rrTsMs[i] / 1000.0).round();
+    if (tsSec < startSec || tsSec >= endSec) continue;
+    final idx = ((tsSec - startSec) ~/ windowSec);
+    (buckets[idx] ??= <double>[]).add(rrMs[i]);
+  }
+
+  if (buckets.isEmpty) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no RR beats inside the session window',
+    );
+  }
+
+  final rmssds = <double>[];
+  final indices = buckets.keys.toList()..sort();
+  for (final idx in indices) {
+    final cleaned = _noopCleanRr(buckets[idx]!);
+    if (cleaned.length < 2) continue;
+    final rmssd = _rmssdRaw(cleaned);
+    if (rmssd != null) rmssds.add(rmssd);
+  }
+
+  if (rmssds.isEmpty) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no valid 5-min windows for noop nightly RMSSD',
+    );
+  }
+
+  final meanRmssd = mean(rmssds)!;
+  final conf = clamp(rmssds.length / 12.0, 0.3, 0.95);
+  return Metric<double>(
+    value: meanRmssd,
+    confidence: conf,
+    tier: Tier.high,
+    inputs_used: inputs,
+    note: 'NOOP nightly HRV: mean RMSSD over cleaned 5-min sleep-session windows.',
+  );
+}
+
 /// Group NN intervals into consecutive 5-minute (300 000 ms) segments by beat
 /// time. Segments with <2 beats are dropped.
 List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
@@ -198,4 +275,44 @@ List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
   }
   if (cur.length >= 2) out.add(cur);
   return out;
+}
+
+List<double> _noopCleanRr(List<double> rr) =>
+    _noopRejectEctopic([for (final v in rr) if (v >= 300 && v <= 2000) v]);
+
+List<double> _noopRejectEctopic(List<double> nn) {
+  const radius = 2;
+  const threshold = 0.20;
+  if (nn.length <= radius) return nn;
+  final kept = <double>[];
+  for (var i = 0; i < nn.length; i++) {
+    final lo = math.max(0, i - radius);
+    final hi = math.min(nn.length - 1, i + radius);
+    final neighbors = <double>[];
+    for (var j = lo; j <= hi; j++) {
+      if (j != i) neighbors.add(nn[j]);
+    }
+    if (neighbors.length < 2) {
+      kept.add(nn[i]);
+      continue;
+    }
+    final med = median(neighbors);
+    if (med == null || med <= 0) {
+      kept.add(nn[i]);
+      continue;
+    }
+    final deviation = (nn[i] - med).abs() / med;
+    if (deviation <= threshold) kept.add(nn[i]);
+  }
+  return kept;
+}
+
+double? _rmssdRaw(List<double> nn) {
+  if (nn.length < 2) return null;
+  var sumSq = 0.0;
+  for (var i = 1; i < nn.length; i++) {
+    final d = nn[i] - nn[i - 1];
+    sumSq += d * d;
+  }
+  return math.sqrt(sumSq / (nn.length - 1));
 }
