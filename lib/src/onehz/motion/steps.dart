@@ -327,23 +327,40 @@ const double defaultCadenceSpm = 110.0;
 /// Default ENMO (g) we associate with that default cadence (wrist walking band).
 const double defaultRefEnmoG = 0.06;
 
-/// Minute ENMO floor (g) below which a minute is sedentary, never ambulatory.
-const double ambulatoryEnmoFloorG = 0.02;
-
 /// Minute ENMO ceiling (g): above this is vigorous/non-walking arm motion
 /// (shaking, lifting, sport) — counted toward activity elsewhere, not steps.
 const double ambulatoryEnmoCeilingG = 0.40;
 
-/// Estimate a day's steps from per-minute motion (+ optional HR confirmation).
+/// Default FIXED movement gate (g) when uncalibrated — above resting 1 Hz noise
+/// (~0.05) but below typical walking. Calibration replaces it with refEnmo·0.5.
+const double defaultWalkFloorG = 0.05;
+
+/// Per-minute cadence regression coefficients (steps/min), literature ballpark
+/// (Tudor-Locke baseline + movement & HR terms). `cadence = C0 + Cm·ENMO_g +
+/// Chr·(HR−RHR)`, clamped to a physiological band. Calibration re-centres C0.
+const double kStepC0 = 85.0;
+const double kStepCm = 220.0;
+const double kStepChr = 0.40;
+
+/// 1 Hz STEP ESTIMATE (the only step method that survives the Nyquist ceiling).
 ///
-/// [motion] is the day's per-minute ENMO (from [enmoSeries]). [hrPerMin], when
-/// supplied aligned 1:1 with [motion], gates a minute as ambulatory only if HR
-/// is elevated above [restingHr] + [hrMarginBpm] — this separates real walking
-/// from stationary arm movement at a desk. [calib] personalizes the cadence.
+/// We can't peak-count gait at 1 Hz (1.4–2.5 Hz aliases past 0.5 Hz), so we
+/// detect WALKING minutes from the accel amplitude and multiply by a cadence —
+/// the standard sub-Nyquist pedometry method. Walking detection is self-calibrated
+/// + HR-corroborated + bout-gated so it CANNOT inflate (the old fixed 0.02 g floor
+/// counted resting noise → ~100k/day):
+///   • a minute is "ambulatory" only if its ENMO clears the day's OWN sedentary
+///     baseline (p30 + 2·MAD, floored at +0.015 g) and ≤ the vigorous ceiling,
+///   • AND (when HR is present) sits above the day's resting HR + [hrMarginBpm]
+///     (resting = supplied RHR, else the day's 10th-percentile HR),
+///   • AND belongs to a run of ≥[minBoutMin] consecutive ambulatory minutes.
+/// Then steps = Σ ambulatory-minutes × cadence, where cadence is the personal
+/// model ([calib]) or a default, scaled gently by intensity and clamped to a
+/// physiological band. Tier is always ESTIMATE.
 ///
-/// steps = Σ over ambulatory minutes of the cadence for that minute, where
-/// cadence scales gently with ENMO around the (personal or default) reference.
-/// Tier is always ESTIMATE.
+/// IMPORTANT (no double-count): the caller must pass ONLY minutes NOT covered by
+/// the live 100 Hz pedometer — 100 Hz steps are real and always preferred for the
+/// time they cover. This function never sees those minutes.
 Metric<DailyStepEstimate> dailyStepEstimate(
   List<MotionMinute> motion, {
   List<double>? hrPerMin,
@@ -364,39 +381,71 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   final baseCadence = calib?.cadenceSpm ?? defaultCadenceSpm;
   final refEnmo =
       (calib != null && calib.refEnmo > 0) ? calib.refEnmo : defaultRefEnmoG;
+
+  // Covered minutes only — sparse minutes can't be judged.
+  final idx = <int>[];
+  final enmos = <double>[];
+  for (var i = 0; i < motion.length; i++) {
+    if (motion[i].nSamples >= minSamplesPerMinute) {
+      idx.add(i);
+      enmos.add(motion[i].enmo);
+    }
+  }
+  final covered = idx.length;
+  final coverage = covered / motion.length;
+  final calibrated = calib != null && calib.n >= 3;
+  if (covered < 4) {
+    return Metric<DailyStepEstimate>(
+      value: DailyStepEstimate(0, 0, baseCadence, coverage, calibrated),
+      confidence: 0.15,
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'too few covered minutes to estimate steps',
+    );
+  }
+
+  // FIXED gate + CONTINUOUS cadence (the ChatGPT-style multi-signal regression).
+  // We do NOT peak-count (Nyquist) and we do NOT use a per-day relative threshold
+  // (that self-suppressed on active days → the over/under whipsaw). A minute is
+  // "walking" by a STABLE gate — movement above a fixed floor AND HR lifted off
+  // rest — and within walking minutes the cadence scales continuously with
+  // movement + HR excess. Calibration tightens the floor + re-centres cadence to
+  // the user; uncalibrated runs a sensible ballpark (refined after a real walk).
+  final moveFloor =
+      (calibrated && refEnmo > 0) ? refEnmo * 0.5 : defaultWalkFloorG;
+
   final useHr = hrPerMin != null && hrPerMin.length == motion.length;
-  final hrGate = (restingHr ?? 0) + hrMarginBpm;
+  double restHr = restingHr ?? 0;
+  if (useHr && restingHr == null) {
+    final hrs = [for (final h in hrPerMin) if (h > 0) h];
+    if (hrs.length >= 10) restHr = percentile(hrs, 10)!;
+  }
+  final hrGate = restHr + hrMarginBpm; // HR must be lifted off rest to count
+
+  // Re-centre the cadence intercept on the personal cadence when calibrated
+  // (default 110 → C0 85, the literature baseline).
+  final c0 = calibrated ? (baseCadence - 25.0) : kStepC0;
 
   var steps = 0.0;
   var ambMin = 0;
-  var covered = 0;
-  final cadencesApplied = <double>[];
-  for (var i = 0; i < motion.length; i++) {
-    final mm = motion[i];
-    if (mm.nSamples >= minSamplesPerMinute) covered++;
-    final e = mm.enmo;
-    final ambulatory = e > ambulatoryEnmoFloorG &&
-        e <= ambulatoryEnmoCeilingG &&
-        (!useHr || restingHr == null || hrPerMin[i] >= hrGate);
-    if (!ambulatory) continue;
-    // Cadence scales gently with intensity around the reference; clamped to a
-    // physiological walking band so a noisy minute can't explode the count.
-    final scaled = baseCadence * math.sqrt(e / refEnmo);
-    final cadence = clamp(scaled, 70.0, 140.0);
-    steps += cadence; // one minute → cadence steps
-    cadencesApplied.add(cadence);
+  final cadences = <double>[];
+  for (var k = 0; k < idx.length; k++) {
+    final i = idx[k];
+    final m = enmos[k];
+    if (m <= moveFloor || m > ambulatoryEnmoCeilingG) continue; // not walking
+    final hr = useHr ? hrPerMin[i] : 0.0;
+    if (useHr && restHr > 0 && hr > 0 && hr < hrGate) continue; // HR at rest → skip
+    final hrExcess = (useHr && hr > 0) ? math.max(hr - restHr, 0.0) : 0.0;
+    final cad = clamp(c0 + kStepCm * m + kStepChr * hrExcess, 70.0, 170.0);
+    steps += cad; // one minute of this cadence
+    cadences.add(cad);
     ambMin++;
   }
 
-  final coverage = covered / motion.length;
-  final cadenceUsed = mean(cadencesApplied) ?? baseCadence;
-  final calibrated = calib != null && calib.n >= 3;
-
-  // Confidence: an ESTIMATE by construction. Anchored by data coverage and
-  // lifted when a personal cadence model backs the multiplier.
+  final cadenceUsed = mean(cadences) ?? baseCadence;
   final conf = clamp(
-    (calibrated ? 0.55 : 0.4) * clamp(coverage / 0.6, 0.3, 1.0),
-    0.15,
+    (calibrated ? 0.55 : 0.35) * clamp(coverage / 0.6, 0.3, 1.0),
+    0.1,
     0.7,
   );
 
@@ -407,8 +456,9 @@ Metric<DailyStepEstimate> dailyStepEstimate(
     tier: Tier.estimate,
     inputs_used: inputs,
     note: calibrated
-        ? 'ESTIMATE: ambulatory-minutes × personal cadence (1 Hz cannot count steps)'
-        : 'ESTIMATE: ambulatory-minutes × default cadence; '
-            'walk with the app open to personalize',
+        ? 'ESTIMATE: per-minute cadence (movement + HR) over walking minutes, '
+            'personalized — 1 Hz cannot count steps directly'
+        : 'ESTIMATE: per-minute cadence (movement + HR); walk with the app open '
+            'on open ground to calibrate to your stride',
   );
 }

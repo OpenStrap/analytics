@@ -160,54 +160,91 @@ void main() {
     });
   });
 
-  group('Tier B — 1 Hz daily estimate', () {
+  group('Tier B — 1 Hz step estimate', () {
     // Build per-minute motion rows directly (bypass enmoSeries).
     List<MotionMinute> rows(List<double> enmos) => [
           for (var i = 0; i < enmos.length; i++)
             MotionMinute(i * 60000.0, 60, enmos[i], enmos[i], 1.0 + enmos[i]),
         ];
+    // A day = `sed` sedentary minutes (low ENMO) + `walk` walking minutes.
+    List<MotionMinute> day(int sed, int walk,
+            {double sedE = 0.006, double walkE = 0.06}) =>
+        rows([...List<double>.filled(sed, sedE), ...List<double>.filled(walk, walkE)]);
+    // A learned personal walking signature — the estimate is calibration-gated.
+    const cal = StepCalibration(cadenceSpm: 110, refEnmo: 0.06, n: 10);
 
-    test('sedentary day → ~0 steps', () {
-      final m = dailyStepEstimate(rows(List<double>.filled(600, 0.005)));
+    test('uncalibrated → a bounded ballpark (no whipsaw)', () {
+      // A walking block: even uncalibrated it gives a believable number (fixed
+      // gate, continuous cadence), not 0 and not absurd.
+      final m = dailyStepEstimate(day(120, 30)); // no calib
       expect(m.present, isTrue);
+      expect(m.value!.calibrated, isFalse);
+      expect(m.value!.steps, inInclusiveRange(1500, 5000)); // ~30 walking min
+    });
+
+    test('calibrated sedentary day → 0 steps', () {
+      final m = dailyStepEstimate(rows(List<double>.filled(600, 0.006)), calib: cal);
       expect(m.value!.steps, 0);
-      expect(m.tier, Tier.estimate);
     });
 
-    test('30 ambulatory minutes ≈ 30 × cadence steps', () {
-      final enmos = [
-        ...List<double>.filled(60, 0.005), // sedentary
-        ...List<double>.filled(30, 0.06), // walking at the reference ENMO
-      ];
-      final m = dailyStepEstimate(rows(enmos));
-      expect(m.value!.ambulatoryMinutes, 30);
-      // at refEnmo the cadence ≈ default 110 → ~3300 steps
-      expect(m.value!.steps, inInclusiveRange(3000, 3600));
+    test('a quiet day with HR at rest → 0 steps', () {
+      // Below-floor movement OR resting HR → nothing counts (no whipsaw to huge).
+      final m = dailyStepEstimate(rows(List<double>.filled(300, 0.02)),
+          calib: cal,
+          hrPerMin: List<double>.filled(300, 58.0),
+          restingHr: 58);
+      expect(m.value!.steps, 0);
     });
 
-    test('more walking minutes → more steps', () {
-      final few = dailyStepEstimate(rows(List<double>.filled(10, 0.06)));
-      final many = dailyStepEstimate(rows(List<double>.filled(40, 0.06)));
+    test('a walking block over a sedentary baseline → minutes × cadence', () {
+      final m = dailyStepEstimate(day(120, 30), calib: cal);
+      expect(m.value!.ambulatoryMinutes, inInclusiveRange(28, 30));
+      expect(m.value!.steps, inInclusiveRange(2800, 3600)); // ~30 × ~110
+    });
+
+    test('more walking → more steps', () {
+      final few = dailyStepEstimate(day(120, 10), calib: cal);
+      final many = dailyStepEstimate(day(120, 40), calib: cal);
       expect(many.value!.steps, greaterThan(few.value!.steps));
     });
 
-    test('HR gate suppresses stationary arm motion', () {
-      final enmos = List<double>.filled(20, 0.06); // looks ambulatory by ENMO
-      final lowHr = List<double>.filled(20, 58.0); // but HR at rest
-      final m = dailyStepEstimate(rows(enmos),
-          hrPerMin: lowHr, restingHr: 60.0);
-      expect(m.value!.ambulatoryMinutes, 0,
-          reason: 'HR not elevated → not walking');
+    test('HR (soft veto) suppresses walking-amplitude minutes at rest HR', () {
+      final m = dailyStepEstimate(day(120, 30),
+          calib: cal,
+          hrPerMin: [
+            ...List<double>.filled(120, 58.0),
+            ...List<double>.filled(30, 58.0)
+          ],
+          restingHr: 58);
+      expect(m.value!.ambulatoryMinutes, 0, reason: 'HR at rest → not walking');
     });
 
-    test('calibration shifts the cadence used and lifts confidence', () {
-      final enmos = List<double>.filled(30, 0.06);
-      final base = dailyStepEstimate(rows(enmos));
-      final calibrated = dailyStepEstimate(rows(enmos),
-          calib: const StepCalibration(cadenceSpm: 130, refEnmo: 0.06, n: 10));
-      expect(calibrated.value!.cadenceUsed, greaterThan(base.value!.cadenceUsed));
-      expect(calibrated.value!.calibrated, isTrue);
-      expect(calibrated.value!.steps, greaterThan(base.value!.steps));
+    test('HR elevated over the walking block → it counts', () {
+      final m = dailyStepEstimate(day(120, 30),
+          calib: cal,
+          hrPerMin: [
+            ...List<double>.filled(120, 58.0),
+            ...List<double>.filled(30, 95.0)
+          ],
+          restingHr: 58);
+      expect(m.value!.ambulatoryMinutes, greaterThan(20));
+    });
+
+    test('a brief movement minute contributes only a little', () {
+      final e = List<double>.filled(60, 0.006);
+      e[30] = 0.20; // one elevated minute
+      final m = dailyStepEstimate(rows(e), calib: cal);
+      // It counts (a brief walk is real), but a single minute can't be large.
+      expect(m.value!.ambulatoryMinutes, 1);
+      expect(m.value!.steps, lessThan(200));
+    });
+
+    test('a higher personal cadence lifts the count', () {
+      final slow = dailyStepEstimate(day(120, 30), calib: cal);
+      final fast = dailyStepEstimate(day(120, 30),
+          calib: const StepCalibration(cadenceSpm: 135, refEnmo: 0.06, n: 10));
+      expect(fast.value!.cadenceUsed, greaterThan(slow.value!.cadenceUsed));
+      expect(fast.value!.steps, greaterThan(slow.value!.steps));
     });
 
     test('empty motion → absent ESTIMATE', () {
@@ -250,4 +287,5 @@ void main() {
       expect(e.total, closeTo(e.basal + e.active, 1e-6));
     });
   });
+
 }
