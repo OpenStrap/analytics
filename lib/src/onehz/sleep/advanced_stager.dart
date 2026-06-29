@@ -16,6 +16,7 @@
 
 import 'dart:math' as math;
 import '../types.dart';
+import '../clinical/hrv_time.dart';
 
 // ── Input sample types (HrTs / GravTs / RrTs / RespTs)
 
@@ -632,23 +633,16 @@ class AdvancedSleepStager {
   }
 
   static double? _sessionAvgHRV(int start, int end, List<RrTs> rr) {
-    final seg = [for (final r in rr) if (r.ts >= start && r.ts <= end) r];
-    if (seg.isEmpty) return null;
-    const windowS = 300;
-    final vals = <double>[];
-    var t = start;
-    while (t < end) {
-      final bucket =
-          [for (final r in seg) if (r.ts >= t && r.ts < t + windowS) r.rrMs];
-      final cleaned = _cleanRR(bucket);
-      if (cleaned.length >= 2) {
-        final r = _rmssdRaw(cleaned);
-        if (r != null) vals.add(r);
-      }
-      t += windowS;
-    }
-    if (vals.isEmpty) return null;
-    return vals.reduce((a, b) => a + b) / vals.length;
+    if (start <= 0 || end <= start || rr.isEmpty) return null;
+    final rrMs = <double>[for (final r in rr) r.rrMs];
+    final rrTsMs = <double>[for (final r in rr) r.ts * 1000.0];
+    final metric = sleepSessionWindowedRmssd(
+      rrMs,
+      rrTsMs,
+      startSec: start,
+      endSec: end,
+    );
+    return metric.present ? metric.value : null;
   }
 
   // ── Epoch grid ──────────────────────────────────────────────────────────────
@@ -1576,38 +1570,9 @@ class AdvancedSleepStager {
   // ── shared math (population std, percentile) ──────────────────────────────
 
   static const double _rrMinMs = 300, _rrMaxMs = 2000;
-  static const double _ectopicThreshold = 0.20;
-  static const int _ectopicWindowRadius = 2;
 
   static List<double> _rangeFilter(List<double> rr) =>
       [for (final v in rr) if (v >= _rrMinMs && v <= _rrMaxMs) v];
-
-  static List<double> _rejectEctopic(List<double> nn) {
-    if (nn.length <= _ectopicWindowRadius) return nn;
-    final kept = <double>[];
-    for (var i = 0; i < nn.length; i++) {
-      final lo = math.max(0, i - _ectopicWindowRadius);
-      final hi = math.min(nn.length - 1, i + _ectopicWindowRadius);
-      final neighbours = <double>[];
-      for (var j = lo; j <= hi; j++) {
-        if (j != i) neighbours.add(nn[j]);
-      }
-      if (neighbours.length < 2) {
-        kept.add(nn[i]);
-        continue;
-      }
-      final med = _median(neighbours)!;
-      if (med <= 0) {
-        kept.add(nn[i]);
-        continue;
-      }
-      final dev = (nn[i] - med).abs() / med;
-      if (dev <= _ectopicThreshold) kept.add(nn[i]);
-    }
-    return kept;
-  }
-
-  static List<double> _cleanRR(List<double> rr) => _rejectEctopic(_rangeFilter(rr));
 
   static double? _rmssdRaw(List<double> nn) {
     if (nn.length < 2) return null;
