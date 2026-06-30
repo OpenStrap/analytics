@@ -283,6 +283,38 @@ class AdvancedSleepStager {
     return sessions;
   }
 
+  /// Stage a KNOWN in-bed window into a single [SleepSession] WITHOUT running
+  /// detection — for a manual / user-confirmed sleep window (no auto window was
+  /// found, or the user corrected it). Deliberately bypasses EVERY detection
+  /// gate (the 3 h minimum, daytime-center guard, HR confirmation, off-wrist
+  /// fraction): the window is asserted by the human, so we do not re-litigate
+  /// whether it is sleep — we only label the stages within it. Staging itself
+  /// runs through the SAME [_stageSession]/[_stageSessionV2] code the auto path
+  /// uses, so the single-source invariant holds (only the WINDOW boundary is
+  /// forced, never the staging math). Seconds with no data inside [startSec,
+  /// endSec) simply stay unstaged (wake) — honest about gaps, never fabricated.
+  static SleepSession stageWindow(
+    int startSec,
+    int endSec,
+    List<GravTs> gravity,
+    List<HrTs> hr, {
+    List<RrTs> rr = const [],
+    List<RespTs> resp = const [],
+    bool useV2 = false,
+  }) {
+    final stages = useV2
+        ? _stageSessionV2(startSec, endSec, gravity, hr, rr)
+        : _stageSession(startSec, endSec, gravity, hr, rr, resp);
+    return SleepSession(
+      start: startSec,
+      end: endSec,
+      efficiency: _efficiency(startSec, endSec, stages),
+      stages: stages,
+      restingHr: _sessionRestingHR(startSec, endSec, hr),
+      avgHrv: _sessionAvgHRV(startSec, endSec, rr),
+    );
+  }
+
   /// Convenience: the MAIN sleep (longest TST session) as a [Metric], with its
   /// AASM metrics + 4-class hypnogram. Absent when no qualifying sleep.
   static Metric<SleepSession> mainSleep(

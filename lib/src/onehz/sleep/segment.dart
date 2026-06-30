@@ -156,13 +156,25 @@ SleepSegmentation segmentSleep(
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
   int? habitualMidsleepSec,
+  ({int onsetSec, int offsetSec})? forcedWindow,
 }) {
   final n = math.min(accel.length, hr1hz.length);
-  if (n < _minQualifyingSleepSec) return SleepSegmentation.absent;
+  // A forced window (manual entry / user confirmation, Approach 1) is asserted
+  // by the human, so it skips the 3 h sample-count gate the auto path enforces —
+  // a user may log a 2 h nap, and partial data inside the window is fine (those
+  // seconds just stay unstaged/wake). We still need SOME data to stage.
+  if (forcedWindow == null && n < _minQualifyingSleepSec) {
+    return SleepSegmentation.absent;
+  }
+  if (n == 0) return SleepSegmentation.absent;
 
   final trimmedAccel = accel.sublist(0, n);
   final trimmedHr = hr1hz.sublist(0, n);
-  final wm = vanHeesSleepWindow(trimmedAccel);
+  // van Hees only runs on the AUTO path; a forced window replaces it entirely.
+  final wm = forcedWindow == null
+      ? vanHeesSleepWindow(trimmedAccel)
+      : const Metric<SleepWindow>.absent(
+          tier: Tier.estimate, inputs_used: ['forced_window']);
   final fallbackWindow = wm.value;
 
   final tzOffsetSeconds = DateTime.fromMillisecondsSinceEpoch(
@@ -188,26 +200,47 @@ SleepSegmentation segmentSleep(
         RrTs((rrTsMs[i] / 1000.0).round(), rrMs[i])
   ];
 
-  final sessions = AdvancedSleepStager.detectSleep(
-    grav,
-    hr,
-    rr: rr,
-    tzOffsetSec: tzOffsetSeconds,
-  );
-  if (sessions.isEmpty) return SleepSegmentation.absent;
+  final _SleepGroup? chosen;
+  if (forcedWindow != null) {
+    final onsetSec = forcedWindow.onsetSec;
+    final offsetSec = forcedWindow.offsetSec;
+    if (offsetSec <= onsetSec) return SleepSegmentation.absent;
+    // Stage the user-asserted window directly — no detection, no gates.
+    final session =
+        AdvancedSleepStager.stageWindow(onsetSec, offsetSec, grav, hr, rr: rr);
+    chosen = _SleepGroup(
+      sessions: [session],
+      start: onsetSec,
+      end: offsetSec,
+      asleepMin: AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0,
+      inBedSec: offsetSec - onsetSec,
+    );
+  } else {
+    final sessions = AdvancedSleepStager.detectSleep(
+      grav,
+      hr,
+      rr: rr,
+      tzOffsetSec: tzOffsetSeconds,
+    );
+    if (sessions.isEmpty) return SleepSegmentation.absent;
 
-  final chosen = _pickMainSleepGroup(
-    _bridgeAdjacentSessions(sessions),
-    tzOffsetSeconds,
-    habitualMidsleepSec: habitualMidsleepSec,
-  );
+    chosen = _pickMainSleepGroup(
+      _bridgeAdjacentSessions(sessions),
+      tzOffsetSeconds,
+      habitualMidsleepSec: habitualMidsleepSec,
+    );
+  }
   if (chosen == null) return SleepSegmentation.absent;
 
   final tsSec = [for (final a in trimmedAccel) a.tsMs ~/ 1000];
   final onset = _lowerBoundInt(tsSec, chosen.start);
   final offset = _lowerBoundInt(tsSec, chosen.end);
   final inBed = chosen.end - chosen.start;
-  if (offset <= onset || inBed < _minQualifyingSleepSec) {
+  if (inBed <= 0) return SleepSegmentation.absent;
+  // The empty-index and 3 h in-bed floors are AUTO-path sanity gates; a forced
+  // window is the user's word — honor any positive-length window.
+  if (forcedWindow == null &&
+      (offset <= onset || inBed < _minQualifyingSleepSec)) {
     return SleepSegmentation.absent;
   }
 
