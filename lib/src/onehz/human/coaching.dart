@@ -255,7 +255,10 @@ Metric<PhysioAge> physiologicalAge({
     score -= ((rmssd - 35.0) / 12.0).clamp(-4.0, 6.0);
   }
   if (sleepDurationH != null) {
-    score += (7.5 - sleepDurationH).clamp(-2.0, 3.0);
+    // Deviation from the ~7.5 h optimum ages you in BOTH directions — under- and
+    // over-sleep both associate with worse outcomes. (Was `(7.5 - h)`, which
+    // wrongly made oversleep look biologically YOUNGER.)
+    score += (7.5 - sleepDurationH).abs().clamp(0.0, 3.0);
   }
   if (sleepEfficiency != null) {
     score += ((88.0 - sleepEfficiency) / 6.0).clamp(-2.0, 3.0);
