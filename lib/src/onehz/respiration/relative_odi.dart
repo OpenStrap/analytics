@@ -29,12 +29,26 @@ class RelativeOdiResult {
   final double odiPerHour; // events / hour (relative ODI screen)
   final double analyzedHours;
   final double meanDipPct; // mean relative drop at a dip (% of own baseline)
+  final double maxDipPct; // largest relative drop across events
+  final int longestDipSec; // longest single excursion (s)
+  final double burdenPct; // % of analyzed time spent in desaturation
+  final double signalCoverage; // 0..1 fraction passing the contact/SQI gate
+  final double trustedCoverage; // 0..1 fraction of non-NaN ratio samples
+  final Map<String, int> rejectCounts; // rejected-sample reasons → counts
+  final Map<String, int> severityCounts; // dips bucketed mild/moderate/severe
   const RelativeOdiResult({
     required this.meanRelR,
     required this.dipCount,
     required this.odiPerHour,
     required this.analyzedHours,
     required this.meanDipPct,
+    this.maxDipPct = 0,
+    this.longestDipSec = 0,
+    this.burdenPct = 0,
+    this.signalCoverage = 0,
+    this.trustedCoverage = 0,
+    this.rejectCounts = const {},
+    this.severityCounts = const {},
   });
   Map<String, dynamic> toJson() => {
         'mean_rel_r': round6(meanRelR),
@@ -42,6 +56,13 @@ class RelativeOdiResult {
         'odi_per_hour': round6(odiPerHour),
         'analyzed_hours': round6(analyzedHours),
         'mean_dip_pct': round6(meanDipPct),
+        'max_dip_pct': round6(maxDipPct),
+        'longest_dip_sec': longestDipSec,
+        'burden_pct': round6(burdenPct),
+        'signal_coverage': round6(signalCoverage),
+        'trusted_coverage': round6(trustedCoverage),
+        'reject_counts': rejectCounts,
+        'severity_counts': severityCounts,
         // explicit honesty flag carried into any UI:
         'absolute_spo2': false,
       };
@@ -113,6 +134,8 @@ Metric<RelativeOdiResult> relativeOdi(
   final baseR = _rollingMean(relR, baselineSec, skipNan: true);
   var dipCount = 0;
   final dipMags = <double>[];
+  var totalDipSec = 0; // sum of qualifying excursion seconds (for burden)
+  var longestDipSec = 0; // longest single excursion
   var i = 0;
   const minDipSec = 8;
   const refractorySec = 10; // min separation between distinct events
@@ -140,6 +163,8 @@ Metric<RelativeOdiResult> relativeOdi(
     }
     final widthSec = i - start;
     if (widthSec >= minDipSec) {
+      totalDipSec += widthSec;
+      if (widthSec > longestDipSec) longestDipSec = widthSec;
       // Refractory gate: merge events that start within refractorySec of the
       // previous one's end (one physiological desaturation, not two).
       if (start - lastEnd <= refractorySec && dipMags.isNotEmpty) {
@@ -153,6 +178,18 @@ Metric<RelativeOdiResult> relativeOdi(
   }
 
   final odiPerHour = analyzedHours > 0 ? dipCount / analyzedHours : 0.0;
+  // Severity buckets by RELATIVE drop magnitude (% rise in R vs baseline).
+  var mild = 0, moderate = 0, severe = 0;
+  for (final m in dipMags) {
+    if (m >= 10.0) {
+      severe++;
+    } else if (m >= 5.0) {
+      moderate++;
+    } else {
+      mild++;
+    }
+  }
+  final nanCount = relR.where((v) => v.isNaN).length;
   final conf = clamp(0.5 * validFraction, 0.1, 0.5);
   return Metric<RelativeOdiResult>(
     value: RelativeOdiResult(
@@ -161,6 +198,13 @@ Metric<RelativeOdiResult> relativeOdi(
       odiPerHour: odiPerHour,
       analyzedHours: analyzedHours,
       meanDipPct: dipMags.isEmpty ? 0 : mean(dipMags)!,
+      maxDipPct: dipMags.isEmpty ? 0 : dipMags.reduce((a, b) => a > b ? a : b),
+      longestDipSec: longestDipSec,
+      burdenPct: spanSec > 0 ? 100.0 * totalDipSec / spanSec : 0.0,
+      signalCoverage: validFraction.clamp(0.0, 1.0),
+      trustedCoverage: n > 0 ? (n - nanCount) / n : 0.0,
+      rejectCounts: {'low_signal': nanCount},
+      severityCounts: {'mild': mild, 'moderate': moderate, 'severe': severe},
     ),
     confidence: conf,
     tier: Tier.relative,
