@@ -323,6 +323,49 @@ void main() {
       expect(s.confidence, 0);
     });
 
+    test('(c5) forced window honors a user window the auto path rejects (<3h) '
+        'and stages within it (single-source)', () {
+      // A 2h still night sits BELOW the 3h auto floor → auto returns absent.
+      final accel = _accel(2, 2, 1);
+      final hr = _hr(2, 2, 1);
+      expect(segmentSleep(accel, hr).present, isFalse, reason: 'auto rejects <3h');
+
+      // The user asserts sleep across the still block. tsMs == index*1000, so
+      // epoch-seconds == index; the night runs [7200, 14400).
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: 7200, offsetSec: 14400));
+      expect(s.present, isTrue);
+      expect(s.window, isNotNull);
+      // The in-bed window is EXACTLY the user's stated duration.
+      expect(s.inBedSec, 14400 - 7200);
+      // Staging ran over the still + low-HR block → mostly asleep.
+      expect(s.tstSec!, greaterThan((0.5 * s.inBedSec!).round()));
+      // Single-source consistency holds for a forced window too.
+      expect(s.stages.length, s.inBedSec);
+      expect(s.nremSec! + s.remSec! + s.wakeSec!, s.inBedSec);
+      expect(s.lightSec! + s.deepSec!, s.nremSec);
+    });
+
+    test('(c6) forced window bypasses the no-auto-window absent case', () {
+      // All-active capture (auto finds no inactivity block at all).
+      final rnd = math.Random(7);
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var i = 0; i < 4 * 3600; i++) {
+        accel.add(AccelSample(i * 1000.0, rnd.nextDouble() * 2 - 1,
+            rnd.nextDouble() * 2 - 1, rnd.nextDouble() * 2 - 1));
+        hr.add(75 + rnd.nextDouble() * 10);
+      }
+      expect(segmentSleep(accel, hr).present, isFalse);
+      // The window is honored even though nothing looked like sleep; TST may be
+      // ~0 (honest), but the in-bed window is recorded.
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: 3600, offsetSec: 3 * 3600));
+      expect(s.present, isTrue);
+      expect(s.inBedSec, 2 * 3600);
+      expect(s.stages.length, s.inBedSec);
+    });
+
     test('(c3) overnight main sleep beats a longer daytime nap', () {
       final accel = <AccelSample>[];
       final hr = <double>[];
