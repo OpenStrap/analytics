@@ -22,3 +22,4 @@ export 'calories.dart';
 export 'auto_detect.dart';
 export 'hr_zones.dart';
 export 'workout_detect.dart';
+export 'hr_recovery.dart';
