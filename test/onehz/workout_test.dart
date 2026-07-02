@@ -40,7 +40,7 @@ void main() {
       );
       expect(out, hasLength(1));
       final w = out.first;
-      // floor = 60+30 = 90; work span 140 bpm. window = [600, 1499].
+      // floor = max(60+40, 60+.45*(190-60)) = 119; work span 140 bpm. window = [600, 1499].
       expect(w.startSec, 600);
       expect(w.endSec, 1499);
       expect(w.avgBpm, 140);
@@ -81,7 +81,7 @@ void main() {
 
     test('motion confirmation gate: low motion drops it, high keeps it', () {
       final d = _hrDay();
-      // Low motion over the bout → below motionConfirmMean (0.05).
+      // Low motion over the bout → below motionConfirmMean (0.15).
       final lowMotion = [
         for (var t = 600; t <= 1499; t++) MotionPoint(t, 0.01),
       ];
@@ -111,7 +111,7 @@ void main() {
       final bpm = <int>[];
       for (var t = 0; t < 780; t++) {
         ts.add(t);
-        // dip to 70 (below floor 90) for [400,460).
+        // dip to 70 (below floor 100) for [400,460).
         bpm.add((t >= 400 && t < 460) ? 70 : 140);
       }
       final out = AutoWorkoutDetector.detect(hrTs: ts, hrBpm: bpm, restingBpm: 60);

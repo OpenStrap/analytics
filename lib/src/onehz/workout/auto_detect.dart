@@ -74,8 +74,27 @@ class MotionPoint {
 class AutoWorkoutDetector {
   // ── Constants ─────────────────────────────────────────────────────────────
 
-  /// Elevated gate: bpm ≥ restingHR + this margin counts as "working".
-  static const int elevatedMarginBPM = 30;
+  /// Minimum elevated-gate margin (bpm above resting). A safety floor for the
+  /// %HRR gate below when HRmax is low/unknown — the real threshold is [hrrFloor].
+  static const int elevatedMarginBPM = 40;
+
+  /// PRIMARY gate: a bout must sit at ≥ this fraction of heart-rate RESERVE
+  /// (HRmax − RHR), not just a few bpm above rest. Calibrated on a full week of a
+  /// sedentary user's data (zero real workouts): a fixed RHR+30 margin (≈90 bpm)
+  /// flagged 30 windows; 0.45·HRR (~117 bpm at RHR 57 / HRmax 190) rejects
+  /// ordinary daytime and even a 3 h steady-state evening elevation, leaving only
+  /// short genuinely-cardio bouts (avg ≥ ~120 bpm) — which is exactly what a "did
+  /// you work out?" prompt should ask about.
+  static const double hrrFloorFraction = 0.45;
+
+  /// HRmax fallback when the caller passes none (age-predicted is preferred).
+  static const int defaultMaxHR = 190;
+
+  /// A suggested WORKOUT is time-bounded. A sustained elevation longer than this
+  /// (observed: ~3 h of steady 131 bpm from an active evening) is lifestyle
+  /// activity, not a workout — don't suggest it. Endurance sessions beyond this
+  /// are better logged manually than auto-prompted.
+  static const int maxWorkoutMin = 120;
 
   /// A candidate must hold the gate for a contiguous span ≥ this (12 min).
   static const double minSustainedMin = 12.0;
@@ -87,8 +106,12 @@ class AutoWorkoutDetector {
   static const int mergeGapS = 5 * 60;
 
   /// When a motion series is supplied, the window's mean per-second motion
-  /// intensity must be ≥ this to qualify. Ignored in HR-only mode.
-  static const double motionConfirmMean = 0.05;
+  /// intensity (L2 gravity-vector change/s, in g) must be ≥ this to qualify.
+  /// 0.05 was far too low — desk fidgeting/typing/gesturing while seated averages
+  /// above it, so an elevated resting HR alone got confirmed as a "workout". Real
+  /// ambulatory exercise (walking/running/lifting) sustains well above 0.15.
+  /// Ignored in HR-only mode.
+  static const double motionConfirmMean = 0.15;
 
   /// Resting-HR fallback when the caller has no nightly RHR.
   static const int defaultRestingHR = 60;
@@ -136,6 +159,7 @@ class AutoWorkoutDetector {
     required List<int> hrTs,
     required List<int> hrBpm,
     int? restingBpm,
+    int? maxBpm,
     List<MotionPoint>? motion,
     List<SavedWorkoutSpan> savedSpans = const [],
     SportClassifier classify = defaultSportClassifier,
@@ -147,7 +171,11 @@ class AutoWorkoutDetector {
     final ts = [for (final i in order) hrTs[i]];
     final bpm = [for (final i in order) hrBpm[i]];
 
-    final floor = (restingBpm ?? defaultRestingHR) + elevatedMarginBPM;
+    // %HRR floor (primary), never below the RHR+margin safety floor.
+    final rhr = restingBpm ?? defaultRestingHR;
+    final hrMax = maxBpm ?? defaultMaxHR;
+    final hrrFloor = (rhr + hrrFloorFraction * (hrMax - rhr)).round();
+    final floor = math.max(rhr + elevatedMarginBPM, hrrFloor);
 
     // --- 1+2+3: grow sustained spans tolerating brief dips ---
     final spans = <List<int>>[]; // [start, end]
@@ -201,6 +229,10 @@ class AutoWorkoutDetector {
     for (final span in merged) {
       final start = span[0], end = span[1];
 
+      // A workout is time-bounded — a multi-hour sustained elevation is lifestyle
+      // activity, not a workout to suggest.
+      if ((end - start) > maxWorkoutMin * 60) continue;
+
       // 6: never re-suggest a window overlapping a saved workout.
       if (savedSpans.any((s) => _overlaps(start, end, s.startSec, s.endSec))) {
         continue;
@@ -212,6 +244,13 @@ class AutoWorkoutDetector {
         if (ts[k] >= start && ts[k] <= end) winBpm.add(bpm[k]);
       }
       if (winBpm.isEmpty) continue;
+
+      // The WHOLE window must be genuinely elevated, not just brief floor
+      // crossings that dip-bridging stitched together — require the mean HR to
+      // clear the floor too. (A sedentary afternoon oscillating around the gate
+      // averaged below it; a real bout averages well above.)
+      final winMean = winBpm.reduce((a, b) => a + b) / winBpm.length;
+      if (winMean < floor) continue;
 
       // 5: motion confirmation when a continuous motion series was supplied.
       double? meanMotion;
@@ -273,6 +312,7 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
   required List<int> hrTs,
   required List<int> hrBpm,
   int? restingBpm,
+  int? maxBpm,
   List<MotionPoint>? motion,
   List<SavedWorkoutSpan> savedSpans = const [],
   SportClassifier classify = defaultSportClassifier,
@@ -281,6 +321,7 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
     hrTs: hrTs,
     hrBpm: hrBpm,
     restingBpm: restingBpm,
+    maxBpm: maxBpm,
     motion: motion,
     savedSpans: savedSpans,
     classify: classify,
