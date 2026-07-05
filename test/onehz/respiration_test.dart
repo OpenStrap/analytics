@@ -240,6 +240,21 @@ void main() {
       expect(m.note!.toLowerCase(), contains('never an absolute spo₂'));
     });
 
+    test('relativeOdi: all-NaN ratios → honest absent, not a fabricated 0', () {
+      // A perfectly CONSTANT IR channel makes acIr (rolling σ) = 0, so the
+      // ratio-of-ratios is 0 for every sample and every relR entry is NaN.
+      // meanRelR must NOT be reported as 0.0 — the whole screen is absent.
+      const n = 300;
+      final red = <double>[for (var i = 0; i < n; i++) 18000 + (i % 7) * 3.0];
+      final ir = <double>[for (var i = 0; i < n; i++) 20000.0]; // constant
+      final ts = <double>[for (var i = 0; i < n; i++) i.toDouble()];
+      final m = relativeOdi(red, ir, ts);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.tier, Tier.relative);
+      expect(m.note, isNotNull);
+    });
+
     test('BRV: variable breathing rates -> CV>0 + Theil-Sen slope', () {
       final brpm = [14.0, 15.0, 13.0, 16.0, 12.0, 17.0, 11.0];
       final m = breathingRateVariability(brpm);

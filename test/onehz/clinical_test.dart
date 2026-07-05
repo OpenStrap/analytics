@@ -481,4 +481,40 @@ void main() {
       expect(days[illnessCusumMinBaseline].cusum, isNotNull);
     });
   });
+
+  // -------------------------------------------- Baevsky Stress Index (#6)
+  group('baevskyStressIndex — direct coverage', () {
+    test('too few clean beats → honest absent', () {
+      final m = baevskyStressIndex(<double>[for (var i = 0; i < 10; i++) 900.0]);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.tier, Tier.estimate);
+      expect(m.note, contains('30 clean beats'));
+    });
+
+    test('a narrow, near-regular RR distribution yields a finite SI + band', () {
+      // ~300 beats around 900 ms with small bounded variation → a well-defined
+      // mode and a non-zero MxDMn, so SI is finite (not the degenerate ÷0 case).
+      final nn = <double>[
+        for (var i = 0; i < 300; i++) 900.0 + 15.0 * math.sin(i.toDouble())
+      ];
+      final m = baevskyStressIndex(nn);
+      expect(m.present, isTrue);
+      expect(m.tier, Tier.estimate);
+      final v = m.value!;
+      expect(v.si, greaterThan(0));
+      expect(v.si.isFinite, isTrue);
+      expect(v.modeS, greaterThan(0));
+      expect(v.mxdmnS, greaterThan(0));
+      expect(['low', 'normal', 'elevated', 'high'], contains(v.level));
+      expect(v.toJson()['si'], isNotNull);
+    });
+
+    test('a constant RR series has zero range → no valid SI window (absent)', () {
+      // MxDMn = 0 makes SI degenerate; the impl must return absent, never ∞/0.
+      final m = baevskyStressIndex(<double>[for (var i = 0; i < 300; i++) 900.0]);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+    });
+  });
 }

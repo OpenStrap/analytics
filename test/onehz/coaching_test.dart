@@ -394,23 +394,76 @@ void main() {
     });
   });
 
-  group('detectNaps (honest stub)', () {
-    test('returns an empty nap list with zero confidence — no fabrication', () {
+  group('detectNaps (real — non-main sleep sessions)', () {
+    // Build a synthetic day: active → still low-HR block → active. The still
+    // block clears the stager's gates on BOTH the night and daytime paths
+    // (>60 min, resting HR ≤ 0.95·baseline), so it is detected regardless of the
+    // machine timezone. Active flanks establish the higher HR baseline.
+    ({List<AccelSample> accel, List<double> hr}) buildDay({
+      required int activeMin,
+      required int napMin,
+    }) {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var i = 0;
+      void active(int mins) {
+        for (var s = 0; s < mins * 60; s++, i++) {
+          // Oscillating orientation → gravity deltas well above the still floor.
+          final x = (i.isEven) ? 0.0 : 0.25;
+          accel.add(AccelSample(i * 1000.0, x, 0, 0.97));
+          hr.add(80.0);
+        }
+      }
+
+      void still(int mins) {
+        for (var s = 0; s < mins * 60; s++, i++) {
+          accel.add(AccelSample(i * 1000.0, 0, 0, 1)); // constant → immobile
+          hr.add(50.0);
+        }
+      }
+
+      active(activeMin);
+      still(napMin);
+      active(activeMin);
+      return (accel: accel, hr: hr);
+    }
+
+    test('too little data → honest absent (null value), never a fake empty', () {
       final m = detectNaps(const <AccelSample>[], const <double>[]);
-      expect(m.value, isNotNull); // an (empty) list, not a null
-      expect(m.value, isEmpty);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
       expect(m.confidence, 0);
       expect(m.tier, Tier.estimate);
-      expect(m.note, contains('nap detection unavailable'));
+      expect(m.note, contains('too little data'));
     });
 
-    test('still empty even when handed plausible sleep-like input', () {
-      final accel = <AccelSample>[
-        for (var i = 0; i < 100; i++) AccelSample(i * 1000.0, 0, 0, 1),
-      ];
-      final hr = <double>[for (var i = 0; i < 100; i++) 52.0];
-      final m = detectNaps(accel, hr,
-          mainSleep: const SleepWindowSpan(0, 30000));
+    test('detects a qualifying non-main sleep block as a nap', () {
+      final day = buildDay(activeMin: 90, napMin: 150);
+      final m = detectNaps(day.accel, day.hr); // no main window → not excluded
+      expect(m.present, isTrue);
+      expect(m.tier, Tier.estimate);
+      expect(m.value, isNotEmpty);
+      for (final nap in m.value!) {
+        // Every reported nap honors the 20 min – 3 h envelope.
+        expect(nap.durationSec, greaterThanOrEqualTo(20 * 60));
+        expect(nap.durationSec, lessThanOrEqualTo(3 * 3600));
+        expect(nap.endSec, greaterThan(nap.startSec));
+        expect(nap.confidence, inInclusiveRange(0.0, 1.0));
+      }
+    });
+
+    test('the main sleep window is carved out (no nap overlaps it)', () {
+      final day = buildDay(activeMin: 90, napMin: 150);
+      // Main window = the whole still block's index range (indices into arrays).
+      final start = 90 * 60;
+      final end = start + 150 * 60;
+      final m = detectNaps(
+        day.accel,
+        day.hr,
+        mainSleep: SleepWindowSpan(start, end),
+      );
+      expect(m.present, isTrue);
+      // The only sleep block IS the main sleep → excluded → empty list.
       expect(m.value, isEmpty);
     });
   });
