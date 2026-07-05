@@ -193,6 +193,27 @@ class AdvancedSleepStager {
   static const double deepFirstFraction = 1.0 / 3.0;
   static const int fragmentMergeEpochs = 6;
 
+  // ── Cole–Kripke sleep/wake spine — KNOWN CATALOG DEVIATION (deliberate) ─────
+  // docs/ALGORITHM_CATALOG_1HZ.md lists "Cole-Kripke / Sadeh / Oakley raw
+  // coefficients on 1 Hz" under DO NOT SHIP, because the published weights were
+  // calibrated against Actigraph zero-crossing / PIM counts and that count
+  // calibration does not transfer to a 1 Hz gravity-delta surrogate (ZCM is
+  // aliased away below Nyquist). We use the classic weights ANYWAY here, and it
+  // is tolerated for three specific reasons:
+  //   1. SPINE ONLY. `_coleKripke` output is used exclusively to locate sleep
+  //      ONSET / FINAL-WAKE (`_onsetAndFinalWake`) and to pick the "sleep" epoch
+  //      subset for the percentile bands — it never assigns a final stage label.
+  //   2. CORRECTED DOWNSTREAM. The actual hypnogram comes from Stage 1-3
+  //      (per-epoch HR/HRV/RR/resp features -> percentile classifier -> median
+  //      smoothing -> `_reimposePhysiology`), which overrides the raw CK call,
+  //      and physiology is reimposed after.
+  //   3. RELATIVE, NOT ABSOLUTE. `_rescaleCounts` divides by `ckCountDivisor`
+  //      and clips, so the spine reacts to WITHIN-NIGHT relative motion, not to
+  //      an absolute count threshold the surrogate cannot honor.
+  // The van Hees angle window remains the primary in-bed detector (the catalog's
+  // sanctioned method); CK is a secondary within-window continuity spine. Do NOT
+  // read CK output as a validated sleep/wake score. The catalog DO-NOT-SHIP line
+  // cross-references this decision.
   static const List<double> ckWeights = [106, 54, 58, 76, 230, 74, 67];
   static const double ckScale = 0.001;
   static const int ckBack = 4;
@@ -212,10 +233,15 @@ class AdvancedSleepStager {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
     int tzOffsetSec = 0,
+    int Function(int tsSec)? tzOffsetResolver,
     bool useV2 = false,
     List<List<int>> wristOff = const [], // each [start,end]
     List<List<int>> bandSleepState = const [], // each [ts,state]
   }) {
+    // Resolve the local-time offset PER timestamp when a resolver is supplied
+    // (DST-correct — an offset change inside the record window is honored);
+    // otherwise fall back to the fixed [tzOffsetSec] (unchanged legacy behavior).
+    int tzAt(int ts) => tzOffsetResolver?.call(ts) ?? tzOffsetSec;
     final grav = [...gravity]..sort((a, b) => a.ts.compareTo(b.ts));
     if (grav.length < 2) return const [];
     final hrS = [...hr]..sort((a, b) => a.ts.compareTo(b.ts));
@@ -253,7 +279,7 @@ class AdvancedSleepStager {
       final isNightTail = continuesChain && chainFromOvernight;
       final morningWakeEnd = chainFromOvernight ? chainPrevEnd : null;
 
-      if (_isDaytimeCenter(p, tzOffsetSec) &&
+      if (_isDaytimeCenter(p, tzAt) &&
           !_passesMorningStillnessGuard(
               p, resting, baseline, morningWakeEnd, bandSleepState) &&
           !isNightTail) {
@@ -275,7 +301,7 @@ class AdvancedSleepStager {
       ));
 
       if (!continuesChain) {
-        chainFromOvernight = _isOvernightOnset(p.start, tzOffsetSec);
+        chainFromOvernight = _isOvernightOnset(p.start, tzAt);
       }
       chainPrevEnd = p.end;
     }
@@ -545,14 +571,14 @@ class AdvancedSleepStager {
 
   static int _secOfDay(int local) => ((local % secondsPerDay) + secondsPerDay) % secondsPerDay;
 
-  static bool _isDaytimeCenter(_Period p, int tz) {
+  static bool _isDaytimeCenter(_Period p, int Function(int) tzAt) {
     final center = p.start + (p.end - p.start) ~/ 2;
-    final hour = _secOfDay(center + tz) ~/ 3600;
+    final hour = _secOfDay(center + tzAt(center)) ~/ 3600;
     return hour >= daytimeBandStartHour && hour < daytimeBandEndHour;
   }
 
-  static bool _isOvernightOnset(int start, int tz) {
-    final hour = _secOfDay(start + tz) ~/ 3600;
+  static bool _isOvernightOnset(int start, int Function(int) tzAt) {
+    final hour = _secOfDay(start + tzAt(start)) ~/ 3600;
     return !(hour >= daytimeBandStartHour && hour < daytimeBandEndHour);
   }
 

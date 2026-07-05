@@ -127,7 +127,19 @@ Metric<RelativeOdiResult> relativeOdi(
   // referential surrogate: oxy ∝ -R. We track dips as RISES in R relative to a
   // rolling baseline (equiv. to drops in oxygenation), thresholded at dipPct.
   final validR = [for (final v in relR) if (!v.isNaN) v];
-  final meanRelR = validR.isEmpty ? 0.0 : mean(validR)!;
+  // HONEST-BY-TYPE: if EVERY ratio sample is NaN (no channel passed the DC/IR
+  // guards) there is no self-referential trend to report — a fabricated 0.0
+  // would read as a real (and impossibly stable) relative-R. Return absent
+  // rather than a manufactured zero.
+  if (validR.isEmpty) {
+    return const Metric<RelativeOdiResult>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: 'no valid ratio-of-ratios samples (all NaN); '
+          'cannot compute a relative-ODI screen',
+    );
+  }
+  final meanRelR = mean(validR)!;
 
   // Rolling baseline of R over baselineSec; a desaturation event = R rises
   // ≥ dipPct above its rolling baseline for a sustained (≥10 s) excursion.

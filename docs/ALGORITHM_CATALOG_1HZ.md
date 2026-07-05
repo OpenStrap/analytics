@@ -90,7 +90,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 ## DO NOT SHIP (infeasible or refuted on our data)
 - Absolute SpO₂ % / absolute °C fever (relative signals).
 - 1 Hz step counts / cadence / gait / frequency activity classification (Nyquist).
-- Cole-Kripke / Sadeh / Oakley raw coefficients on 1 Hz (count-calibration invalid; ZCM aliased away) — use van Hees + recalibrated ENMO surrogate.
+- Cole-Kripke / Sadeh / Oakley raw coefficients on 1 Hz as a STANDALONE sleep/wake SCORE (count-calibration invalid; ZCM aliased away) — use van Hees + recalibrated ENMO surrogate. NOTE / documented exception: `advanced_stager.dart` (see the `ckWeights` comment block) does run the classic Cole-Kripke weights, but ONLY as an internal within-window onset/final-wake + sleep-epoch-subset SPINE, never as a final stage label; the hypnogram is produced by the Stage 1-3 HR/HRV/RR feature classifier + physiology reimposition, which corrects it. That deviation is deliberate and bounded — it does not violate this rule, which forbids shipping raw CK as the actual sleep/wake output.
 - ACWR/EWMA-ACWR as injury prediction (Lolli/Impellizzeri) — descriptive only.
 - Heart-rate turbulence (needs ECG PVCs); ApEn (use SampEn); MSE/TINN/pNNx (data-hungry or jitter-collided); EPOC & Keytel-at-rest (estimate-only); Cole/Lauer absolute HRR cut-points (use personal τ trend); Rosenblum fractal cycles as-published (needs EEG — borrow the segmentation idea); DLMO (not measurable — report phase estimate).
 

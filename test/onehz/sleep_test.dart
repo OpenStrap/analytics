@@ -15,9 +15,68 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
+// autonomicStager is DEPRECATED and no longer re-exported from the barrel
+// (superseded by cardioStager); deep-import it here for the legacy coverage.
+import 'package:openstrap_analytics/src/onehz/sleep/stager.dart'
+    show autonomicStager;
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
 void main() {
+  // ------------------------------------------------ DST-aware tz offset (#1)
+  group('segmentSleep — per-timestamp tz offset (DST-aware)', () {
+    // Build active → still(low HR) → active overnight block; inject a resolver
+    // whose offset JUMPS by +1 h partway through the still window (a synthetic
+    // spring-forward), and prove the segmenter resolves the offset PER timestamp
+    // (i.e. at instants well past the FIRST sample) rather than freezing a single
+    // offset from sample[0]. Constructed with explicit offsets → deterministic,
+    // independent of the machine timezone.
+    ({List<AccelSample> accel, List<double> hr}) buildOvernight() {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      const baseEpochSec = 1700000000; // fixed, absolute
+      var i = 0;
+      void seg(int mins, {required bool active, required double bpm}) {
+        for (var s = 0; s < mins * 60; s++, i++) {
+          final ts = (baseEpochSec + i) * 1000.0;
+          final x = active ? (i.isEven ? 0.0 : 0.25) : 0.0;
+          accel.add(AccelSample(ts, x, 0, active ? 0.97 : 1.0));
+          hr.add(bpm);
+        }
+      }
+
+      seg(120, active: true, bpm: 78); // pre-sleep activity
+      seg(420, active: false, bpm: 48); // 7 h still, low HR
+      seg(120, active: true, bpm: 78); // morning activity
+      return (accel: accel, hr: hr);
+    }
+
+    test('resolver is consulted at timestamps beyond the first sample', () {
+      final day = buildOvernight();
+      const baseEpochSec = 1700000000;
+      // DST jump 3 h in — before the sleep-period center (~5.5 h), so a frozen
+      // offset (derived from sample[0], pre-jump) would be WRONG for the center.
+      final transitionTs = baseEpochSec + 3 * 3600;
+      final seen = <int>{};
+      int resolver(int tsSec) {
+        seen.add(tsSec);
+        return tsSec < transitionTs ? -18000 : -14400; // EST → EDT
+      }
+
+      final s = segmentSleep(day.accel, day.hr, tzOffsetResolver: resolver);
+      expect(s.present, isTrue, reason: 'a 7 h still block should segment');
+      // The fix: offset is resolved per-ts, so the resolver is called with
+      // timestamps AFTER the DST jump — not just sample[0].
+      expect(seen.any((t) => t >= transitionTs), isTrue,
+          reason: 'per-timestamp offset resolution must reach past the jump');
+    });
+
+    test('explicit fixed tzOffsetSec reproduces single-offset behavior', () {
+      final day = buildOvernight();
+      final s = segmentSleep(day.accel, day.hr, tzOffsetSec: -18000);
+      expect(s.present, isTrue);
+    });
+  });
+
   // ----------------------------------------------------------------- van Hees
   group('van Hees angle-based sleep window', () {
     test('square-wave activity → finds the inactivity block', () {
@@ -777,6 +836,43 @@ void main() {
     });
   });
 
+  // ------------------------------------------------ sleepCyclesMetric (#6)
+  group('sleepCyclesMetric — direct coverage', () {
+    test('empty RR → honest absent (no fabricated cycles)', () {
+      final m = sleepCyclesMetric(const <double>[], const <double>[], 0, 8 * 3600);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.tier, Tier.estimate);
+    });
+
+    test('~90-min ultradian RMSSD wave → detects peak-to-peak cycles', () {
+      // 8 h window, one RR beat/sec. Per-minute RMSSD is driven by a ~90-min
+      // sinusoid (successive-diff magnitude waxes/wanes), so the smoothed
+      // z-RMSSD has recurring peaks → cycles counted between them.
+      const onset = 0;
+      const offset = 8 * 3600;
+      final rrMs = <double>[];
+      final rrTsMs = <double>[];
+      for (var t = 0; t < offset; t++) {
+        final amp = 1.0 + math.sin(2 * math.pi * t / (90 * 60)); // 0..2
+        final wobble = (t.isEven ? 1 : -1) * (10.0 + 30.0 * amp);
+        rrMs.add(900.0 + wobble);
+        rrTsMs.add((t * 1000).toDouble());
+      }
+      final m = sleepCyclesMetric(rrMs, rrTsMs, onset, offset);
+      expect(m.present, isTrue);
+      expect(m.tier, Tier.estimate);
+      final r = m.value!;
+      expect(r.n, greaterThanOrEqualTo(1));
+      expect(r.cycles.length, r.n);
+      for (final c in r.cycles) {
+        expect(c.lenMin, greaterThan(0));
+        expect(c.endMin, greaterThan(c.startMin));
+      }
+      expect(r.series, isNotEmpty);
+      expect(r.toJson()['cycle_count'], r.n);
+    });
+  });
 }
 
 SleepStage _dominant(List<SleepStage> xs) {

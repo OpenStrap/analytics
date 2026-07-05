@@ -21,7 +21,11 @@ export 'hr_fallback.dart';
 export 'advanced_stager.dart';
 export 'sri.dart';
 export 'accounting.dart';
-export 'stager.dart';
+// stager.dart still provides StagerResult + consolidateSleepStages (both used
+// by cardio_stager and tests), but its `autonomicStager` is a DEPRECATED
+// duplicate of `cardioStager` and is NOT re-exported from the barrel — deep-
+// import 'src/onehz/sleep/stager.dart' if you still need the legacy estimator.
+export 'stager.dart' hide autonomicStager;
 export 'cardio_stager.dart';
 export 'cpc.dart';
 export 'circadian_np.dart';

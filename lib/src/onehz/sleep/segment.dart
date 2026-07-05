@@ -157,6 +157,8 @@ SleepSegmentation segmentSleep(
   List<double> rrTsMs = const [],
   int? habitualMidsleepSec,
   ({int onsetSec, int offsetSec})? forcedWindow,
+  int? tzOffsetSec,
+  int Function(int tsSec)? tzOffsetResolver,
 }) {
   final n = math.min(accel.length, hr1hz.length);
   // A forced window (manual entry / user confirmation, Approach 1) is asserted
@@ -177,10 +179,22 @@ SleepSegmentation segmentSleep(
           tier: Tier.estimate, inputs_used: ['forced_window']);
   final fallbackWindow = wm.value;
 
-  final tzOffsetSeconds = DateTime.fromMillisecondsSinceEpoch(
-    trimmedAccel.first.tsMs.toInt(),
-    isUtc: false,
-  ).timeZoneOffset.inSeconds;
+  // Local-time-of-day math (daytime guard + midsleep alignment) must use the
+  // offset IN EFFECT AT EACH timestamp — a single frozen offset derived from the
+  // first sample mishandles a DST transition inside the sleep window (an hour of
+  // the night lands in the wrong local hour). Resolve the offset per timestamp:
+  //   * [tzOffsetResolver] (if given) wins — lets callers/tests inject a
+  //     deterministic ts→offset map (e.g. a synthetic DST span).
+  //   * else a fixed [tzOffsetSec] (if given) reproduces the legacy single-offset
+  //     behavior for callers that want determinism.
+  //   * else the machine's local offset at that instant (DST-correct) is used.
+  final int Function(int tsSec) tzAt = tzOffsetResolver ??
+      (tzOffsetSec != null
+          ? (int _) => tzOffsetSec
+          : (int tsSec) => DateTime.fromMillisecondsSinceEpoch(
+                tsSec * 1000,
+                isUtc: false,
+              ).timeZoneOffset.inSeconds);
   final grav = <GravTs>[
     for (var i = 0; i < n; i++)
       GravTs(
@@ -220,13 +234,13 @@ SleepSegmentation segmentSleep(
       grav,
       hr,
       rr: rr,
-      tzOffsetSec: tzOffsetSeconds,
+      tzOffsetResolver: tzAt,
     );
     if (sessions.isEmpty) return SleepSegmentation.absent;
 
     chosen = _pickMainSleepGroup(
       _bridgeAdjacentSessions(sessions),
-      tzOffsetSeconds,
+      tzAt,
       habitualMidsleepSec: habitualMidsleepSec,
     );
   }
@@ -386,7 +400,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
 
 _SleepGroup? _pickMainSleepGroup(
   List<_SleepGroup> groups,
-  int tzOffsetSeconds, {
+  int Function(int tsSec) tzAt, {
   int? habitualMidsleepSec,
 }) {
   if (groups.isEmpty) return null;
@@ -404,7 +418,9 @@ _SleepGroup? _pickMainSleepGroup(
   final targetMidsleepSec = habitualMidsleepSec ?? coldStartAnchorSec;
 
   int localSecOfDay(int ts) {
-    final local = ts + tzOffsetSeconds;
+    // Per-timestamp offset (DST-correct); [tzAt] is constant when the caller
+    // passed a fixed offset, otherwise the offset in effect at [ts].
+    final local = ts + tzAt(ts);
     return ((local % secondsPerDay) + secondsPerDay) % secondsPerDay;
   }
 

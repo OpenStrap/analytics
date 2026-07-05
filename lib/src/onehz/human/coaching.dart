@@ -1,7 +1,10 @@
 import 'dart:math' as math;
 
 import '../types.dart';
+import '../sleep/advanced_stager.dart';
 
+/// An index range [start, end) into the day's accel/hr arrays marking the MAIN
+/// nocturnal sleep, so [detectNaps] can carve it (and its session) out.
 class SleepWindowSpan {
   final int start;
   final int end;
@@ -21,17 +24,94 @@ class NapWindow {
   });
 }
 
+/// Daytime naps as qualifying NON-MAIN sleep sessions from the single-source
+/// [AdvancedSleepStager.detectSleep] pipeline. Reuses the exact same van Hees +
+/// HR autonomic machinery the main sleep uses (no second detector): every
+/// detected sleep session in [20 min, 3 h] that does NOT overlap [mainSleep] is
+/// reported as a nap. HONEST: the same ESTIMATE ceiling as staging (wrist
+/// autonomic, never PSG); returns an EMPTY list (present, low confidence) when
+/// the detector finds no qualifying nap, and [Metric.absent] only when there is
+/// too little data to run at all.
+///
+/// [accel]/[hr] 1 Hz gravity + HR for the whole day (same length/time base).
+/// [mainSleep] index range of the main nocturnal sleep in those arrays, so it
+/// (and any session overlapping it) is excluded. NapWindow start/end are seconds
+/// RELATIVE to the first sample.
 Metric<List<NapWindow>> detectNaps(
   List<AccelSample> accel,
   List<double> hr, {
   SleepWindowSpan? mainSleep,
 }) {
-  return const Metric<List<NapWindow>>(
-    value: <NapWindow>[],
-    confidence: 0,
+  const inputs = ['accel_1hz', 'hr_1hz'];
+  const minNapSec = 20 * 60;
+  const maxNapSec = 3 * 3600;
+  final n = math.min(accel.length, hr.length);
+  if (n < minNapSec) {
+    return const Metric<List<NapWindow>>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'too little data for nap detection (need ≥20 min)',
+    );
+  }
+
+  final baseSec = accel.first.tsMs ~/ 1000;
+  final grav = <GravTs>[
+    for (var i = 0; i < n; i++)
+      GravTs(accel[i].tsMs ~/ 1000, accel[i].x, accel[i].y, accel[i].z),
+  ];
+  final hrTs = <HrTs>[
+    for (var i = 0; i < n; i++)
+      if (hr[i] > 0) HrTs(accel[i].tsMs ~/ 1000, hr[i]),
+  ];
+
+  // Per-timestamp local offset (DST-correct) for the stager's daytime guard.
+  int tzAt(int ts) =>
+      DateTime.fromMillisecondsSinceEpoch(ts * 1000, isUtc: false)
+          .timeZoneOffset
+          .inSeconds;
+
+  final sessions =
+      AdvancedSleepStager.detectSleep(grav, hrTs, tzOffsetResolver: tzAt);
+
+  // Absolute-second bounds of the main sleep window (for overlap exclusion).
+  int? mainStartSec, mainEndSec;
+  if (mainSleep != null && mainSleep.end > mainSleep.start) {
+    final lo = mainSleep.start.clamp(0, n - 1);
+    final hi = (mainSleep.end - 1).clamp(0, n - 1);
+    mainStartSec = accel[lo].tsMs ~/ 1000;
+    mainEndSec = accel[hi].tsMs ~/ 1000;
+  }
+
+  final naps = <NapWindow>[];
+  for (final s in sessions) {
+    final dur = s.end - s.start;
+    if (dur < minNapSec || dur > maxNapSec) continue;
+    // Exclude the main nocturnal sleep: any session overlapping its window.
+    if (mainStartSec != null &&
+        mainEndSec != null &&
+        s.start < mainEndSec &&
+        s.end > mainStartSec) {
+      continue;
+    }
+    // Require the nap actually hold ≥20 min of asleep time (not just in-bed).
+    if (AdvancedSleepStager.hypnogramMetrics(s).tstS < minNapSec) continue;
+    naps.add(NapWindow(
+      startSec: s.start - baseSec,
+      endSec: s.end - baseSec,
+      durationSec: dur,
+      confidence: s.efficiency.clamp(0.0, 1.0),
+    ));
+  }
+
+  return Metric<List<NapWindow>>(
+    value: naps,
+    confidence: naps.isEmpty ? 0.3 : 0.4,
     tier: Tier.estimate,
-    inputs_used: ['accel_1hz', 'hr_1hz'],
-    note: 'nap detection unavailable in package surface; returning no naps',
+    inputs_used: inputs,
+    note: naps.isEmpty
+        ? 'no qualifying naps (20 min–3 h) outside the main sleep window'
+        : '${naps.length} nap(s) via van Hees + HR autonomic ESTIMATE '
+            '(20 min–3 h, main sleep excluded); wrist estimate, not PSG',
   );
 }
 

@@ -98,6 +98,13 @@ class GlassBoxReadiness {
 /// Drivers: contribution_i = weight_i · (orientedPct_i − 50). Ranked by
 /// magnitude; a driver is NAMED in the narrative only if its raw change cleared
 /// its MDC (robust baseline gate). The breakdown lists ALL inputs regardless.
+@Deprecated(
+  'DUPLICATE readiness — use readinessComposite (wellness/readiness_composite.dart) '
+  'as the canonical/headline recovery. glassBoxReadiness is retained ONLY for its '
+  'percentile-of-you breakdown + deterministic narrative and for back-compat with '
+  'existing edge callers (crossday_pipeline "readiness_glassbox"); do NOT surface '
+  'it as the headline score.',
+)
 Metric<GlassBoxReadiness> glassBoxReadiness(
   List<GlassBoxInput> inputs, {
   int minHistory = 7,

@@ -1,2 +1,4 @@
 .dart_tool/
 pubspec.lock
+# flutter/dart test scratch dir
+build/
