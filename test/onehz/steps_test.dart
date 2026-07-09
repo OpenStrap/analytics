@@ -230,13 +230,52 @@ void main() {
       expect(m.value!.ambulatoryMinutes, greaterThan(20));
     });
 
-    test('a brief movement minute contributes only a little', () {
+    test(
+        'an ISOLATED single movement minute does NOT count — bout-gated, '
+        'not a real walk (regression: this used to count, letting scattered '
+        'noise minutes sum into phantom steps)', () {
       final e = List<double>.filled(60, 0.006);
-      e[30] = 0.20; // one elevated minute
+      e[30] = 0.20; // one elevated minute, no neighbours
       final m = dailyStepEstimate(rows(e), calib: cal);
-      // It counts (a brief walk is real), but a single minute can't be large.
-      expect(m.value!.ambulatoryMinutes, 1);
-      expect(m.value!.steps, lessThan(200));
+      expect(m.value!.ambulatoryMinutes, 0);
+      expect(m.value!.steps, 0);
+    });
+
+    test('a genuine short bout (>= minBoutMin contiguous minutes) counts',
+        () {
+      final e = List<double>.filled(60, 0.006);
+      e[30] = e[31] = e[32] = 0.20; // 3 contiguous elevated minutes
+      final m = dailyStepEstimate(rows(e), calib: cal);
+      expect(m.value!.ambulatoryMinutes, 3);
+      expect(m.value!.steps, greaterThan(0));
+    });
+
+    test('a bout ONE minute short of minBoutMin still does not count', () {
+      final e = List<double>.filled(60, 0.006);
+      e[30] = e[31] = 0.20; // 2 contiguous elevated minutes — below the gate
+      final m = dailyStepEstimate(rows(e), calib: cal);
+      expect(m.value!.ambulatoryMinutes, 0);
+      expect(m.value!.steps, 0);
+    });
+
+    test(
+        'SCATTERED non-contiguous elevated+HR-lifted minutes across a night '
+        "sum to zero, not thousands — the exact real-world bug report "
+        '("woke up, never walked, saw 4000+ steps")', () {
+      // 8 hours of "sleep": mostly resting motion/HR, with occasional isolated
+      // minutes where a brief turn-over coincides with a HR lift (e.g. REM),
+      // spaced far enough apart that none form a real 3+ minute walking bout.
+      final e = List<double>.filled(480, 0.006);
+      final hr = List<double>.filled(480, 58.0);
+      for (final i in [40, 90, 140, 200, 260, 320, 380, 440]) {
+        e[i] = 0.20;
+        hr[i] = 95.0; // isolated HR lift, same single minute only
+      }
+      final m = dailyStepEstimate(rows(e), calib: cal, hrPerMin: hr, restingHr: 58);
+      expect(m.value!.ambulatoryMinutes, 0);
+      expect(m.value!.steps, 0,
+          reason: 'no isolated minute may count as walking on its own, no '
+              'matter how many scattered isolated minutes occur');
     });
 
     test('a higher personal cadence lifts the count', () {

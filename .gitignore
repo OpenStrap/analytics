@@ -3,3 +3,4 @@ build/
 pubspec.lock
 # flutter/dart test scratch dir
 build/
+.DS_Store

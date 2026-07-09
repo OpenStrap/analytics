@@ -44,7 +44,7 @@ void main() {
     return (grav: grav, hr: hr, rr: rr, nightStart: nightStart, nightEnd: nightEnd);
   }
 
-  group('AdvancedSleepStager V1 detection + 4-class staging', () {
+  group('AdvancedSleepStager detection + 4-class staging (default: cardio)', () {
     test('still low-HR night → one session with a 4-class hypnogram', () {
       final d = build(2, 7, 1);
       final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr);
@@ -99,19 +99,185 @@ void main() {
     });
   });
 
-  group('SleepStagerV2 (opt-in)', () {
+  group('Realistic cycled fixture — deep/REM regression (2026-07)', () {
+    // Realistic-ish overnight fixture, unlike `build()` above: cycles through
+    // light -> deep -> light -> REM phases (mimicking ~110-min sleep cycles),
+    // with per-phase HR/breathing signatures instead of one clean tone, PLUS
+    // real-world PPG noise (dropped beats, occasional outlier RR values) that
+    // `build()`'s one-beat-per-second, always-clean stream does not exercise.
+    // Before the fix, `winResp` (raw resp-ADC channel) was ALWAYS empty in
+    // production (no such channel exists on WHOOP 4 R24), so `rrv` was always
+    // NaN, the primary rrv-gated REM rule could never fire, and the narrow
+    // fallback (hrHigh && hrvarHigh simultaneously) rarely fired either — this
+    // fixture's REM phases are deliberately built so ONLY the (now-fixed)
+    // primary rrv-gated rule can classify them: HR is elevated via `hrVar`
+    // (moderate wobble) but deliberately kept BELOW the `hrHigh` (70th
+    // percentile) threshold, so the old narrow fallback would still miss them.
+    ({List<GravTs> grav, List<HrTs> hr, List<RrTs> rr}) buildCycled() {
+      final rnd = math.Random(42);
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      final rr = <RrTs>[];
+      var t = 0;
+      var rrClockMs = 0.0;
+
+      void emitSecond(double bpm) {
+        // Still wrist with tiny jitter (below the 0.01 g still threshold).
+        grav.add(GravTs(t, 0.001 * math.sin(t * 0.01), 0.001, 1.0));
+        hr.add(HrTs(t, bpm));
+        t++;
+      }
+
+      // Emit RR beats for [secs] seconds at ~[bpm], RSA-modulated at
+      // [breathPeriodFn](beat-index)-seconds-per-breath (allows a varying —
+      // irregular — period for REM), with ~8% dropped beats (weak PPG
+      // contact) and an occasional single-beat outlier (ectopic-like noise).
+      void emitPhase(int secs, double bpm,
+          double Function(int beatIdx) breathPeriodFn) {
+        final endT = t + secs;
+        var beatIdx = 0;
+        while (t < endT) {
+          emitSecond(bpm);
+          final baseRr = 60000.0 / bpm;
+          final period = breathPeriodFn(beatIdx);
+          final rsa = 25.0 * math.sin(2 * math.pi * (rrClockMs / 1000.0) / period);
+          var rrMs = baseRr + rsa;
+          rrClockMs += rrMs;
+          beatIdx++;
+          if (rnd.nextDouble() < 0.08) continue; // dropped beat (weak contact)
+          if (rnd.nextDouble() < 0.02) {
+            rrMs *= rnd.nextBool() ? 1.8 : 0.55; // isolated ectopic-like outlier
+          }
+          rr.add(RrTs(t, rrMs));
+        }
+      }
+
+      // ~1h wind-down (light-ish, regular breathing) before the first cycle.
+      emitPhase(3600, 58, (_) => 4.2);
+      for (var cycle = 0; cycle < 4; cycle++) {
+        emitPhase(25 * 60, 56, (_) => 4.2); // light: regular ~14 br/min
+        emitPhase(20 * 60, 49, (_) => 4.8); // deep: low HR, very regular breathing
+        emitPhase(15 * 60, 56, (_) => 4.2); // light
+        // REM: HR only mildly elevated (kept below the top-30th-pct hrHigh
+        // gate by construction — see the phase check below), irregular
+        // breathing period (3-7 s, jittered every breath) => high rrv.
+        emitPhase(20 * 60, 59, (i) => 3.0 + 4.0 * rnd.nextDouble());
+        emitPhase(20 * 60, 56, (_) => 4.2); // light
+      }
+      return (grav: grav, hr: hr, rr: rr);
+    }
+
+    void assertRealDeepAndRem(StagingMethod method) {
+      final d = buildCycled();
+      final sessions =
+          AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr, method: method);
+      expect(sessions, isNotEmpty,
+          reason: 'the still+low-HR fixture should still register as sleep');
+      final main = sessions.reduce((a, b) =>
+          AdvancedSleepStager.hypnogramMetrics(a).tstS >=
+                  AdvancedSleepStager.hypnogramMetrics(b).tstS
+              ? a
+              : b);
+      final m = AdvancedSleepStager.hypnogramMetrics(main);
+
+      // The regression this test guards against: pre-fix, V1's `rrv` was
+      // always NaN in production, so deepMin/remMin could silently be ~0
+      // while lightMin absorbed nearly the whole night. Assert both are real
+      // — for whichever staging method is actually running in production.
+      expect(m.deepMin, greaterThan(0),
+          reason: 'deep sleep should be detected from low-HR, regular-'
+              'breathing phases');
+      expect(m.remMin, greaterThan(0),
+          reason: 'REM should be detected — this fixture\'s REM phases are '
+              'deliberately built with only a mild/irregular signature, not '
+              'an extreme one, so a collapsed-to-light classifier misses it');
+
+      // Directional plausibility (not tight AASM norms — this is a synthetic
+      // fixture, not PSG-validated data): light should NOT be devouring
+      // nearly the whole night the way the pre-fix bug produced.
+      final totalStageMin = m.deepMin + m.remMin + m.lightMin;
+      // *Pct fields are 0-100, not fractions.
+      expect(m.lightPct, lessThan(85),
+          reason: 'light should not be a near-total catch-all');
+      expect(m.deepMin + m.remMin, greaterThan(totalStageMin * 0.10),
+          reason: 'deep+REM should be a real, non-trivial share of sleep');
+    }
+
+    test(
+        'V1 (method: StagingMethod.v1) — deep AND rem are both actually '
+        'detected (not collapsed to light) — the rrv/REM fix this group is '
+        'named for', () {
+      // Before the fix, `winResp` (raw resp-ADC channel) was ALWAYS empty in
+      // production (no such channel exists on WHOOP 4 R24), so `rrv` was
+      // always NaN, the primary rrv-gated REM rule could never fire, and the
+      // narrow fallback (hrHigh && hrvarHigh simultaneously) rarely fired
+      // either — this fixture's REM phases are deliberately built so ONLY
+      // the (now-fixed) primary rrv-gated rule can classify them: HR is
+      // elevated via `hrVar` (moderate wobble) but deliberately kept BELOW
+      // the `hrHigh` (70th percentile) threshold, so the old narrow fallback
+      // would still miss them.
+      assertRealDeepAndRem(StagingMethod.v1);
+    });
+
+    test(
+        'cardio (method: StagingMethod.cardio, the PRODUCTION default) — '
+        'also detects real deep and rem on the same fixture', () {
+      assertRealDeepAndRem(StagingMethod.cardio);
+    });
+  });
+
+  // V1 and V2 are both retired from the production default (see
+  // advanced_stager.dart's file header + the 2026-07 cardio/V1/V2
+  // comparison) but kept reachable via StagingMethod for regression
+  // coverage — these groups just pin that they still run without error.
+  group('SleepStagerV1 (regression coverage only, not the default)', () {
+    test('V1 path runs over the same detection, emits only the 4 labels', () {
+      final d = build(2, 7, 1);
+      final v1 = AdvancedSleepStager.detectSleep(d.grav, d.hr,
+          rr: d.rr, method: StagingMethod.v1);
+      expect(v1, isNotEmpty);
+      const allowed = {'wake', 'light', 'deep', 'rem'};
+      for (final s in v1.first.stages) {
+        expect(allowed.contains(s.stage), isTrue);
+      }
+      final m = AdvancedSleepStager.mainSleep(d.grav, d.hr,
+          rr: d.rr, method: StagingMethod.v1);
+      expect(m.present, isTrue);
+      expect(m.note, contains('v1'));
+    });
+  });
+
+  group('SleepStagerV2 (regression coverage only, not the default)', () {
     test('V2 path runs over the same detection, emits only the 4 labels', () {
       final d = build(2, 7, 1);
-      final v2 = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr, useV2: true);
+      final v2 = AdvancedSleepStager.detectSleep(d.grav, d.hr,
+          rr: d.rr, method: StagingMethod.v2);
       expect(v2, isNotEmpty);
       const allowed = {'wake', 'light', 'deep', 'rem'};
       for (final s in v2.first.stages) {
         expect(allowed.contains(s.stage), isTrue);
       }
       // mainSleep selects V2 too and reports it in the note.
-      final m = AdvancedSleepStager.mainSleep(d.grav, d.hr, rr: d.rr, useV2: true);
+      final m = AdvancedSleepStager.mainSleep(d.grav, d.hr,
+          rr: d.rr, method: StagingMethod.v2);
       expect(m.present, isTrue);
-      expect(m.note, contains('V2'));
+      expect(m.note, contains('v2'));
+    });
+  });
+
+  group('StagingMethod.cardio (the production default)', () {
+    test('cardio path runs over the same detection, emits only the 4 labels',
+        () {
+      final d = build(2, 7, 1);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr);
+      expect(sessions, isNotEmpty);
+      const allowed = {'wake', 'light', 'deep', 'rem'};
+      for (final s in sessions.first.stages) {
+        expect(allowed.contains(s.stage), isTrue);
+      }
+      final m = AdvancedSleepStager.mainSleep(d.grav, d.hr, rr: d.rr);
+      expect(m.present, isTrue);
+      expect(m.note, contains('cardio'));
     });
   });
 

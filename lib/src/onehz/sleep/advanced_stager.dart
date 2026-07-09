@@ -1,15 +1,36 @@
-// SLEEP — AdvancedSleepStager (V1) + SleepStagerV2.
+// SLEEP — AdvancedSleepStager: session DETECTION (shared by every staging
+// method below) + per-session STAGING, now delegating to [StagingMethod].
 //
-// 4-class wake/light/deep/rem stager: the Cole–Kripke sleep/wake spine, the
-// full session-detection pipeline with all guards (daytime #90,
-// morning-stillness #531, 16h cap #547, off-wrist #500, sparse gravity #308),
-// Stage-1 per-epoch features (30 s epochs, 5-min window, DoG HR-variability
-// σ=120/600, pooled-RR RMSSD/SDNN, resp peak detector), the Stage-2
-// percentile-band classifier, and Stage-3 median smoothing + physiology.
+// Detection pipeline (unchanged by the 2026-07 staging swap below): the
+// Cole–Kripke sleep/wake spine + the full session-detection guards (daytime
+// #90, morning-stillness #531, 16h cap #547, off-wrist #500, sparse gravity
+// #308).
 //
-// V2 (opt-in via `useV2`) replaces ONLY per-session staging with the z-scored
-// emission model + deep HR-flatness gate + cycle prior + sticky 4×4 Viterbi HMM.
-// Detection is identical to V1.
+// Per-session STAGING (the [StagingMethod] this file offers):
+//   - [StagingMethod.cardio] (DEFAULT since 2026-07) — delegates to
+//     `cardioStager` (cardio_stager.dart): a transparent, night-baseline-
+//     relative HR+motion+RMSSD classifier with no dependency on a
+//     respiration channel. Chosen after a head-to-head comparison against
+//     v1/v2 on a clean fixture AND a realistic multi-phase/noisy synthetic
+//     fixture: cardio matched the intended deep/REM proportions far more
+//     closely (v1/v2 both badly under-called deep sleep — 0.8-2.3% of TST
+//     vs cardio's 12.8%, vs a ~17% intended ground truth), and on a fixture
+//     with NO genuine REM signature, cardio correctly reported 0% REM where
+//     v1/v2 both hallucinated some. See git history / PR description for
+//     the full numeric comparison.
+//   - [StagingMethod.v1] — the original Stage-1 per-epoch features (30 s
+//     epochs, 5-min window, DoG HR-variability σ=120/600, pooled-RR RMSSD/
+//     SDNN, RR-derived-EDR breathing-variability) + Stage-2 percentile-band
+//     classifier + Stage-3 median smoothing/physiology. NOT recommended for
+//     production (see cardio comparison above) — kept for regression
+//     coverage only. (A real 2026-07 bug in this path was fixed here too:
+//     its REM detection depended on a raw respiration-ADC channel WHOOP 4
+//     never provides, so it was silently always-dead in production; see
+//     `_rrvFromRrSeries`. That fix is what makes this a fair v1 in the
+//     comparison above, not evidence v1 should still be used.)
+//   - [StagingMethod.v2] — the z-scored emission model + deep HR-flatness
+//     gate + cycle prior + sticky 4×4 Viterbi HMM. Also NOT recommended
+//     (see comparison above) — kept for regression coverage only.
 //
 // HONESTY: a wrist 4-class autonomic ESTIMATE, never PSG/EEG. tier ESTIMATE.
 // Pure Dart, dart:math only.
@@ -17,6 +38,23 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../clinical/hrv_time.dart';
+import 'cardio_stager.dart' show cardioStager;
+import 'accounting.dart' show SleepStage;
+
+/// Which per-session staging engine [AdvancedSleepStager] runs. See the file
+/// header for the 2026-07 comparison behind this choice. Do not switch the
+/// default back to [v1]/[v2] without redoing that comparison — the whole
+/// reason cardio won is empirical, not architectural preference.
+enum StagingMethod {
+  /// DEFAULT. `cardioStager` — see cardio_stager.dart.
+  cardio,
+
+  /// Percentile-band classifier. Regression coverage only, not recommended.
+  v1,
+
+  /// z-scored HMM. Regression coverage only, not recommended.
+  v2,
+}
 
 // ── Input sample types (HrTs / GravTs / RrTs / RespTs)
 
@@ -224,9 +262,10 @@ class AdvancedSleepStager {
   /// Detect + stage all sleep sessions over the supplied 1 Hz streams.
   ///
   /// [tzOffsetSec] local-time offset (seconds) for the daytime/morning guards.
-  /// [useV2] selects the experimental z-score+Viterbi per-session staging path
-  /// (default false → V1 percentile-band classifier); `useSleepStagerV2` [wristOff]/[bandSleepState] are optional auxiliary
-  /// signals for the off-wrist / morning-stillness guards.
+  /// [method] selects the per-session staging engine — see [StagingMethod]
+  /// and the file header for why [StagingMethod.cardio] is the default.
+  /// [wristOff]/[bandSleepState] are optional auxiliary signals for the
+  /// off-wrist / morning-stillness guards.
   static List<SleepSession> detectSleep(
     List<GravTs> gravity,
     List<HrTs> hr, {
@@ -234,7 +273,7 @@ class AdvancedSleepStager {
     List<RespTs> resp = const [],
     int tzOffsetSec = 0,
     int Function(int tsSec)? tzOffsetResolver,
-    bool useV2 = false,
+    StagingMethod method = StagingMethod.cardio,
     List<List<int>> wristOff = const [], // each [start,end]
     List<List<int>> bandSleepState = const [], // each [ts,state]
   }) {
@@ -286,9 +325,11 @@ class AdvancedSleepStager {
         continue;
       }
 
-      final stages = useV2
-          ? _stageSessionV2(p.start, p.end, grav, hrS, rrS)
-          : _stageSession(p.start, p.end, grav, hrS, rrS, respS);
+      final stages = switch (method) {
+        StagingMethod.cardio => _stageSessionCardio(p.start, p.end, grav, hrS, rrS),
+        StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
+        StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
+      };
       final eff = _efficiency(p.start, p.end, stages);
       final avgHrv = _sessionAvgHRV(p.start, p.end, rrS);
       sessions.add(SleepSession(
@@ -315,10 +356,11 @@ class AdvancedSleepStager {
   /// gate (the 3 h minimum, daytime-center guard, HR confirmation, off-wrist
   /// fraction): the window is asserted by the human, so we do not re-litigate
   /// whether it is sleep — we only label the stages within it. Staging itself
-  /// runs through the SAME [_stageSession]/[_stageSessionV2] code the auto path
-  /// uses, so the single-source invariant holds (only the WINDOW boundary is
-  /// forced, never the staging math). Seconds with no data inside [startSec,
-  /// endSec) simply stay unstaged (wake) — honest about gaps, never fabricated.
+  /// runs through the SAME per-[method] code the auto path uses (see
+  /// [StagingMethod]), so the single-source invariant holds (only the WINDOW
+  /// boundary is forced, never the staging math). Seconds with no data inside
+  /// [startSec, endSec) simply stay unstaged (wake) — honest about gaps,
+  /// never fabricated.
   static SleepSession stageWindow(
     int startSec,
     int endSec,
@@ -326,11 +368,13 @@ class AdvancedSleepStager {
     List<HrTs> hr, {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
-    bool useV2 = false,
+    StagingMethod method = StagingMethod.cardio,
   }) {
-    final stages = useV2
-        ? _stageSessionV2(startSec, endSec, gravity, hr, rr)
-        : _stageSession(startSec, endSec, gravity, hr, rr, resp);
+    final stages = switch (method) {
+      StagingMethod.cardio => _stageSessionCardio(startSec, endSec, gravity, hr, rr),
+      StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
+      StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
+    };
     return SleepSession(
       start: startSec,
       end: endSec,
@@ -349,11 +393,11 @@ class AdvancedSleepStager {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
     int tzOffsetSec = 0,
-    bool useV2 = false,
+    StagingMethod method = StagingMethod.cardio,
   }) {
     const inputs = ['accel_1hz', 'hr_1hz', 'rr_ms'];
     final sessions = detectSleep(gravity, hr,
-        rr: rr, resp: resp, tzOffsetSec: tzOffsetSec, useV2: useV2);
+        rr: rr, resp: resp, tzOffsetSec: tzOffsetSec, method: method);
     if (sessions.isEmpty) {
       return const Metric<SleepSession>.absent(
         tier: Tier.estimate,
@@ -376,7 +420,7 @@ class AdvancedSleepStager {
       confidence: 0.5,
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: '${useV2 ? "V2" : "V1"} 4-class sleep ESTIMATE '
+      note: '${method.name} 4-class sleep ESTIMATE '
           '(wake/light/deep/rem); wrist autonomic, never PSG',
     );
   }
@@ -910,7 +954,28 @@ class AdvancedSleepStager {
           filteredRR.length >= 5 ? (_rmssdRaw(filteredRR) ?? double.nan) : double.nan;
       final sdnn =
           filteredRR.length >= 5 ? (_sdnnRaw(filteredRR) ?? double.nan) : double.nan;
-      final rr = _respRateAndRRV(winResp);
+      // BUG FIX (2026-07): `winResp` is fed from `resp:`/`RespTs`, a raw 1 Hz
+      // respiration-ADC channel — but the WHOOP 4 R24 record has no such
+      // channel (an early candidate field was dropped as constant/mirror
+      // during protocol hardware validation), and no real production caller
+      // of `detectSleep`/`stageWindow` has ever supplied one. `winResp` was
+      // therefore ALWAYS empty in production, `_respRateAndRRV` always
+      // returned [NaN, NaN], `f.rrv` was always NaN, and the PRIMARY REM rule
+      // below (`cardiacActivated && rrvIrregular`) could never fire — every
+      // real night silently fell back to the much narrower secondary REM rule
+      // (`hrHigh && hrvarHigh` simultaneously), collapsing most non-deep
+      // sleep into the 'light' catch-all. Prefer the real ADC path when
+      // (someday) supplied; otherwise derive respiration the way ECG-derived-
+      // respiration (EDR) methods do when no dedicated sensor exists: RSA
+      // (respiratory sinus arrhythmia) modulates the RR series itself at the
+      // breathing frequency, so beat-indexed RR magnitude carries the same
+      // signal a raw resp channel would (cf. Bailón et al. 2006, "The
+      // Integral Pulse Frequency Modulation Model..."; the same principle
+      // `respiration/resp_rate.dart`'s `rsaRespRate` exploits spectrally —
+      // this is the cheap, per-epoch-affordable time-domain analogue).
+      final rr = winResp.length >= 8
+          ? _respRateAndRRV(winResp)
+          : _rrvFromRrSeries(filteredRR);
       final clock = _clampD((i - onsetIdx) / span, 0, 1);
       final ckSleep = i < grid.ckFlags.length ? grid.ckFlags[i] : true;
       out.add(_EpochFeatures(
@@ -949,6 +1014,43 @@ class AdvancedSleepStager {
     if (intervals.length < 2) return [double.nan, double.nan];
     final rate = 60 / _median(intervals)!;
     final rrv = _populationStd(intervals);
+    return [rate, rrv];
+  }
+
+  /// (rate, rrv) derived from the RR-interval series itself — an ECG-derived-
+  /// respiration (EDR) time-domain estimate for when there is no dedicated
+  /// respiration channel (see the call-site comment in [_extractFeatures] for
+  /// why that is always true in production today). RSA modulates successive
+  /// RR magnitudes at the breathing frequency, so mean-centering the
+  /// (already range-filtered) RR series and peak-counting it is the same
+  /// technique [_respRateAndRRV] applies to a raw resp channel, just applied
+  /// to RR magnitude instead of raw ADC — beat times are reconstructed by
+  /// cumulative-summing the RR values (ms), same technique
+  /// `foundations/rr_correction.dart`'s `nnTimesMs` uses.
+  static List<double> _rrvFromRrSeries(List<double> rrMs) {
+    if (rrMs.length < 8) return [double.nan, double.nan];
+    final times = List<double>.filled(rrMs.length + 1, 0);
+    for (var i = 0; i < rrMs.length; i++) {
+      times[i + 1] = times[i] + rrMs[i];
+    }
+    final mean = rrMs.reduce((a, b) => a + b) / rrMs.length;
+    final x = [for (final v in rrMs) v - mean];
+    if (x.every((v) => v.abs() < 1e-9)) return [double.nan, double.nan];
+    final std = _populationStd(x);
+    if (std <= 0) return [double.nan, double.nan];
+    // Peaks must be >=2 beats apart — a beat-to-beat RR series has ~1 sample
+    // per beat, so a distance-1 peak would just be beat-to-beat noise, not a
+    // breath cycle.
+    final peaks = _findPeaks(x, 2, 0.0);
+    if (peaks.length < 3) return [double.nan, double.nan];
+    final intervalsS = <double>[];
+    for (var i = 1; i < peaks.length; i++) {
+      final iv = (times[peaks[i]] - times[peaks[i - 1]]) / 1000.0;
+      if (iv >= 1.5 && iv <= 12.0) intervalsS.add(iv);
+    }
+    if (intervalsS.length < 2) return [double.nan, double.nan];
+    final rate = 60 / _median(intervalsS)!;
+    final rrv = _populationStd(intervalsS);
     return [rate, rrv];
   }
 
@@ -1036,7 +1138,18 @@ class AdvancedSleepStager {
     if (moving && (cardiacActivatedForWake || !hasHR)) return 'wake';
     if (still && parasympOK && hrLow && rrvRegular) return 'deep';
     if (still && cardiacActivated && rrvIrregular) return 'rem';
-    if (still && hrHigh && hrvarHigh && !f.rrv.isFinite) return 'rem';
+    // Fallback REM path for the rare epoch where rrv itself couldn't be
+    // computed (too few RR beats in this specific 5-min window — e.g. a
+    // brief PPG-contact dropout) even though rrv IS generally available this
+    // session. Before the rrv fix above, rrv was ALWAYS non-finite in
+    // production, so this branch used to be the ONLY route to 'rem' and was
+    // deliberately narrowed (hrHigh AND hrvarHigh) to avoid over-calling it.
+    // Now that the primary rrv-gated rule above actually fires on real
+    // nights, this is a genuine rare-gap fallback, not the load-bearing
+    // path — loosened to the same cardiacActivated (hrHigh OR hrvarHigh)
+    // signal used for wake/the primary REM rule, instead of doubly requiring
+    // both simultaneously while data is already thin for this epoch.
+    if (still && cardiacActivated && !f.rrv.isFinite) return 'rem';
     return 'light';
   }
 
@@ -1161,6 +1274,68 @@ class AdvancedSleepStager {
     }
     // Length should match n.
     return out;
+  }
+
+  /// DEFAULT staging path — delegates to `cardioStager` (cardio_stager.dart).
+  /// See the file header for why this is the default. `cardioStager` expects
+  /// per-SECOND-indexed [AccelSample]/HR arrays (index i == second i from
+  /// [start]), not the sparse timestamped [GravTs]/[HrTs] lists this file
+  /// otherwise uses — so this builds that dense array explicitly: accel gaps
+  /// carry the last-known vector forward (a brief gap is far more likely a
+  /// missed sample than genuine movement — and ENMO from a stale-but-still
+  /// vector reads as "no movement", never fabricating motion that didn't
+  /// happen); HR gaps fill with 0, which `cardioStager` already documents as
+  /// its own "off-skin" contract — no fabrication either way.
+  static List<StageSegment> _stageSessionCardio(int start, int end,
+      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
+    final span = end - start;
+    if (span < 3 * epochS.round()) return [StageSegment(start, end, 'light')];
+    final gByTs = <int, GravTs>{for (final g in grav) if (g.ts >= start && g.ts < end) g.ts: g};
+    final hByTs = <int, HrTs>{for (final h in hr) if (h.ts >= start && h.ts < end) h.ts: h};
+    final accel = List<AccelSample>.filled(
+        span, AccelSample(start * 1000.0, 0, 0, 1.0));
+    final hr1hz = List<double>.filled(span, 0.0);
+    var haveGrav = false;
+    for (var i = 0; i < span; i++) {
+      final ts = start + i;
+      final g = gByTs[ts];
+      if (g != null) {
+        accel[i] = AccelSample(ts * 1000.0, g.x, g.y, g.z);
+        haveGrav = true;
+      } else if (haveGrav) {
+        accel[i] = accel[i - 1]; // carry-forward — see doc comment above.
+      }
+      hr1hz[i] = hByTs[ts]?.bpm ?? 0.0; // 0 = off-skin, cardioStager's own contract.
+    }
+    if (!haveGrav) return [StageSegment(start, end, 'light')];
+    final rSeg = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
+    final rrMs = [for (final r in rSeg) r.rrMs];
+    final rrTsMs = [for (final r in rSeg) r.ts * 1000.0];
+
+    final result = cardioStager(hr1hz, accel, rrMs: rrMs, rrTsMs: rrTsMs);
+    final nEpoch = result.base.stages.length;
+    if (nEpoch == 0) return [StageSegment(start, end, 'light')];
+    final labels = List<String>.generate(nEpoch, (i) {
+      switch (result.base.stages[i]) {
+        case SleepStage.wake:
+          return 'wake';
+        case SleepStage.rem:
+          return 'rem';
+        case SleepStage.nrem:
+          return (i < result.deepFlag.length && result.deepFlag[i])
+              ? 'deep'
+              : 'light';
+      }
+    });
+    // Reuse the same edges/segment-building [_stageSession] uses, so callers
+    // get byte-identical StageSegment semantics regardless of which staging
+    // method produced them.
+    final edges = <double>[
+      for (var i = 0; i <= nEpoch; i++) start + i * epochS,
+    ];
+    edges[nEpoch] = math.max(edges[nEpoch], end.toDouble());
+    final grid = _EpochGrid(edges, nEpoch, [], [], [], [], [], []);
+    return _buildSegments(labels, grid, end);
   }
 
   static List<StageSegment> _stageSession(int start, int end, List<GravTs> grav,
