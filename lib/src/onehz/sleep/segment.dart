@@ -13,9 +13,11 @@
 //      supplied, confirm/refine onset & offset to where HR sustains below the
 //      baseline (the cardiac signature of sleep), tightening — never widening —
 //      the accel window. This is a CONSENSUS refinement, not a second detector.
-//   3. cardioStager (motion+HR+RMSSD rule stager) over the WINDOW SLICE ONLY (hr + accel
-//      sliced to [onsetIdx, offsetIdx)) → validated 3-class wake/NREM/REM per
-//      epoch. (Replaces the deprecated hand-rolled autonomicStager.)
+//   3. AdvancedSleepStager.detectSleep/stageWindow, staged via
+//      StagingMethod.cardio (the default — delegates to cardioStager, the
+//      transparent motion+HR+RMSSD rule stager; see advanced_stager.dart's
+//      file header for the 2026-07 comparison behind this default) → 4-class
+//      wake/light/deep/rem per epoch, over the WINDOW SLICE ONLY.
 //   4. Expand the per-epoch stages to PER-SECOND labels over the window, and
 //      derive TST/WASO/efficiency/stage-seconds ALL from those labels
 //      (asleep = stage != wake), so they are mutually consistent and consistent
