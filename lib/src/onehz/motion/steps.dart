@@ -368,6 +368,18 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   StepCalibration? calib,
   double hrMarginBpm = 8.0,
   double minSamplesPerMinute = 30,
+  // The doc above has always promised a "run of >= minBoutMin consecutive
+  // ambulatory minutes" gate, but it was never actually implemented — every
+  // minute that individually passed the ENMO+HR gate counted on its own. In
+  // practice a handful of scattered, non-contiguous minutes during sleep
+  // (a brief REM-phase HR lift coinciding with a turn-over) could each pass
+  // the per-minute gate and get summed into a few thousand phantom steps
+  // reported the moment someone wakes up, having not walked at all. 3
+  // consecutive minutes is not from a specific cited threshold — it's the
+  // smallest run that plausibly distinguishes a real walking bout from
+  // isolated motion+HR noise; revisit with real calibration data if it's
+  // still too loose or too strict in practice.
+  int minBoutMin = 3,
 }) {
   const inputs = ['enmo_per_min', 'hr_per_min', 'cadence_calibration'];
   if (motion.isEmpty) {
@@ -426,9 +438,12 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   // (default 110 → C0 85, the literature baseline).
   final c0 = calibrated ? (baseCadence - 25.0) : kStepC0;
 
-  var steps = 0.0;
-  var ambMin = 0;
-  final cadences = <double>[];
+  // Pass 1: per-minute gate (ENMO floor/ceiling + HR-lifted-off-rest), computed
+  // independently of neighbours — this alone is what used to directly sum into
+  // steps, letting isolated scattered minutes (e.g. a brief HR lift during a
+  // REM-phase turn-over) count as "walking".
+  final passesGate = List<bool>.filled(idx.length, false);
+  final cadenceAt = List<double>.filled(idx.length, 0.0);
   for (var k = 0; k < idx.length; k++) {
     final i = idx[k];
     final m = enmos[k];
@@ -436,10 +451,40 @@ Metric<DailyStepEstimate> dailyStepEstimate(
     final hr = useHr ? hrPerMin[i] : 0.0;
     if (useHr && restHr > 0 && hr > 0 && hr < hrGate) continue; // HR at rest → skip
     final hrExcess = (useHr && hr > 0) ? math.max(hr - restHr, 0.0) : 0.0;
-    final cad = clamp(c0 + kStepCm * m + kStepChr * hrExcess, 70.0, 170.0);
-    steps += cad; // one minute of this cadence
-    cadences.add(cad);
-    ambMin++;
+    passesGate[k] = true;
+    cadenceAt[k] = clamp(c0 + kStepCm * m + kStepChr * hrExcess, 70.0, 170.0);
+  }
+
+  // Pass 2: BOUT gate — only count a gate-passing minute if it belongs to a
+  // run of >= minBoutMin CONSECUTIVE covered minutes (by original minute
+  // index, so a coverage gap breaks the run) that all pass the gate. This is
+  // the safeguard the file header has always documented but that was missing
+  // from the implementation.
+  var steps = 0.0;
+  var ambMin = 0;
+  final cadences = <double>[];
+  var runStart = 0;
+  for (var k = 0; k <= idx.length; k++) {
+    final atEnd = k == idx.length;
+    // A run breaks here if we've run off the end, this minute fails its own
+    // gate, or it passes but doesn't immediately follow the previous minute
+    // (a coverage gap) — in that last case minute k can still START a new
+    // run of its own, it just can't extend the old one.
+    final gateOk = !atEnd && passesGate[k];
+    final contiguous = k == runStart || (!atEnd && idx[k] == idx[k - 1] + 1);
+    if (gateOk && contiguous) continue; // still inside the current run
+    final runLen = k - runStart;
+    if (runLen >= minBoutMin) {
+      for (var j = runStart; j < k; j++) {
+        steps += cadenceAt[j];
+        cadences.add(cadenceAt[j]);
+        ambMin++;
+      }
+    }
+    // Minute k, if it passes its own gate, becomes the start of the NEXT
+    // candidate run (it was only excluded above for breaking contiguity,
+    // not for failing the gate) — otherwise skip past it entirely.
+    runStart = gateOk ? k : k + 1;
   }
 
   final cadenceUsed = mean(cadences) ?? baseCadence;
