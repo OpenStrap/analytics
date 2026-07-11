@@ -1,108 +1,118 @@
 # OpenStrap analytics
 
-This is the math. Given a stretch of per-minute heart rate, motion, and wear, it works
-out the things you care about: how hard you went today, how well you slept, whether you're
-recovered, how your training load is trending. The [backend](https://github.com/OpenStrap/backend)
-imports it and runs it on a cron. On its own it's just a pile of functions.
+This is the math. Given the always-on 1 Hz substrate a WHOOP 4.0 actually hands over —
+beat-to-beat RR intervals, 1 Hz heart rate, 1 Hz tri-axial accel, and a few relative ADC
+channels (skin temp, SpO2, ambient light) — it works out the things you care about: how
+hard you went today, how well you slept, whether you're recovered, whether something's off.
+
+Pure Dart, zero runtime dependencies. No AI, no I/O, no randomness, no clock. Same input,
+same output, every time. It runs **on-device**, computed by the app
+([edge](https://github.com/OpenStrap/edge)) directly — there's no cloud, no backend cron,
+no server that ever touches your data. (An earlier version of this package had a
+minute-resolution, backend-cron-ported family; that's gone. This is a 1 Hz-native rewrite,
+and the "1 Hz" part isn't cosmetic — it's what lets a lot of these methods work at all.)
 
 Let me be straight with you about what this is and isn't, because it'd be easy to oversell
 it.
 
-Every single thing in here is a published, peer-reviewed method. Banister's TRIMP for
-strain. Cole-Kripke actigraphy for sleep. Keytel's equation for calories. The Sleep
-Regularity Index. ACWR for load. None of it is invented, none of it is a neural net, none
-of it is me guessing what WHOOP does. I picked methods that exist in the literature so you
-can go read the paper and decide for yourself whether you trust the number.
+Every single thing in here is a published, peer-reviewed method — see `ALGORITHMS.md` for
+the full table with citations. None of it is invented, none of it is a neural net, none of
+it is me guessing what WHOOP does. I picked methods that exist in the literature so you can
+go read the paper and decide for yourself whether you trust the number.
 
 Which brings me to the honest part: **is this the same as what WHOOP gives you? No. Not
-close.** WHOOP has spent years and a lot of money turning their sensor data into recovery
-and strain scores, with a cloud and a research team behind it. I have a heart rate per
-minute and some textbook equations. What I compute is an honest approximation built from
-what the band actually hands over. It's useful, it trends correctly, it'll tell you when
-you're under-recovered. It is not their secret sauce and I'm not going to pretend it is.
+close.** WHOOP has years and a research team behind their recovery/strain scores. I have a
+reverse-engineered byte stream and a pile of textbook equations. What I compute is an
+honest approximation built from exactly what the band hands over, nothing more. It trends
+correctly and it'll tell you when you're under-recovered. It's not their secret sauce.
 
 ## How a number knows how much to trust itself
 
-Everything returns the same shape:
+Almost everything returns the same shape — `Metric<T>`. (A handful of multi-day/list
+outputs return a plain `List<T>` instead because there's no single confidence/tier that
+applies across a whole list — `illnessCusum`, `multivariateAnomaly`,
+`journalCorrelations`. Worth knowing so you don't go looking for `.tier` on those.)
 
-```ts
-type Metric<T> = T & {
-  confidence: number;        // 0 to 1
-  tier: 'AUTH' | 'HIGH' | 'ESTIMATE' | 'RELATIVE';
-  inputs_used: string[];     // which inputs actually fed this
+```dart
+class Metric<T> {
+  final T? value;             // null if the inputs weren't there — see below
+  final double confidence;    // 0..1
+  final String tier;          // Tier.auth | Tier.high | Tier.estimate | Tier.relative
+  final List<String> inputs_used;
+  final List<Driver>? drivers; // optional: signed contributors, for glass-box narratives
+  final String? note;         // e.g. "need_baseline:have=3,need=7"
 }
 ```
 
-The tier tells you what kind of number it is. `AUTH` means it came straight off the
-device. `HIGH` means it's measured and run through a solid published method. `ESTIMATE`
-means it's modelled and you should treat it as a ballpark. `RELATIVE` means it only means
-anything compared to your own baseline, skin temperature is the example, the absolute
-value is meaningless but the change isn't.
+The tier tells you what kind of number it is. `AUTH` means it's directly measured or
+definitional (raw ADC counts, RR count). `HIGH` means strong literature support on this
+substrate. `ESTIMATE` means published, but estimate-grade once you're actually running it
+on a wrist 1 Hz signal instead of a lab setup. `RELATIVE` means it only means anything
+compared to your own baseline — skin temp and SpO2 are the examples; the absolute value is
+meaningless, the *change* isn't.
 
-The confidence is calculated. Mostly it comes from coverage (did I have
-enough worn minutes?) and completeness (were the inputs I needed actually present?). If
-you wore the band four hours instead of overnight, confidence drops. If a metric needs
-three inputs and got two, it drops.
+Confidence is computed from real coverage — worn minutes, clean beats, nights of baseline
+history — never hardcoded to look reassuring.
 
 And the rule the whole package lives by: **if the input isn't there, the answer is `null`
-and the confidence is `0`.** I never fill a gap with a plausible-looking guess. A missing
-number stays missing. The moment it starts fabricating, none of the rest is trustworthy,
-so it just doesn't.
+and the confidence is `0`.** Nothing gets filled with a plausible-looking guess. A metric
+that needs 7 nights of baseline and only has 3 says so explicitly (`note:
+"need_baseline:have=3,need=7"`) instead of quietly computing something on 3 nights and
+hoping nobody notices.
 
-## What each file computes
+## What's actually in here
 
-| Function | File | What it does |
-|----------|------|--------------|
-| `calcRestingHR` | `resting.ts` | 5th percentile of heart rate across your sleep window. Falls back to your quietest 30 minutes if there's no sleep yet. |
-| `calcStrain` | `strain.ts` | Banister TRIMP over heart-rate reserve, `ratio·0.64·e^(1.92·ratio)` summed per minute, squashed onto a 0–21 scale. |
-| `calcHrZones` | `zones.ts` | Minutes spent in five zones by % of max HR. (Karvonen %HRR is more individualized in theory, but with an age-predicted max it adds no real accuracy and empties light-day zones, so %HRmax is kept deliberately.) |
-| `calcCalories` | `calories.ts` | Keytel (2005), the active-kcal-per-minute equation, summed. Different formula for men and women; averages the two if it doesn't know. |
-| `calcSleep` | `sleep.ts` | Cole-Kripke scores each epoch awake or asleep from motion, then I nudge it with the overnight HR dip. Gives onset, wake, efficiency, and a beta stage estimate. |
-| `calcSleepRegularity` | `regularity.ts` | Sleep-timing regularity, 0–100, from how much your bed and wake times wander night to night (circular variance of onset/wake clock-times). Honest scope: this is *not* the Phillips epoch-agreement Sleep Regularity Index — we don't plumb minute-level sleep/wake state across days, so we don't claim that name. |
-| `detectSessions` | `sessions.ts` | Finds workouts: sustained stretches above 40% heart-rate reserve, then classifies them roughly as cardio, strength, or a walk. |
-| `timeDomainHrv`, `freqDomainHrv` | `hrv.ts` | HRV from the beat-to-beat R-R stream: RMSSD/SDNN/pNN50 and LF/HF (Lomb–Scargle, gated to the Task Force 1996 window minimums — HF ≥~60 s, LF ≥~250 s — so short windows don't report spectral noise), plus the Baevsky stress index. |
-| `calcRecovery`, `calcHrRecovery` | `recovery.ts` | Recovery from nightly HRV — ln-RMSSD z-scored against your own baseline (Plews). Plus HRR60, the beats your heart drops in the minute after a peak. |
-| `calcLoad`, `calcFitnessTrend` | `trends.ts` | EWMA acute:chronic workload ratio (Williams 2017 — 7/28-day exponentially-weighted, fixes the rolling-average coupling), and regression slopes on resting HR and HRR for whether you're getting fitter. |
-| `calcReadinessIndex`, `calcAnomaly` | `readiness_index.ts`, `readiness.ts` | An HRV-led readiness composite: recovery blended with sleep, the nocturnal dip, and arousal (abstains until there's HRV). Plus a flag for "your resting HR has been up two days, are you getting sick?" |
-| `calcBaselines` | `baselines.ts` | Rolling 30-day medians, the anchors everything else compares against. |
-| `calcStress`, `classifyArousal` | `stress.ts` | Arousal from heart rate sitting above resting while you're not moving. If you're moving it's exercise, not stress, so it's gated out. |
-| `calcNocturnalHeart` | `nocturnal.ts` | Your sleeping HR, its low point, how far it dipped from daytime, and a flag if it's running high. |
-| `buildCoach` | `coach.ts` | A plain rules engine. Reads recovery and load, sets a strain target, ranks a handful of suggestions. No AI, just if-this-then-that with the thresholds written down. |
-| `buildNotifications` | `notify.ts` | Decides what's worth pinging you about. Capped at six, ranked by priority, each with a stable id so you don't get the same nudge twice. |
+Eight families, each its own subdirectory with its own sub-barrel, built on two shared
+foundation layers:
 
-A couple of things worth calling out so you don't go looking for them:
+- **`foundations/`** — Lipponen-Tarvainen RR artifact correction, Winsorized-EWMA rolling
+  baselines, inverse-variance fusion, a PPG signal-quality index.
+- **`clinical/`** (Tier-1) — HRV time/frequency domain (RMSSD/SDNN/pNNx, Lomb-Scargle
+  LF/HF), PRSA (deceleration/acceleration capacity), nocturnal RHR/dip, an illness-risk
+  CUSUM state machine, Plews ln-RMSSD readiness, Baevsky stress index, Banister/Edwards
+  TRIMP + CTL/ATL/TSB training load, a Poincaré irregular-rhythm screen, cosinor circadian
+  fitting, and real-time cardiac coherence for guided breathing sessions.
+- **`sleep/`** — van Hees z-angle segmentation feeding a cardiac/motion stager (the single
+  source of truth for sleep staging), AASM hypnogram metrics, cardiopulmonary coupling,
+  fractal sleep-cycle detection, circadian non-parametric indices (IS/IV/RA/L5/M10).
+- **`respiration/`** — RSA-derived respiratory rate fused with motion-modulated RIIV,
+  CVHR-based apnea screening, a relative (never absolute) oxygen-desaturation ratio.
+- **`motion/`** — ENMO/MAD activity metrics, a hybrid live/1 Hz step estimator (AN-2554
+  100 Hz pedometer preferred, a gated-and-bout-length-checked 1 Hz fallback for coverage
+  the live stream missed), energy-expenditure fusion.
+- **`workout/`** — workout detection (both explicit and automatic), heart-rate-reserve
+  zones, Keytel/Harris-Benedict calorie estimation.
+- **`wellness/`** — the canonical composite readiness score, multivariate (Mahalanobis)
+  anomaly detection, CUSUM changepoint detection, temperature-based illness flagging.
+- **`human/`** — sleep regularity index, social jetlag/chronotype, single-night event
+  detection (never names a specific cause — see below), percentile-of-you/personal
+  records, and the deterministic coaching layer.
 
-**HRV is in now** — this section used to say it never would be. WHOOP builds recovery on
-heart-rate variability, the beat-to-beat timing, and for a long time it looked like the
-band never handed that over. It turns out the R-R intervals are sitting right there in the
-1 Hz historical (V24) records; they just don't ride the live stream, so the
-[backend](https://github.com/OpenStrap/backend) re-decodes them from the raw bytes off the
-request path and feeds them in. `hrv.ts` does the time- and frequency-domain measures,
-`recovery.ts` turns nightly ln-RMSSD into a recovery z-score, and readiness is now an
-HRV-led composite. It's labelled beta because recovering the field from the bytes is
-empirical — but it's the real beat-to-beat signal, the same substrate WHOOP uses.
+## The rule that matters most: never name a cause
 
-**Max heart rate** falls back gracefully: a real measured peak from your workouts if I've
-seen one, otherwise the highest I've observed, otherwise Tanaka `208 − 0.7·age` (more
-accurate than the old `220 − age`), otherwise 190. The worse the source, the lower the
-confidence on anything that depends on it.
+Alcohol, a late meal, early illness, the luteal phase, and a hot bedroom all produce a
+nearly identical nocturnal signature — RHR up, HRV down, HR-dip blunted, skin temp up.
+So the honest move is: report the *state* confidently (an autonomically stressful night),
+and only ever offer a specific cause as a **tag-confirmable hypothesis** the user opts
+into, never an assertion. `human/event_detection.dart`'s doc comment calls this "the
+central honesty rule" for a reason — anything that guesses a cause outright is a bug, not
+a feature, however tempting a plausible-looking headline is.
 
 ## Tests
 
-It's all pure functions. No clock, no randomness, no network, no database. Same input,
-same output, every time. Which means the tests are just fixtures in and assertions out,
-no mocking anything.
-
 ```bash
-npm test          # runs every module's test block
-npm run typecheck
+dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
+
+282 tests, no mocking anything — pure functions, fixture in, assertion out.
 
 ## If you want to add a metric
 
-Write a function that takes minutes (or history) plus the baseline and profile, and
-returns a `Metric<YourThing>`. Keep it pure, no side effects. Derive the confidence from
-coverage and completeness like the others do, and return `null` with `0` confidence when
-you don't have the inputs. Put the name of the method you used in a comment so the next
-person can check your work. And if your idea needs a signal the band genuinely doesn't
-expose, it doesn't belong here, that's the line.
+Write a function that takes the 1 Hz substrate (or a derived series like an RR stream)
+plus whatever history it needs, and returns a `Metric<YourThing>`. Keep it pure. Cite the
+published method you're implementing in a doc comment so the next person can check your
+work — if nothing in the literature fits what you're computing, mark it `ESTIMATE` and say
+so honestly rather than inventing a number that looks more solid than it is. Derive
+confidence from real coverage, and return absent (`Metric.absent(...)`, never a fabricated
+fallback) when the inputs genuinely aren't there. And if your idea needs a cause it can't
+actually distinguish from three other explanations, report the state, not the cause.
