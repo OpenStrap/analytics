@@ -368,6 +368,7 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   StepCalibration? calib,
   double hrMarginBpm = 8.0,
   double minSamplesPerMinute = 30,
+  int minBoutMin = 3,
 }) {
   const inputs = ['enmo_per_min', 'hr_per_min', 'cadence_calibration'];
   if (motion.isEmpty) {
@@ -426,9 +427,11 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   // (default 110 → C0 85, the literature baseline).
   final c0 = calibrated ? (baseCadence - 25.0) : kStepC0;
 
-  var steps = 0.0;
-  var ambMin = 0;
-  final cadences = <double>[];
+  // pass 1: does each covered minute pass the per-minute gate on its own.
+  // this part already existed - the bit that was missing (despite the doc
+  // comment above claiming it existed) is pass 2 below.
+  final gateOk = List<bool>.filled(idx.length, false);
+  final minuteCadence = List<double>.filled(idx.length, 0.0);
   for (var k = 0; k < idx.length; k++) {
     final i = idx[k];
     final m = enmos[k];
@@ -436,10 +439,39 @@ Metric<DailyStepEstimate> dailyStepEstimate(
     final hr = useHr ? hrPerMin[i] : 0.0;
     if (useHr && restHr > 0 && hr > 0 && hr < hrGate) continue; // HR at rest → skip
     final hrExcess = (useHr && hr > 0) ? math.max(hr - restHr, 0.0) : 0.0;
-    final cad = clamp(c0 + kStepCm * m + kStepChr * hrExcess, 70.0, 170.0);
-    steps += cad; // one minute of this cadence
-    cadences.add(cad);
-    ambMin++;
+    gateOk[k] = true;
+    minuteCadence[k] = clamp(c0 + kStepCm * m + kStepChr * hrExcess, 70.0, 170.0);
+  }
+
+  // pass 2: only credit minutes inside a run of >= minBoutMin CONSECUTIVE
+  // gate-passing minutes - a scattered single minute here or there (a brief
+  // HR blip mid-turnover in bed, say) doesn't count on its own anymore. runs
+  // are broken by original minute index (idx[k]), not just position in the
+  // covered-minutes array, so a coverage gap can't stitch two separate
+  // stretches into one fake long bout.
+  var steps = 0.0;
+  var ambMin = 0;
+  final cadences = <double>[];
+  var k = 0;
+  while (k < idx.length) {
+    if (!gateOk[k]) {
+      k++;
+      continue;
+    }
+    var end = k;
+    while (end + 1 < idx.length &&
+        gateOk[end + 1] &&
+        idx[end + 1] == idx[end] + 1) {
+      end++;
+    }
+    if (end - k + 1 >= minBoutMin) {
+      for (var j = k; j <= end; j++) {
+        steps += minuteCadence[j];
+        cadences.add(minuteCadence[j]);
+        ambMin++;
+      }
+    }
+    k = end + 1;
   }
 
   final cadenceUsed = mean(cadences) ?? baseCadence;

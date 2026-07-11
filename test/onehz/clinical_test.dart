@@ -153,6 +153,15 @@ void main() {
     test('absent under min nights', () {
       expect(readinessLnRmssd([4.0, 4.1]).present, isFalse);
     });
+    test("rolling mean is prior nights only, doesn't include tonight's own value", () {
+      // 3 identical prior nights + a low tonight. baseline mean should be
+      // 4.0 (the prior nights), not 3.5 (which is what you get if tonight's
+      // own drop gets averaged into its own comparison baseline).
+      final hist = <double>[4.0, 4.0, 4.0, 2.0];
+      final m = readinessLnRmssd(hist);
+      expect(m.present, isTrue);
+      expect(m.value!.rolling7Mean, 4.0);
+    });
   });
 
   group('cosinor', () {
@@ -453,6 +462,17 @@ void main() {
       final absent = trimpStrain([100, 110], [0, 1], maxHr: 190, restingHr: 50);
       expect(absent.present, isFalse);
       expect(absent.confidence, 0);
+    });
+
+    test('trimpStrain is absent (not fabricated) when maxHr or restingHr is missing', () {
+      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
+      final bpm = List<double>.filled(700, 140);
+      final noMax = trimpStrain(bpm, ts, restingHr: 50);
+      expect(noMax.present, isFalse);
+      expect(noMax.confidence, 0);
+      final noResting = trimpStrain(bpm, ts, maxHr: 190);
+      expect(noResting.present, isFalse);
+      expect(noResting.confidence, 0);
     });
   });
 

@@ -65,9 +65,23 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   final today = historyLnRmssd.last;
   final n = historyLnRmssd.length;
   final start = n - windowDays < 0 ? 0 : n - windowDays;
-  final window = historyLnRmssd.sublist(start);
-  final m = mean(window)!;
-  final sd = stddev(window);
+  // this used to be historyLnRmssd.sublist(start), which runs to the END of
+  // the list - including tonight's own value in its own baseline. that
+  // pulls the mean/sd toward tonight, understating how far off a genuinely
+  // suppressed/elevated night actually is, worst right when the window is
+  // smallest (minNights). the baseline has to be strictly prior nights.
+  final priorWindow = historyLnRmssd.sublist(start, n - 1);
+  if (priorWindow.isEmpty) {
+    // only happens if minNights got set to 1 somewhere - there's no prior
+    // night to build a baseline from yet, so same as not enough history.
+    return Metric<ReadinessLnRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: needBaselineNote(have: historyLnRmssd.length, need: minNights + 1),
+    );
+  }
+  final m = mean(priorWindow)!;
+  final sd = stddev(priorWindow);
   final cv = (m != 0 && sd != null) ? (sd / m).abs() * 100 : 0.0;
   final z = (sd != null && sd > 0) ? (today - m) / sd : null;
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
@@ -92,7 +106,7 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
       meanNnTodayMs > 1100 &&
       (sd != null && sd > 0 && (today - m) / sd > 1.0);
 
-  final conf = clamp(window.length / windowDays.toDouble(), 0.3, 0.9);
+  final conf = clamp(priorWindow.length / windowDays.toDouble(), 0.3, 0.9);
   return Metric<ReadinessLnRmssd>(
     value: ReadinessLnRmssd(
       lnRmssdToday: today,
