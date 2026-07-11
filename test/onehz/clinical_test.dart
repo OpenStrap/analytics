@@ -517,4 +517,86 @@ void main() {
       expect(m.value, isNull);
     });
   });
+
+  group('cardiac coherence (McCraty & Zayas 2014)', () {
+    // Synthesize ~2.5 min of RR cleanly modulated at 5.5 breaths/min
+    // (0.0917 Hz) — the guided resonance-breathing pace this feature targets.
+    List<double> pacedRr({double amplitudeMs = 60, int nBeats = 180}) {
+      final rr = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < nBeats; i++) {
+        final v = 900 +
+            amplitudeMs * math.sin(2 * math.pi * 0.0917 * (t / 1000));
+        rr.add(v);
+        t += v;
+      }
+      return rr;
+    }
+
+    List<double> beatTimes(List<double> rr) {
+      final times = <double>[];
+      var t = 0.0;
+      for (final v in rr) {
+        t += v;
+        times.add(t);
+      }
+      return times;
+    }
+
+    test('finds the peak at the guided pace and reports a high ratio/score on a clean paced signal', () {
+      final rr = pacedRr();
+      final times = beatTimes(rr);
+      final m = cardiacCoherence(rr, times, pacedHz: 0.0917);
+      expect(m.present, isTrue);
+      expect(m.tier, Tier.estimate);
+      final v = m.value!;
+      // Peak should land within Lomb-Scargle grid resolution of 0.0917 Hz.
+      expect(v.peakHz, closeTo(0.0917, 0.01));
+      expect(v.ratio, greaterThan(1)); // a single clean oscillation dominates
+      expect(v.score, greaterThan(50));
+      expect(v.score, lessThanOrEqualTo(100));
+      expect(m.note, contains('matches guided pace'));
+    });
+
+    test('a noisy, unpaced tachogram yields a lower ratio/score than the clean paced one', () {
+      final rng = math.Random(7);
+      final noisyRr = <double>[
+        for (var i = 0; i < 180; i++) 900 + (rng.nextDouble() - 0.5) * 200,
+      ];
+      final noisyTimes = beatTimes(noisyRr);
+      final noisy = cardiacCoherence(noisyRr, noisyTimes, pacedHz: 0.0917);
+
+      final cleanRr = pacedRr();
+      final cleanTimes = beatTimes(cleanRr);
+      final clean = cardiacCoherence(cleanRr, cleanTimes, pacedHz: 0.0917);
+
+      expect(noisy.present, isTrue);
+      expect(clean.present, isTrue);
+      expect(noisy.value!.ratio, lessThan(clean.value!.ratio));
+      expect(noisy.value!.score, lessThan(clean.value!.score));
+    });
+
+    test('absent on too few beats', () {
+      final rr = pacedRr(nBeats: 10);
+      final m = cardiacCoherence(rr, beatTimes(rr));
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+    });
+
+    test('absent on a span under 30s even with enough beats', () {
+      // 25 beats at ~1s each ≈ 25s span — plenty of beats, too short a window.
+      final rr = <double>[for (var i = 0; i < 25; i++) 1000.0];
+      final m = cardiacCoherence(rr, beatTimes(rr));
+      expect(m.present, isFalse);
+      expect(m.note, contains('too short'));
+    });
+
+    test('never fabricates: absent stays absent regardless of pacedHz', () {
+      final m = cardiacCoherence(<double>[800], <double>[800], pacedHz: 0.0917);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+    });
+  });
 }
