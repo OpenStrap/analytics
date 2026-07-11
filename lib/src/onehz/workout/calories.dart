@@ -165,13 +165,23 @@ class Calories {
   /// matching the edge pipeline): minutes below it burn BMR only, so a quiet day
   /// reads ≈ basal and Keytel's low-HR over-estimate can't inflate "active".
   /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
-  static ({double total, double active, double basal}) dailyEnergy(
+  static ({double total, double active, double basal, bool usedDefaultProfile})
+      dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     double? hrmax,
     double activeFraction = 0.50,
     int dayMinutes = 1440,
   }) {
+    // the 220-age hrmax fallback used to just silently apply with nothing
+    // telling the caller it wasnt a real anchor. usedDefaultProfile lets the
+    // UI caveat the number instead of showing it as if it were solid.
+    // (note: this can only catch hrmax - WorkoutUserProfile's own
+    // constructor already defaults weight/height/age to 70/170/30, so by
+    // the time a profile object gets here there's no way left to tell "the
+    // caller passed 70kg" from "nobody set a weight so it's 70kg". if that
+    // ever needs catching too, WorkoutUserProfile's fields need to become
+    // nullable at the source - bigger change, not doing it here.)
     final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
     final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
     final age = profile.age > 0 ? profile.age : 30.0;
@@ -191,7 +201,12 @@ class Calories {
       if (surplus > 0) active += surplus;
     }
     final basal = basalPerMin * dayMinutes;
-    return (total: basal + active, active: active, basal: basal);
+    return (
+      total: basal + active,
+      active: active,
+      basal: basal,
+      usedDefaultProfile: hrmax == null,
+    );
   }
 
   /// Estimate (kcal, kJ) for a workout bout. Each sample is weighted by the
@@ -199,8 +214,10 @@ class Calories {
   /// so a sparse stream is counted over real seconds.
   ///
   /// [hrTsSec]/[hrBpm] are the bout's HR samples (timestamps in SECONDS, same
-  /// length). [hrmax]/[restingHr] anchors (null → 220 / 60 fallback).
-  static (double kcal, double kj) estimateBoutCalories(
+  /// length). [hrmax]/[restingHr] anchors (null → 220 / 60 fallback, flagged
+  /// via [usedDefaultAnchors] on the result so a fabricated-anchor calorie
+  /// number can be caveated instead of shown as if it were real).
+  static ({double kcal, double kj, bool usedDefaultAnchors}) estimateBoutCalories(
     List<int> hrTsSec,
     List<double> hrBpm, {
     required WorkoutUserProfile profile,
@@ -213,6 +230,11 @@ class Calories {
     final age = profile.age > 0 ? profile.age : 30.0;
     final coeffs = resolveCoeffs(profile.sex);
 
+    // same caveat as dailyEnergy's usedDefaultProfile: this only catches
+    // hrmax/restingHr, not weight/height/age (WorkoutUserProfile bakes
+    // 70/170/30 in at construction, so there's nothing left here to tell
+    // "given" from "defaulted" on those three).
+    final usedDefaultAnchors = hrmax == null || restingHr == null;
     final effHRmax = hrmax ?? 220.0;
     final effResting = restingHr ?? 60.0;
     final activeThreshold =
@@ -243,6 +265,10 @@ class Calories {
             activeKcalPerS(coeffs, b, effHRmax, weightKg, age) * dur;
       }
     }
-    return (totalKcal, totalKcal * 4.184);
+    return (
+      kcal: totalKcal,
+      kj: totalKcal * 4.184,
+      usedDefaultAnchors: usedDefaultAnchors,
+    );
   }
 }

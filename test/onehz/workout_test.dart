@@ -301,30 +301,32 @@ void main() {
       // 10 min @ 150 bpm, 1 Hz.
       final ts = [for (var t = 0; t < 600; t++) t];
       final bpm = [for (var t = 0; t < 600; t++) 150.0];
-      final (mKcal, mKj) = Calories.estimateBoutCalories(ts, bpm,
+      final m = Calories.estimateBoutCalories(ts, bpm,
           profile: const WorkoutUserProfile(
               weightKg: 80, heightCm: 180, age: 30, sex: 'male'),
           hrmax: 190,
           restingHr: 60);
-      final (fKcal, _) = Calories.estimateBoutCalories(ts, bpm,
+      final f = Calories.estimateBoutCalories(ts, bpm,
           profile: const WorkoutUserProfile(
               weightKg: 80, heightCm: 180, age: 30, sex: 'female'),
           hrmax: 190,
           restingHr: 60);
-      expect(mKcal, greaterThan(0));
-      expect(fKcal, greaterThan(0));
-      expect(mKcal, isNot(closeTo(fKcal, 0.01))); // sex coeffs differ
-      expect(mKj, closeTo(mKcal * 4.184, 1e-6));
+      expect(m.kcal, greaterThan(0));
+      expect(f.kcal, greaterThan(0));
+      expect(m.kcal, isNot(closeTo(f.kcal, 0.01))); // sex coeffs differ
+      expect(m.kj, closeTo(m.kcal * 4.184, 1e-6));
+      expect(m.usedDefaultAnchors, isFalse); // real profile + real anchors given
     });
 
     test('resting samples use the BMR floor, not active rate', () {
       // 5 min @ 65 bpm → below active threshold (60 + 0.30*(190-60)=99) → resting.
       final ts = [for (var t = 0; t < 300; t++) t];
       final bpm = [for (var t = 0; t < 300; t++) 65.0];
-      final (kcal, _) = Calories.estimateBoutCalories(ts, bpm,
+      final r = Calories.estimateBoutCalories(ts, bpm,
           profile: const WorkoutUserProfile(sex: 'male'),
           hrmax: 190,
           restingHr: 60);
+      final kcal = r.kcal;
       // ~5 min of resting BMR — small but positive.
       expect(kcal, greaterThan(0));
       expect(kcal, lessThan(10)); // resting-only over 5 min is tiny (~5–6 kcal)
