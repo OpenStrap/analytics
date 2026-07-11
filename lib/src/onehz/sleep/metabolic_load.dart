@@ -77,7 +77,7 @@ class MetabolicLoadAnalyzer {
     
     double elevatedSum = 0;
     int count = 0;
-    for(int i = 0; i < dropIndex; i++) {
+    for (int i = 0; i < dropIndex; i++) {
       if (sleepHr[i] > 0) {
         elevatedSum += sleepHr[i];
         count++;
