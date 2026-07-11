@@ -17,20 +17,26 @@ class MetabolicLoadAnalyzer {
   /// A healthy sleep HR drops into a hammock shape within the first 60-90 minutes.
   /// A metabolic load HR stays flat and elevated, suddenly crashing late in the night.
   static MetabolicLoadResult analyze(List<double> sleepHr, {int sampleRateSec = 60}) {
-    if (sleepHr.isEmpty || sleepHr.length < 120) {
-      return MetabolicLoadResult(
-          hasLateMealSignature: false,
-          lateDropMinute: 0,
-          elevatedHrAverage: 0,
-          baselineHr: 0);
+    final empty = MetabolicLoadResult(
+      hasLateMealSignature: false,
+      lateDropMinute: 0,
+      elevatedHrAverage: 0,
+      baselineHr: 0,
+    );
+
+    if (sleepHr.isEmpty) return empty;
+
+    // Require an integer number of samples per minute (and avoid divide-by-zero).
+    if (sampleRateSec <= 0 || sampleRateSec > 60 || 60 % sampleRateSec != 0) {
+      return empty;
     }
-    
-    // Convert sample rate to minutes
+
     final samplesPerMin = 60 ~/ sampleRateSec;
+    if (sleepHr.length < 120 * samplesPerMin) return empty;
+
     final firstFourHoursSamples = 240 * samplesPerMin;
-    final analysisLength = sleepHr.length < firstFourHoursSamples 
-        ? sleepHr.length 
-        : firstFourHoursSamples;
+    final analysisLength =
+        sleepHr.length < firstFourHoursSamples ? sleepHr.length : firstFourHoursSamples;
 
     double minHr = double.infinity;
     double maxHr = 0;
