@@ -4,7 +4,7 @@ class MetabolicLoadResult {
   final double elevatedHrAverage;
   final double baselineHr;
 
-  MetabolicLoadResult({
+  const MetabolicLoadResult({
     required this.hasLateMealSignature,
     required this.lateDropMinute,
     required this.elevatedHrAverage,
