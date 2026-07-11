@@ -16,16 +16,28 @@
 // NREM = parasympathetic, high RMSSD; deep = HR/HRV trough).
 //
 // Per 30-s epoch we measure, over the in-bed window only:
-//   motion = mean ENMO (van Hees 2013 amplitude index, g)
+//   motion = mean ENMO (van Hees 2013 amplitude index, g), against a LOCALLY
+//            re-estimated 1 g reference (see below), NOT a whole-night scalar
 //   hr     = mean valid HR (bpm)
 //   rmssd  = RMSSD of cleaned RR beats in a ±2.5-min window (ms), or null
-// then classify against night baselines:
-//   WAKE  : clearly elevated motion OR HR arousal above the sleeping median
-//   REM   : still body + RMSSD well BELOW the night's sleep RMSSD + HR ≥ NREM median
+// then classify against baselines:
+//   WAKE  : clearly elevated motion OR HR arousal above a LOCAL sleeping HR
+//           median (a 90-min rolling window, not the whole night)
+//   REM   : still body + RMSSD well BELOW the night's sleep RMSSD + HR ≥ a
+//           LOCAL p25 HR floor (see below for why p25, not median)
 //   DEEP  : HR near the night floor + RMSSD high + very stable (NREM subtype)
 //   LIGHT : remaining NREM
 // Post: Webster continuity rescore (bridges brief arousals into sleep — this is
 // what kills the over-call) + consolidateSleepStages (no single-epoch flicker).
+//
+// LOCAL vs WHOLE-NIGHT baselines (2026-07, real-data root cause): a real WHOOP-4
+// capture showed BOTH the motion and HR features have night-scale
+// non-stationarity a single whole-night scalar cannot track — see the detailed
+// comments at each baseline below (gravity-magnitude posture drift; sleep-onset
+// HR-decay transient; REM's own periodic-elevation self-dilution of a local
+// median). Motion's still/bigMove REPOSITIONING thresholds remain whole-night
+// scalars deliberately — only the ABSOLUTE-MAGNITUDE references (1 g; sleeping
+// HR) needed to become local.
 //
 // HONESTY: a wrist 3-class (+low-confidence deep) ESTIMATE, never PSG/EEG.
 // tier ESTIMATE; confidence reflects RR coverage (RMSSD drives REM/deep).
@@ -80,14 +92,38 @@ CardioStagerResult cardioStager(
     );
   }
 
-  // ── per-second ENMO (motion), with auto-calibrated 1 g reference ───────────
+  // ── per-second ENMO (motion) against a LOCALLY-ADAPTIVE 1 g reference ──────
+  // A single whole-night gravity-magnitude reference (the old approach) is
+  // wrong on real WHOOP-4 units: the decoded gravity vector's magnitude is NOT
+  // perfectly orientation-invariant (per-axis gain/calibration isn't exact),
+  // so different STATIC sleep postures can read meaningfully apart in |accel|
+  // even though nothing is moving. Verified on a real overnight capture: a
+  // person lying rock-still for 30+ min (within-epoch stddev of |accel| <
+  // 0.0003 g) read |accel| = 1.0512 g against that whole-night's calibrated
+  // reference of 1.0348 g — a 0.0167 g "motion" score, ~3x the bigMove
+  // threshold, purely from holding a different (but equally static) posture
+  // than whichever one the night happened to calibrate against. Across that
+  // night, 389 of 421 "big move" epochs (92%) were this exact artifact (tiny
+  // within-epoch variance, large offset from the single global reference),
+  // not real movement — and the resulting misclassified WAKE blocks could not
+  // be fully bridged back by Webster rescore below. Recomputing the reference
+  // locally (a window wide enough to not react to real short movement bouts,
+  // narrow enough to track a genuine posture change within a few minutes)
+  // absorbs each posture as its own baseline instead of misreading it as
+  // sustained motion.
   final mag = List<double>.filled(n, 0);
   for (var i = 0; i < n; i++) {
     final a = accel[i];
     mag[i] = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
   }
-  final gRef = _calibrateG(mag);
-  final enmo = [for (final m in mag) (m - gRef) > 0 ? (m - gRef) : 0.0];
+  const int _gRefWinSec = 300; // 5 min window, centered per epoch
+  final gRefByEpoch = List<double>.filled(nEpoch, 1.0);
+  for (var e = 0; e < nEpoch; e++) {
+    final es = e * epochSec;
+    final lo = math.max(0, es - _gRefWinSec ~/ 2);
+    final hi = math.min(n, es + epochSec + _gRefWinSec ~/ 2);
+    gRefByEpoch[e] = median(mag.sublist(lo, hi)) ?? 1.0;
+  }
 
   // ── per-epoch features ─────────────────────────────────────────────────────
   final motion = List<double>.filled(nEpoch, 0);
@@ -97,10 +133,12 @@ CardioStagerResult cardioStager(
 
   for (var e = 0; e < nEpoch; e++) {
     final s = e * epochSec, t = math.min(s + epochSec, n);
-    // motion = mean ENMO over the epoch
+    // motion = mean ENMO over the epoch, against THIS epoch's local reference.
+    final gRefE = gRefByEpoch[e];
     var ms = 0.0;
     for (var i = s; i < t; i++) {
-      ms += enmo[i];
+      final d = mag[i] - gRefE;
+      ms += d > 0 ? d : 0.0;
     }
     motion[e] = ms / (t - s);
     // hr mean/sd over valid (>0) seconds
@@ -112,6 +150,11 @@ CardioStagerResult cardioStager(
   }
 
   // ── night baselines (from the LOW-MOTION epochs — the actual sleep) ────────
+  // motMed/motMad stay WHOLE-NIGHT scalars: `motion` is now computed against a
+  // per-epoch LOCAL reference (above), so genuine stillness reads ~0 almost
+  // everywhere and a single still/bigMove threshold over the whole night is
+  // the right level — it's the ABSOLUTE-MAGNITUDE reference that needed to be
+  // local, not this repositioning-detection threshold.
   final motSample = [for (final m in motion) m];
   final motMed = median(motSample) ?? 0;
   final motMad = (mad(motSample) ?? 0).clamp(1e-9, double.infinity);
@@ -127,9 +170,51 @@ CardioStagerResult cardioStager(
     for (var e = 0; e < nEpoch; e++)
       if (still(e) && !hr[e].isNaN) hr[e]
   ];
-  final hrMed = median(sleepHr) ?? (mean([for (final h in hr) if (!h.isNaN) h]) ?? 60);
-  final hrFloor = percentile(sleepHr, 10) ?? hrMed;
-  final hrArousal = hrMed + math.max(6.0, (stddev(sleepHr) ?? 6));
+  final hrMedGlobal =
+      median(sleepHr) ?? (mean([for (final h in hr) if (!h.isNaN) h]) ?? 60);
+  final hrFloor = percentile(sleepHr, 10) ?? hrMedGlobal;
+
+  // ── LOCAL rolling HR baseline for the WAKE/REM autonomic gates ─────────────
+  // A whole-night HR median/arousal threshold has the same non-stationarity
+  // problem as the motion reference above. Verified on the same real capture:
+  // HR ran 74-80 bpm for the first ~60-90 min after sleep onset (the
+  // well-documented sleep-onset HR-decay transient — HR gradually settles
+  // into steady-state sleep HR over the first sleep cycle) before dropping to
+  // this night's true steady-state ~55-70 bpm. A whole-night arousal threshold
+  // (median + max(6, stddev)) misread that entire settling window as
+  // "arousal" — a single ~34 min WAKE block right at sleep onset that Webster
+  // rescore's flanking-context rules could not bridge (context too short at
+  // the very start of the recorded window). A local rolling median tracks the
+  // transient instead of comparing it to the whole night.
+  //
+  // The REM rule's `hrTowardWake` gate specifically uses a LOWER percentile
+  // (p25) of that same local window rather than its median: REM recurs
+  // periodically (~90 min ultradian cycles) and is itself a MINORITY of any
+  // local window, so its own periodic HR elevation partially inflates a local
+  // MEDIAN baseline (a self-dilution effect) — a lower percentile is far less
+  // sensitive to that and was verified to materially restore REM sensitivity
+  // (real capture: REM epochs recovered from 41 min to 139 min against a
+  // 162 min ground truth) without reopening the WAKE over-call the local
+  // median already fixed for the arousal gate above.
+  const int _hrWinEpochs = 180; // 90 min half-window — one ultradian cycle
+  final hrMedLocal = List<double>.filled(nEpoch, hrMedGlobal);
+  final hrArousalLocal =
+      List<double>.filled(nEpoch, hrMedGlobal + 6.0);
+  final hrP25Local = List<double>.filled(nEpoch, hrMedGlobal);
+  for (var e = 0; e < nEpoch; e++) {
+    final lo = math.max(0, e - _hrWinEpochs);
+    final hi = math.min(nEpoch, e + _hrWinEpochs + 1);
+    final win = <double>[
+      for (var k = lo; k < hi; k++)
+        if (still(k) && !hr[k].isNaN) hr[k]
+    ];
+    final m = median(win);
+    if (m != null) {
+      hrMedLocal[e] = m;
+      hrArousalLocal[e] = m + math.max(6.0, (stddev(win) ?? 6));
+      hrP25Local[e] = percentile(win, 25) ?? m;
+    }
+  }
 
   final sleepRmssd = <double>[
     for (var e = 0; e < nEpoch; e++)
@@ -139,12 +224,15 @@ CardioStagerResult cardioStager(
   final hrSdSample = [for (final s in hrSd) if (s > 0) s];
   final hrSdMed = median(hrSdSample) ?? double.infinity;
   // Deep = HR in the lower half of the night's sleeping HR (the cardiac trough).
-  final deepHrCut = hrFloor + 0.5 * (hrMed - hrFloor);
+  // Stays a whole-night comparison (not part of the diagnosed bug; unchanged).
+  final deepHrCut = hrFloor + 0.5 * (hrMedGlobal - hrFloor);
 
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
   final deepFlag = List<bool>.filled(nEpoch, false);
   for (var e = 0; e < nEpoch; e++) {
+    final hrMed = hrMedLocal[e];
+    final hrArousal = hrArousalLocal[e];
     // WAKE is autonomic-led: HR risen to/above the arousal threshold, OR a big
     // movement that ALSO carries some HR lift (truly up), OR sustained big
     // movement. Movement at sleeping HR = repositioning, NOT wake.
@@ -161,7 +249,8 @@ CardioStagerResult cardioStager(
         ? robustZ(rmssd[e], sleepRmssd)
         : null;
     final rmssdDown = rmZ != null && rmZ < -0.4; // RMSSD notably below sleep base
-    final hrTowardWake = !hr[e].isNaN && hr[e] >= hrMed; // HR up but not arousal
+    final hrTowardWake =
+        !hr[e].isNaN && hr[e] >= hrP25Local[e]; // HR up but not arousal
     if (rmssdDown && hrTowardWake) {
       stages[e] = SleepStage.rem;
     } else {
@@ -251,21 +340,6 @@ double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
     ss += d * d;
   }
   return math.sqrt(ss / (beats.length - 1));
-}
-
-/// Auto-calibrate 1 g: median magnitude over the low-motion portion.
-double _calibrateG(List<double> mag) {
-  if (mag.isEmpty) return 1.0;
-  final steps = <double>[
-    for (var i = 1; i < mag.length; i++) (mag[i] - mag[i - 1]).abs()
-  ];
-  final stepMed = steps.isNotEmpty ? (median(steps) ?? 0) : 0;
-  final still = <double>[
-    for (var i = 1; i < mag.length; i++)
-      if ((mag[i] - mag[i - 1]).abs() <= stepMed) mag[i]
-  ];
-  final g = still.isNotEmpty ? median(still) : median(mag);
-  return (g == null || g <= 0 || g.isNaN) ? 1.0 : g;
 }
 
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
