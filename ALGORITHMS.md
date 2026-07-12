@@ -1,9 +1,13 @@
 # OpenStrap Analytics — Algorithms
 
-Every metric in this package is a **published, peer-reviewed method** computed by a
-**pure deterministic function** operating on the 1 Hz substrate a WHOOP 4.0 actually
-exposes: beat-to-beat RR (pulse-derived — this is **PRV, not ECG-HRV**), 1 Hz heart rate,
-1 Hz tri-axial accel, and relative-only ADC channels (skin temp, SpO2, ambient light).
+Every metric here is a **published, peer-reviewed method**, computed by a **pure
+deterministic function**, running on the 1 Hz substrate a WHOOP 4.0 actually exposes:
+beat-to-beat RR (pulse-derived — this is **PRV, not ECG-HRV**, and that distinction
+matters more than it sounds like it should), 1 Hz heart rate, 1 Hz tri-axial accel, and
+relative-only ADC channels (skin temp, SpO2, ambient light).
+
+This file is the index — what's implemented, where it lives, and who published it. If a
+row here doesn't have a real citation next to it, that's a bug in this file, go fix it.
 
 Almost everything returns a `Metric<T>` envelope:
 
@@ -127,16 +131,16 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 
 ---
 
-## What we deliberately do **not** do
-- **No absolute SpO2/skin-temp** — raw relative ADC counts only, ever (`RELATIVE` tier).
-- **No cause-naming** — a signature ambiguous between alcohol/late meal/illness/luteal
+## What this deliberately doesn't do
+- No absolute SpO2/skin-temp — raw relative ADC counts only, ever (`RELATIVE` tier).
+- No cause-naming — a signature ambiguous between alcohol/late meal/illness/luteal
   phase/hot room reports the *state*, never asserts which one it is.
-- **Irregular-rhythm is a screen, not a diagnosis** — no ECG here; conservative
-  thresholds, explicit non-medical framing.
-- **VO2max/physiological-age are clearly `ESTIMATE`** — HR-ratio-style approximations,
-  never presented as a measured/lab value.
-- **No fabricated values, ever** — any metric without enough real data returns `null` +
-  confidence `0`, with a machine-readable note explaining exactly what's missing.
+- Irregular-rhythm is a screen, not a diagnosis — no ECG here, conservative thresholds,
+  explicit non-medical framing.
+- VO2max/physiological-age stay `ESTIMATE` — HR-ratio-style approximations, never
+  presented as something a lab measured.
+- No fabricated values. Ever. A metric without enough real data returns `null` +
+  confidence `0`, with a machine-readable note saying exactly what's missing.
 
 ## References (non-exhaustive — see each file's own doc comment for the specific citation)
 Lipponen & Tarvainen 2019 · Laguna, Moody & Mark 1998 · Bigger 1992 · Bauer et al. 2006 ·
