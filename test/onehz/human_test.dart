@@ -207,6 +207,9 @@ void main() {
         rmssdHistory: [60, 61],
       );
       expect(m.present, isFalse);
+      // used to be a plain sentence, not the machine-readable format every
+      // other baseline-gated metric in this package uses.
+      expect(m.note, 'need_baseline:have=2,need=7');
     });
   });
 

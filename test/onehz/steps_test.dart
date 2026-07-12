@@ -230,13 +230,41 @@ void main() {
       expect(m.value!.ambulatoryMinutes, greaterThan(20));
     });
 
-    test('a brief movement minute contributes only a little', () {
+    test('an isolated elevated minute does not count on its own (bout gate)', () {
       final e = List<double>.filled(60, 0.006);
-      e[30] = 0.20; // one elevated minute
+      e[30] = 0.20; // one elevated minute, surrounded by sedentary ones
       final m = dailyStepEstimate(rows(e), calib: cal);
-      // It counts (a brief walk is real), but a single minute can't be large.
-      expect(m.value!.ambulatoryMinutes, 1);
-      expect(m.value!.steps, lessThan(200));
+      // a single minute alone isn't a real walk (a brief HR/movement blip
+      // shouldn't turn into phantom steps) - needs minBoutMin=3 in a row.
+      expect(m.value!.ambulatoryMinutes, 0);
+      expect(m.value!.steps, 0);
+    });
+
+    test('exactly at the bout boundary: 3 in a row counts, 2 does not', () {
+      final e2 = List<double>.filled(60, 0.006);
+      e2[30] = 0.20;
+      e2[31] = 0.20;
+      final justTwo = dailyStepEstimate(rows(e2), calib: cal);
+      expect(justTwo.value!.ambulatoryMinutes, 0);
+
+      final e3 = List<double>.filled(60, 0.006);
+      e3[30] = 0.20;
+      e3[31] = 0.20;
+      e3[32] = 0.20;
+      final justThree = dailyStepEstimate(rows(e3), calib: cal);
+      expect(justThree.value!.ambulatoryMinutes, 3);
+    });
+
+    test('a coverage gap breaks the run instead of stitching two short bouts together', () {
+      // 2 elevated minutes, a sedentary gap, then 2 more elevated minutes -
+      // 4 elevated minutes total but never 3 in a row, so none of it counts.
+      final e = List<double>.filled(60, 0.006);
+      e[10] = 0.20;
+      e[11] = 0.20;
+      e[20] = 0.20;
+      e[21] = 0.20;
+      final m = dailyStepEstimate(rows(e), calib: cal);
+      expect(m.value!.ambulatoryMinutes, 0);
     });
 
     test('a higher personal cadence lifts the count', () {
@@ -273,7 +301,18 @@ void main() {
       expect(e.basal, closeTo(1780.0, 1.0));
       expect(e.active, closeTo(0.0, 60.0)); // tiny if any
       expect(e.total, greaterThanOrEqualTo(e.basal));
+      // no hrmax passed, so this ran on the fallback anchor - flagged.
+      expect(e.usedDefaultHrmax, isTrue);
     });
+
+    test('usedDefaultHrmax is false once a real profile + hrmax are both given', () {
+      final profile = const WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      final hr = List<double>.filled(1440, 70.0);
+      final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
+      expect(e.usedDefaultHrmax, isFalse);
+    });
+
 
     test('an exercise block adds active calories on top of basal', () {
       final profile = const WorkoutUserProfile(

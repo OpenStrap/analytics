@@ -341,11 +341,24 @@ Metric<double> trimpStrain(
   List<double> bpm,
   List<double> tsSec, {
   double? maxHr,
-  double restingHr = StrainScorer.defaultRestingHR,
+  double? restingHr,
   String method = 'edwards',
   Sex sex = Sex.male,
 }) {
   const inputs = ['hr_series', 'resting_hr', 'max_hr'];
+  // used to fall back to StrainScorer.defaultRestingHR/defaultMaxHR when
+  // these were omitted, which fed a made-up anchor into a confident-looking
+  // ESTIMATE score with nothing telling anyone it wasn't a real anchor. those
+  // defaults are for AutoWorkoutDetector's internal gate, not for this public
+  // honesty-wrapped function - if we don't actually have the person's real
+  // anchors, we don't have a real number either.
+  if (maxHr == null || restingHr == null) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'needs a real maxHr and restingHr, not fabricated defaults',
+    );
+  }
   final s = StrainScorer.strain(
     bpm,
     tsSec,

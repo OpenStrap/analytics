@@ -372,7 +372,7 @@ class WorkoutDetector {
       double? kcal, kj;
       if (profile != null) {
         final winBpmInt = [for (final b in winBpm) b];
-        (kcal, kj) = Calories.estimateBoutCalories(
+        final cal = Calories.estimateBoutCalories(
           winTs,
           winBpmInt,
           profile: profile,
@@ -380,6 +380,8 @@ class WorkoutDetector {
           restingHr: restHR,
           mergeGapCapS: mergeGapS,
         );
+        kcal = cal.kcal;
+        kj = cal.kj;
       }
 
       final avg = winBpm.reduce((a, b) => a + b) / winBpm.length;

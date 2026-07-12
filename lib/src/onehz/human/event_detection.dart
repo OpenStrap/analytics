@@ -91,10 +91,18 @@ Metric<EventState> alcoholNightFlag(
 }) {
   final inputs = <String>['rhr_nightly', 'rmssd_nightly'];
   if (rhrHistory.length < minNights || rmssdHistory.length < minNights) {
+    // was a plain human-readable string before - every other baseline-gated
+    // metric in this package uses the need_baseline:have=H,need=N format so
+    // the edge side can parse it into "N-H more nights", this one just didn't.
     return Metric<EventState>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'need ≥$minNights baseline nights for a personal signature',
+      note: needBaselineNote(
+        have: rhrHistory.length < rmssdHistory.length
+            ? rhrHistory.length
+            : rmssdHistory.length,
+        need: minNights,
+      ),
     );
   }
   final rhrBase = robustBaseline(rhrHistory, minValid: minNights);
