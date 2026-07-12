@@ -302,15 +302,15 @@ void main() {
       expect(e.active, closeTo(0.0, 60.0)); // tiny if any
       expect(e.total, greaterThanOrEqualTo(e.basal));
       // no hrmax passed, so this ran on the fallback anchor - flagged.
-      expect(e.usedDefaultProfile, isTrue);
+      expect(e.usedDefaultHrmax, isTrue);
     });
 
-    test('usedDefaultProfile is false once a real profile + hrmax are both given', () {
+    test('usedDefaultHrmax is false once a real profile + hrmax are both given', () {
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       final hr = List<double>.filled(1440, 70.0);
       final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
-      expect(e.usedDefaultProfile, isFalse);
+      expect(e.usedDefaultHrmax, isFalse);
     });
 
 

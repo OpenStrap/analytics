@@ -165,7 +165,7 @@ class Calories {
   /// matching the edge pipeline): minutes below it burn BMR only, so a quiet day
   /// reads ≈ basal and Keytel's low-HR over-estimate can't inflate "active".
   /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
-  static ({double total, double active, double basal, bool usedDefaultProfile})
+  static ({double total, double active, double basal, bool usedDefaultHrmax})
       dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
@@ -174,7 +174,7 @@ class Calories {
     int dayMinutes = 1440,
   }) {
     // the 220-age hrmax fallback used to just silently apply with nothing
-    // telling the caller it wasnt a real anchor. usedDefaultProfile lets the
+    // telling the caller it wasnt a real anchor. usedDefaultHrmax lets the
     // UI caveat the number instead of showing it as if it were solid.
     // (note: this can only catch hrmax - WorkoutUserProfile's own
     // constructor already defaults weight/height/age to 70/170/30, so by
@@ -205,7 +205,7 @@ class Calories {
       total: basal + active,
       active: active,
       basal: basal,
-      usedDefaultProfile: hrmax == null,
+      usedDefaultHrmax: hrmax == null,
     );
   }
 
@@ -230,7 +230,7 @@ class Calories {
     final age = profile.age > 0 ? profile.age : 30.0;
     final coeffs = resolveCoeffs(profile.sex);
 
-    // same caveat as dailyEnergy's usedDefaultProfile: this only catches
+    // same caveat as dailyEnergy's usedDefaultHrmax: this only catches
     // hrmax/restingHr, not weight/height/age (WorkoutUserProfile bakes
     // 70/170/30 in at construction, so there's nothing left here to tell
     // "given" from "defaulted" on those three).
