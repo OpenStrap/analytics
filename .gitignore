@@ -4,3 +4,5 @@ pubspec.lock
 # flutter/dart test scratch dir
 build/
 .DS_Store
+# legacy ts/ tooling scratch, dont want another node_modules commit
+node_modules/
