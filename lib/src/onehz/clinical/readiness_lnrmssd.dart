@@ -64,7 +64,7 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   }
   final today = historyLnRmssd.last;
   final n = historyLnRmssd.length;
-  final start = n - windowDays < 0 ? 0 : n - windowDays;
+  final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
   // this used to be historyLnRmssd.sublist(start), which runs to the END of
   // the list - including tonight's own value in its own baseline. that
   // pulls the mean/sd toward tonight, understating how far off a genuinely
