@@ -59,9 +59,189 @@ class CardioStagerResult {
 
 const int _epochSec = 30;
 
+/// Robust-z cutoffs for the SECONDARY REM axes (LF/HF elevation, R(k) burst).
+/// Deliberately STRICT (4.0 robust-SD): the RMSSD drop is the PRIMARY REM
+/// detector; LF/HF and R(k) only ADD REM where a strong, unambiguous autonomic
+/// shift the RMSSD rule missed exists, so the OR-combination recovers
+/// under-called REM without stealing normal light sleep. Calibrated on the real
+/// 2026-07 overnight fixture (Apple-Watch GT: wake 3 / light 330 / deep 38 /
+/// REM 162 min). RMSSD-only under-called REM at 134 min; a threshold sweep
+/// showed z=2.5→204, 3.0→191, 3.5→182, 4.0→172 min REM. 4.0 lands closest to GT
+/// (REM 172, light 304) while still adding +38 min of strong-signature REM over
+/// RMSSD-only — a conservative, bounded sensitivity gain for the nights the
+/// RMSSD rule under-calls (the motivating case: 64 min REM vs a ~115 signature),
+/// erring toward specificity so the axes never re-open a Wake/REM over-call.
+const double _remLfhfZ = 4.0;
+const double _remRkZ = 4.0;
+
 /// Physiologic RR gate (project rule): keep 300–2000 ms; drop successive jumps
 /// > 200 ms (ectopy / artifact). Used per-window before RMSSD.
 const double _rrMin = 300, _rrMax = 2000, _rrMaxStep = 200;
+
+/// PER-USER rolling sleep profile — the "gets better over time" personalization.
+///
+/// The generic-ML experiment lost badly to this stager's PER-NIGHT LOCAL
+/// baselines (a DREAMT-trained model over-called Wake by 100+ min and read
+/// ~0 Deep on 3 real nights — between-person variance kills generic models).
+/// So the direction is MORE personalization, not less: persist the SLEEPER'S
+/// OWN typical sleep signatures across nights and blend them (bounded, never
+/// dominant) with tonight's per-night-local baselines.
+///
+/// Storage: edge `baselines` table, key `sleep_user_profile`, one JSON payload,
+/// folded via EWMA (~14-night horizon) after each finalized night. Blend weight
+/// grows from 0 (cold start) to a hard 0.5 cap as nights accumulate
+/// ([personalWeight]) — a single stored profile can NEVER outvote tonight's own
+/// signal, preserving the per-night-local behavior that won the head-to-head.
+///
+/// All fields nullable: absent ⇒ no personalization on that axis (honesty
+/// contract — never fabricate a baseline we don't have).
+class SleepUserProfile {
+  final int nights; // finalized nights folded so far (drives [personalWeight])
+  final double? hrFloorP5; // sleeping-HR 5th pct (bpm) — deep-sleep floor
+  final double? hrFloorP25; // sleeping-HR 25th pct (bpm) — REM HR gate
+  final double? hrSleepMedian; // sleeping-HR median (bpm)
+  final double? hrArousal; // typical arousal/wake HR threshold (bpm)
+  final double? rmssdMed; // sleeping RMSSD median (ms)
+  final double? rmssdMad; // sleeping RMSSD MAD (ms)
+  final double? enmoStillCut; // still/repositioning ENMO cut (g)
+  final double? enmoMoveCut; // big-move ENMO cut (g)
+  final double? lfhfMed; // sleeping LF/HF median
+  final double? rkMed; // sleeping |ΔIHR| median (bpm)
+  final int updatedAtMs;
+
+  const SleepUserProfile({
+    this.nights = 0,
+    this.hrFloorP5,
+    this.hrFloorP25,
+    this.hrSleepMedian,
+    this.hrArousal,
+    this.rmssdMed,
+    this.rmssdMad,
+    this.enmoStillCut,
+    this.enmoMoveCut,
+    this.lfhfMed,
+    this.rkMed,
+    this.updatedAtMs = 0,
+  });
+
+  /// Personal-vs-local blend weight: 0 at cold start → 0.5 hard cap at ≥14
+  /// nights (so per-night-local always holds ≥50% of every threshold).
+  double get personalWeight => clamp(nights / 28.0, 0.0, 0.5);
+
+  static double? _d(dynamic v) => (v is num) ? v.toDouble() : null;
+
+  factory SleepUserProfile.fromJson(Map<String, dynamic> j) => SleepUserProfile(
+        nights: (j['nights'] as num?)?.toInt() ?? 0,
+        hrFloorP5: _d(j['hr_floor_p5']),
+        hrFloorP25: _d(j['hr_floor_p25']),
+        hrSleepMedian: _d(j['hr_sleep_median']),
+        hrArousal: _d(j['hr_arousal']),
+        rmssdMed: _d(j['rmssd_med']),
+        rmssdMad: _d(j['rmssd_mad']),
+        enmoStillCut: _d(j['enmo_still_cut']),
+        enmoMoveCut: _d(j['enmo_move_cut']),
+        lfhfMed: _d(j['lfhf_med']),
+        rkMed: _d(j['rk_med']),
+        updatedAtMs: (j['updated_at_ms'] as num?)?.toInt() ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'nights': nights,
+        if (hrFloorP5 != null) 'hr_floor_p5': hrFloorP5,
+        if (hrFloorP25 != null) 'hr_floor_p25': hrFloorP25,
+        if (hrSleepMedian != null) 'hr_sleep_median': hrSleepMedian,
+        if (hrArousal != null) 'hr_arousal': hrArousal,
+        if (rmssdMed != null) 'rmssd_med': rmssdMed,
+        if (rmssdMad != null) 'rmssd_mad': rmssdMad,
+        if (enmoStillCut != null) 'enmo_still_cut': enmoStillCut,
+        if (enmoMoveCut != null) 'enmo_move_cut': enmoMoveCut,
+        if (lfhfMed != null) 'lfhf_med': lfhfMed,
+        if (rkMed != null) 'rk_med': rkMed,
+        'updated_at_ms': updatedAtMs,
+      };
+
+  /// EWMA-fold one finalized night's observation into the profile, returning
+  /// the updated copy. Alpha eases from 1.0 (first night — take it whole) toward
+  /// a `2/(N+1)` floor (a ~[horizonNights]-night trailing memory), so cold start
+  /// adapts fast and settled profiles track the recent few weeks. A null
+  /// observed field leaves that axis untouched.
+  SleepUserProfile fold(SleepNightObservation o, {int horizonNights = 14}) {
+    // horizonNights <= 0 makes the 2/(N+1) alpha floor >= 1 (or divide-by-zero /
+    // negative), which over-weights the newest night and corrupts the EWMA.
+    assert(horizonNights > 0, 'horizonNights must be positive');
+    final n2 = nights + 1;
+    final a = math.max(1.0 / n2, 2.0 / (horizonNights + 1));
+    double? ew(double? old, double? obs) =>
+        obs == null ? old : (old == null ? obs : old * (1 - a) + obs * a);
+    return SleepUserProfile(
+      nights: n2,
+      hrFloorP5: ew(hrFloorP5, o.hrFloorP5),
+      hrFloorP25: ew(hrFloorP25, o.hrFloorP25),
+      hrSleepMedian: ew(hrSleepMedian, o.hrSleepMedian),
+      hrArousal: ew(hrArousal, o.hrArousal),
+      rmssdMed: ew(rmssdMed, o.rmssdMed),
+      rmssdMad: ew(rmssdMad, o.rmssdMad),
+      enmoStillCut: ew(enmoStillCut, o.enmoStillCut),
+      enmoMoveCut: ew(enmoMoveCut, o.enmoMoveCut),
+      lfhfMed: ew(lfhfMed, o.lfhfMed),
+      rkMed: ew(rkMed, o.rkMed),
+      updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+}
+
+/// One night's observed sleep baselines, emitted by [cardioStager] for folding
+/// into a [SleepUserProfile]. [epochs] = staged epoch count (lets the caller
+/// pick the MAIN sleep among a night's sessions/naps, and reject short naps).
+class SleepNightObservation {
+  final int epochs;
+  final double? hrFloorP5;
+  final double? hrFloorP25;
+  final double? hrSleepMedian;
+  final double? hrArousal;
+  final double? rmssdMed;
+  final double? rmssdMad;
+  final double? enmoStillCut;
+  final double? enmoMoveCut;
+  final double? lfhfMed;
+  final double? rkMed;
+  const SleepNightObservation({
+    required this.epochs,
+    this.hrFloorP5,
+    this.hrFloorP25,
+    this.hrSleepMedian,
+    this.hrArousal,
+    this.rmssdMed,
+    this.rmssdMad,
+    this.enmoStillCut,
+    this.enmoMoveCut,
+    this.lfhfMed,
+    this.rkMed,
+  });
+}
+
+/// Ambient per-user profile used by [cardioStager] when no explicit
+/// `userProfile` arg is passed. Lets the edge derivation set it ONCE before
+/// running `segmentSleep` (which calls `cardioStager` deep inside
+/// `AdvancedSleepStager` with no param seam of its own). Single-isolate,
+/// synchronous-scope use only.
+SleepUserProfile? cardioUserProfile;
+
+/// When true, [cardioStager] appends one [SleepNightObservation] per run to an
+/// internal buffer. The edge sets this before a night's staging and reads the
+/// buffer with [takeCardioObservations] afterward to fold the MAIN sleep.
+bool cardioRecordObservations = false;
+final List<SleepNightObservation> _cardioObservations = <SleepNightObservation>[];
+
+/// Drain and clear the recorded observations (returns a copy).
+List<SleepNightObservation> takeCardioObservations() {
+  final c = List<SleepNightObservation>.of(_cardioObservations);
+  _cardioObservations.clear();
+  return c;
+}
+
+/// Clear the observation buffer without reading it.
+void resetCardioObservations() => _cardioObservations.clear();
 
 /// Transparent cardiorespiratory stager.
 ///
@@ -76,7 +256,11 @@ CardioStagerResult cardioStager(
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
   int epochSec = _epochSec,
+  SleepUserProfile? userProfile,
 }) {
+  // Explicit arg wins (unit tests); else the ambient profile the edge set for
+  // this staging pass; else null ⇒ pure per-night-local (cold-start behavior).
+  final profile = userProfile ?? cardioUserProfile;
   final n = math.min(hr1hz.length, accel.length);
   final nEpoch = n ~/ epochSec;
   if (nEpoch < 3) {
@@ -130,6 +314,14 @@ CardioStagerResult cardioStager(
   final hr = List<double>.filled(nEpoch, double.nan);
   final hrSd = List<double>.filled(nEpoch, 0);
   final rmssd = List<double>.filled(nEpoch, double.nan);
+  // REM autonomic features (P1): LF/HF from the RR spectrum + R(k) = rolling
+  // mean |ΔIHR|. REM's signature at 1 Hz beat-timing is a SYMPATHETIC shift —
+  // LF/HF rises, RR variability drops (low RMSSD), and instantaneous HR gets
+  // "jittery" (elevated |ΔIHR|). The old REM rule leaned only on the RMSSD drop
+  // and under-called REM; these two independent axes recover it (OR-combined
+  // below), gated by atonia + an HR floor so a plain arousal is not miscalled.
+  final lfhf = List<double>.filled(nEpoch, double.nan);
+  final rk = List<double>.filled(nEpoch, double.nan);
 
   for (var e = 0; e < nEpoch; e++) {
     final s = e * epochSec, t = math.min(s + epochSec, n);
@@ -147,6 +339,10 @@ CardioStagerResult cardioStager(
     if (hv.length >= 2) hrSd[e] = stddev(hv) ?? 0;
     // rmssd over RR beats within a ±2.5-min window centred on the epoch
     rmssd[e] = _windowRmssd(rrMs, rrTsMs, accel, s, t, epochSec);
+    // LF/HF + R(k) over a ±90-s RR window centred on the epoch.
+    final rem = _windowRemFeatures(rrMs, rrTsMs, accel, s, t, epochSec);
+    if (rem.lfhf != null) lfhf[e] = rem.lfhf!;
+    if (rem.rk != null) rk[e] = rem.rk!;
   }
 
   // ── night baselines (from the LOW-MOTION epochs — the actual sleep) ────────
@@ -158,13 +354,21 @@ CardioStagerResult cardioStager(
   final motSample = [for (final m in motion) m];
   final motMed = median(motSample) ?? 0;
   final motMad = (mad(motSample) ?? 0).clamp(1e-9, double.infinity);
+  // Personal-baseline blend (P2): pull each LOCAL threshold a bounded fraction
+  // toward the sleeper's rolling profile value. `_pw` (≤0.5) grows with nights,
+  // so per-night-local always leads; a null profile axis ⇒ no blend for it.
+  final double _pw = profile?.personalWeight ?? 0.0;
+  double blendP(double local, double? personal) =>
+      (personal == null || _pw == 0) ? local : local * (1 - _pw) + personal * _pw;
   // "still" (for baseline selection) = motion near the night's typical low.
-  bool still(int e) => motion[e] <= motMed + 1.5 * motMad;
+  final stillCut = blendP(motMed + 1.5 * motMad, profile?.enmoStillCut);
+  bool still(int e) => motion[e] <= stillCut;
   // "big move" = clearly elevated motion (getting up / large reposition), used
   // for the WAKE decision — a much higher bar than `still` so normal in-sleep
   // repositioning (which the van-Hees window already certified as sleep) is NOT
   // mistaken for wake.
-  bool bigMove(int e) => motion[e] > motMed + 5.0 * motMad;
+  final bigMoveCut = blendP(motMed + 5.0 * motMad, profile?.enmoMoveCut);
+  bool bigMove(int e) => motion[e] > bigMoveCut;
 
   final sleepHr = <double>[
     for (var e = 0; e < nEpoch; e++)
@@ -215,17 +419,40 @@ CardioStagerResult cardioStager(
       hrP25Local[e] = percentile(win, 25) ?? m;
     }
   }
+  // Blend the per-epoch LOCAL HR gates toward the sleeper's rolling profile.
+  if (profile != null && _pw > 0) {
+    for (var e = 0; e < nEpoch; e++) {
+      hrMedLocal[e] = blendP(hrMedLocal[e], profile.hrSleepMedian);
+      hrArousalLocal[e] = blendP(hrArousalLocal[e], profile.hrArousal);
+      hrP25Local[e] = blendP(hrP25Local[e], profile.hrFloorP25);
+    }
+  }
 
   final sleepRmssd = <double>[
     for (var e = 0; e < nEpoch; e++)
       if (still(e) && !rmssd[e].isNaN) rmssd[e]
   ];
   final rmssdMed = median(sleepRmssd);
+  // Night sleep distributions for the LF/HF and R(k) REM axes (robust-z base).
+  final sleepLfhf = <double>[
+    for (var e = 0; e < nEpoch; e++)
+      if (still(e) && !lfhf[e].isNaN) lfhf[e]
+  ];
+  final sleepRk = <double>[
+    for (var e = 0; e < nEpoch; e++)
+      if (still(e) && !rk[e].isNaN) rk[e]
+  ];
   final hrSdSample = [for (final s in hrSd) if (s > 0) s];
   final hrSdMed = median(hrSdSample) ?? double.infinity;
-  // Deep = HR in the lower half of the night's sleeping HR (the cardiac trough).
-  // Stays a whole-night comparison (not part of the diagnosed bug; unchanged).
-  final deepHrCut = hrFloor + 0.5 * (hrMedGlobal - hrFloor);
+  // RMSSD reference for the deep "not-elevated-HRV" gate, blended toward profile.
+  final rmssdRef = rmssdMed == null
+      ? profile?.rmssdMed
+      : blendP(rmssdMed, profile?.rmssdMed);
+  // Deep = HR in the lower half of the night's sleeping HR (the cardiac trough),
+  // with the floor/median blended toward the personal profile (P2).
+  final deepFloor = blendP(hrFloor, profile?.hrFloorP5);
+  final deepMed = blendP(hrMedGlobal, profile?.hrSleepMedian);
+  final deepHrCut = deepFloor + 0.5 * (deepMed - deepFloor);
 
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
@@ -244,14 +471,29 @@ CardioStagerResult cardioStager(
       stages[e] = SleepStage.wake;
       continue;
     }
-    // Asleep. REM vs NREM via autonomic signature.
+    // Asleep. REM vs NREM via autonomic signature. REM is OR-combined across
+    // three independent RR axes (any one suffices), THEN gated by atonia (no
+    // large movement) AND an HR floor (HR ≥ the local p25 — REM is not the
+    // quiescent cardiac trough). This recovers REM the RMSSD-only rule missed.
     final rmZ = (rmssdMed != null && !rmssd[e].isNaN && sleepRmssd.length >= 4)
         ? robustZ(rmssd[e], sleepRmssd)
         : null;
     final rmssdDown = rmZ != null && rmZ < -0.4; // RMSSD notably below sleep base
+    // LF/HF elevated (sympathetic shift) vs the night's sleeping LF/HF.
+    final lfhfZ = (sleepLfhf.length >= 4 && !lfhf[e].isNaN)
+        ? robustZ(lfhf[e], sleepLfhf)
+        : null;
+    final lfhfHigh = lfhfZ != null && lfhfZ > _remLfhfZ;
+    // R(k) burst: instantaneous-HR variability elevated vs sleeping R(k).
+    final rkZ = (sleepRk.length >= 4 && !rk[e].isNaN)
+        ? robustZ(rk[e], sleepRk)
+        : null;
+    final rkBurst = rkZ != null && rkZ > _remRkZ;
+    final remAutonomic = rmssdDown || lfhfHigh || rkBurst;
+    final atonia = !bigMove(e); // muscle-atonia proxy — no large movement
     final hrTowardWake =
         !hr[e].isNaN && hr[e] >= hrP25Local[e]; // HR up but not arousal
-    if (rmssdDown && hrTowardWake) {
+    if (remAutonomic && atonia && hrTowardWake) {
       stages[e] = SleepStage.rem;
     } else {
       stages[e] = SleepStage.nrem;
@@ -262,16 +504,49 @@ CardioStagerResult cardioStager(
       // so deep lands in a physiologic range instead of ~0.
       final lowHr = !hr[e].isNaN && hr[e] <= deepHrCut;
       final notHighRmssd =
-          rmssdMed == null || rmssd[e].isNaN || rmssd[e] >= rmssdMed * 0.9;
+          rmssdRef == null || rmssd[e].isNaN || rmssd[e] >= rmssdRef * 0.9;
       final stable = hrSd[e] <= hrSdMed * 1.5;
       deepFlag[e] = lowHr && notHighRmssd && stable;
     }
   }
 
-  // ── post-process: Webster continuity (bridge brief arousals) + consolidate ──
+  // ── post-process: median-filter flicker → Webster continuity → consolidate ──
+  // A 3-epoch categorical median (mode) filter first, to drop isolated
+  // single-epoch label flips (e.g. a lone REM/deep spike inside a stable run)
+  // before the continuity/consolidation stages act on min bouts.
+  _modeFilterStages(stages);
   _websterRescore(stages, epochSec);
   final sm = consolidateSleepStages(stages, epochSec);
+  // Keep deepFlag in lockstep with the FINAL consolidated stage: the mode filter,
+  // Webster rescore, and consolidation can move a deep-flagged NREM epoch to REM
+  // or Wake. Clear the flag there so no epoch is ever reported deep while its
+  // stage disagrees (_mergeShortDeep only skips non-NREM epochs — it never
+  // clears a stale flag left on one).
+  for (var e = 0; e < deepFlag.length && e < sm.length; e++) {
+    if (deepFlag[e] && sm[e] != SleepStage.nrem) deepFlag[e] = false;
+  }
   _mergeShortDeep(deepFlag, sm, epochSec);
+
+  // ── record this night's baselines for the rolling per-user profile (P2) ─────
+  // Only when the edge armed recording AND the staged span is a real sleep
+  // (≥60 min) — naps must not pollute the sleeper's night profile.
+  if (cardioRecordObservations && nEpoch >= 120 && sleepHr.isNotEmpty) {
+    _cardioObservations.add(SleepNightObservation(
+      epochs: nEpoch,
+      hrFloorP5: percentile(sleepHr, 5),
+      hrFloorP25: percentile(sleepHr, 25),
+      hrSleepMedian: median(sleepHr),
+      hrArousal: (median(sleepHr) ?? hrMedGlobal) +
+          math.max(6.0, stddev(sleepHr) ?? 6.0),
+      rmssdMed: rmssdMed,
+      rmssdMad: mad(sleepRmssd),
+      enmoStillCut: motMed + 1.5 * motMad,
+      enmoMoveCut: motMed + 5.0 * motMad,
+      lfhfMed: median(sleepLfhf),
+      rkMed: median(sleepRk),
+    ));
+    if (_cardioObservations.length > 32) _cardioObservations.removeAt(0);
+  }
 
   // ── percentages + confidence ────────────────────────────────────────────────
   var w = 0, nr = 0, r = 0;
@@ -403,6 +678,87 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
       }
     }
     i = j;
+  }
+}
+
+/// REM autonomic features over a ±90-s RR window centred on epoch [s,t):
+///   • lfhf = LF(0.04–0.15 Hz) / HF(0.15–0.40 Hz) band-power ratio, computed on
+///     the NATIVE beat times via Lomb–Scargle (the project's validated PSD for
+///     unevenly-sampled RR — no resampling, superior to interpolating to 4 Hz).
+///   • rk   = mean |ΔIHR| over the window (IHR = 60000/RR bpm) — the R(k) REM
+///     index (instantaneous-HR "jitter" that rises in REM).
+/// Beats are cleaned with the same physiologic gate as [_windowRmssd]. Returns
+/// nulls when too few clean beats for a stable estimate.
+({double? lfhf, double? rk}) _windowRemFeatures(List<double> rrMs,
+    List<double> rrTsMs, List<AccelSample> accel, int s, int t, int epochSec) {
+  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) {
+    return (lfhf: null, rk: null);
+  }
+  final mid = (s + t) ~/ 2;
+  if (mid >= accel.length) return (lfhf: null, rk: null);
+  final centreMs = accel[mid].tsMs;
+  const halfWinMs = 90 * 1000; // ±90 s per the REM feature spec
+  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
+  final beats = <double>[]; // clean RR (ms)
+  final beatTsSec = <double>[]; // matching beat times (s)
+  double? prev;
+  for (var i = 0; i < rrMs.length; i++) {
+    final ts = rrTsMs[i];
+    if (ts < lo || ts > hi) continue;
+    final v = rrMs[i];
+    if (v < _rrMin || v > _rrMax) {
+      prev = null;
+      continue;
+    }
+    if (prev != null && (v - prev).abs() > _rrMaxStep) {
+      prev = v;
+      continue;
+    }
+    beats.add(v);
+    beatTsSec.add(ts / 1000.0);
+    prev = v;
+  }
+  if (beats.length < 16) return (lfhf: null, rk: null); // spectral stability gate
+  // R(k): mean absolute successive difference of instantaneous HR (bpm).
+  var rkSum = 0.0;
+  var rkCnt = 0;
+  double? prevIhr;
+  for (final v in beats) {
+    final ihr = 60000.0 / v;
+    if (prevIhr != null) {
+      rkSum += (ihr - prevIhr).abs();
+      rkCnt++;
+    }
+    prevIhr = ihr;
+  }
+  final rk = rkCnt > 0 ? rkSum / rkCnt : null;
+  // LF/HF via Lomb–Scargle on native beat times.
+  double? lfhf;
+  final spanSec = beatTsSec.last - beatTsSec.first;
+  if (spanSec > 0) {
+    final loHz = (1.0 / spanSec).clamp(0.0005, 0.04).toDouble();
+    final ls = lombScargle(beatTsSec, beats, freqGrid(loHz, 0.4, 240));
+    if (ls != null) {
+      final lf = ls.bandPower(0.04, 0.15);
+      final hf = ls.bandPower(0.15, 0.40);
+      if (hf > 0) lfhf = lf / hf;
+    }
+  }
+  return (lfhf: lfhf, rk: rk);
+}
+
+/// 3-epoch categorical median (mode) filter: flip a lone epoch whose two
+/// neighbours agree and differ from it. Removes single-epoch label flicker
+/// without touching runs of length ≥2. Operates in place.
+void _modeFilterStages(List<SleepStage> s) {
+  final n = s.length;
+  if (n < 3) return;
+  final out = List<SleepStage>.of(s);
+  for (var i = 1; i < n - 1; i++) {
+    if (s[i - 1] == s[i + 1] && s[i] != s[i - 1]) out[i] = s[i - 1];
+  }
+  for (var i = 0; i < n; i++) {
+    s[i] = out[i];
   }
 }
 

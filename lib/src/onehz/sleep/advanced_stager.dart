@@ -300,11 +300,35 @@ class AdvancedSleepStager {
     const continuationGapS = nightContinuationGapMin * 60;
     int? chainPrevEnd;
     var chainFromOvernight = false;
+    // The floor exemption is one-shot per chain: only the FIRST *short* tail
+    // after the overnight block may bypass the 60-min floor. Without this a run
+    // of short morning/daytime fragments would each re-qualify (continuesChain
+    // stays true and chainFromOvernight never clears), chain-extending the window
+    // well past the true wake. Note a >60-min continuation is accepted on its own
+    // merit and does NOT consume the one-shot (it never needed the exemption), so
+    // a genuine multi-fragment pre-dawn tail still reaches the true wake. Set only
+    // when a short tail actually uses the exemption; cleared when a chain begins.
+    var nightTailAccepted = false;
     final sessions = <SleepSession>[];
 
     for (final p in runs) {
       if (p.stage != 'sleep') continue;
-      if ((p.end - p.start) <= minSleepS) continue; // strict > 60 min
+      // Chain state must be known BEFORE the min-session floor: a night-tail
+      // re-onset (still, HR-in-band, within nightContinuationGapMin of the main
+      // overnight block) is genuine fragmented sleep even when shorter than the
+      // 60-min standalone floor. Computing it here (was below the floor) lets the
+      // floor exempt it — otherwise a pre-dawn arousal that splits off a <60-min
+      // tail silently truncates the window at the arousal.
+      final continuesChain = chainPrevEnd != null
+          ? (p.start - chainPrevEnd <= continuationGapS)
+          : false;
+      final isNightTail =
+          continuesChain && chainFromOvernight && !nightTailAccepted;
+      // Min-session floor: standalone runs still need > 60 min (so daytime naps
+      // and stray still-blocks stay excluded); ONLY the first SHORT night-tail
+      // per chain is exempt (nightTailAccepted bounds it). The other gates below
+      // (max-span, HR-confirm, off-wrist) still apply to night-tails.
+      if ((p.end - p.start) <= minSleepS && !isNightTail) continue;
       if ((p.end - p.start) > maxMainSleepSpanS) continue; // #547 drop
       if (!_confirmSleepWithHR(p, hrS, baseline)) continue;
       if (_offWristFraction(p, hrS, wristOff) >= maxOffWristSleepFraction) {
@@ -312,10 +336,6 @@ class AdvancedSleepStager {
       }
 
       final resting = _sessionRestingHR(p.start, p.end, hrS);
-      final continuesChain = chainPrevEnd != null
-          ? (p.start - chainPrevEnd <= continuationGapS)
-          : false;
-      final isNightTail = continuesChain && chainFromOvernight;
       final morningWakeEnd = chainFromOvernight ? chainPrevEnd : null;
 
       if (_isDaytimeCenter(p, tzAt) &&
@@ -343,6 +363,12 @@ class AdvancedSleepStager {
 
       if (!continuesChain) {
         chainFromOvernight = _isOvernightOnset(p.start, tzAt);
+        nightTailAccepted = false; // new chain re-arms the one-shot exemption
+      } else if (isNightTail && (p.end - p.start) <= minSleepS) {
+        // Consume the one-shot ONLY when a SHORT tail actually relied on the floor
+        // exemption; a >60-min continuation passes the floor unaided and must not
+        // burn the exemption (else a later genuine short tail is lost).
+        nightTailAccepted = true;
       }
       chainPrevEnd = p.end;
     }
