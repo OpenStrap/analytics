@@ -304,7 +304,21 @@ class AdvancedSleepStager {
 
     for (final p in runs) {
       if (p.stage != 'sleep') continue;
-      if ((p.end - p.start) <= minSleepS) continue; // strict > 60 min
+      // Chain state must be known BEFORE the min-session floor: a night-tail
+      // re-onset (still, HR-in-band, within nightContinuationGapMin of the main
+      // overnight block) is genuine fragmented sleep even when shorter than the
+      // 60-min standalone floor. Computing it here (was below the floor) lets the
+      // floor exempt it — otherwise a pre-dawn arousal that splits off a <60-min
+      // tail silently truncates the window at the arousal.
+      final continuesChain = chainPrevEnd != null
+          ? (p.start - chainPrevEnd <= continuationGapS)
+          : false;
+      final isNightTail = continuesChain && chainFromOvernight;
+      // Min-session floor: standalone runs still need > 60 min (so daytime naps
+      // and stray still-blocks stay excluded); a night-tail continuation is
+      // exempt. The other gates below (max-span, HR-confirm, off-wrist) still
+      // apply to night-tails.
+      if ((p.end - p.start) <= minSleepS && !isNightTail) continue;
       if ((p.end - p.start) > maxMainSleepSpanS) continue; // #547 drop
       if (!_confirmSleepWithHR(p, hrS, baseline)) continue;
       if (_offWristFraction(p, hrS, wristOff) >= maxOffWristSleepFraction) {
@@ -312,10 +326,6 @@ class AdvancedSleepStager {
       }
 
       final resting = _sessionRestingHR(p.start, p.end, hrS);
-      final continuesChain = chainPrevEnd != null
-          ? (p.start - chainPrevEnd <= continuationGapS)
-          : false;
-      final isNightTail = continuesChain && chainFromOvernight;
       final morningWakeEnd = chainFromOvernight ? chainPrevEnd : null;
 
       if (_isDaytimeCenter(p, tzAt) &&
