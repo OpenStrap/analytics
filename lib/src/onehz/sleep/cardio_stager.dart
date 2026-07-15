@@ -166,6 +166,9 @@ class SleepUserProfile {
   /// adapts fast and settled profiles track the recent few weeks. A null
   /// observed field leaves that axis untouched.
   SleepUserProfile fold(SleepNightObservation o, {int horizonNights = 14}) {
+    // horizonNights <= 0 makes the 2/(N+1) alpha floor >= 1 (or divide-by-zero /
+    // negative), which over-weights the newest night and corrupts the EWMA.
+    assert(horizonNights > 0, 'horizonNights must be positive');
     final n2 = nights + 1;
     final a = math.max(1.0 / n2, 2.0 / (horizonNights + 1));
     double? ew(double? old, double? obs) =>
@@ -514,6 +517,14 @@ CardioStagerResult cardioStager(
   _modeFilterStages(stages);
   _websterRescore(stages, epochSec);
   final sm = consolidateSleepStages(stages, epochSec);
+  // Keep deepFlag in lockstep with the FINAL consolidated stage: the mode filter,
+  // Webster rescore, and consolidation can move a deep-flagged NREM epoch to REM
+  // or Wake. Clear the flag there so no epoch is ever reported deep while its
+  // stage disagrees (_mergeShortDeep only skips non-NREM epochs — it never
+  // clears a stale flag left on one).
+  for (var e = 0; e < deepFlag.length && e < sm.length; e++) {
+    if (deepFlag[e] && sm[e] != SleepStage.nrem) deepFlag[e] = false;
+  }
   _mergeShortDeep(deepFlag, sm, epochSec);
 
   // ── record this night's baselines for the rolling per-user profile (P2) ─────
@@ -725,7 +736,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   double? lfhf;
   final spanSec = beatTsSec.last - beatTsSec.first;
   if (spanSec > 0) {
-    final loHz = (1.0 / spanSec).clamp(0.0005, 0.04);
+    final loHz = (1.0 / spanSec).clamp(0.0005, 0.04).toDouble();
     final ls = lombScargle(beatTsSec, beats, freqGrid(loHz, 0.4, 240));
     if (ls != null) {
       final lf = ls.bandPower(0.04, 0.15);

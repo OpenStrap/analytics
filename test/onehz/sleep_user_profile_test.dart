@@ -108,7 +108,7 @@ void main() {
       // Sanity: the blend actually shifted SOMETHING vs a no-op (or matched it).
       expect(
         (withProfile.wakePct - noProfile.wakePct).abs(),
-        lessThan(50.0),
+        lessThan(5.0),
         reason: 'a consistent profile must not swing staging wildly',
       );
     });
