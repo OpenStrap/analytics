@@ -292,6 +292,27 @@ void main() {
       // unused local to keep the analyzer quiet about `base`.
       expect(base.length, 14);
     });
+
+    test('degenerate-MAD baseline is rescued by mean/SD z (no intermittent "—")',
+        () {
+      // A quantized RHR whose recent baseline clusters tight enough that the
+      // median-absolute-deviation collapses to 0 (deviations from the median 52
+      // are [0,0,0,0,0,0,1] => MAD 0), but SD > 0. robustZ can't score this, so
+      // before the fallback the WHOLE composite blanked to "—" here — the
+      // intermittent "readiness sometimes disappears (with sleep present)" bug.
+      final tightBase = <double>[52, 52, 52, 52, 52, 52, 53];
+      final m = readinessComposite([rhrInput(56.0, tightBase)]);
+      expect(m.present, isTrue,
+          reason: 'mean/SD z should rescue a MAD==0 (but SD>0) baseline');
+      expect(m.inputs_used, ['RHR']);
+      // RHR well above a tight baseline => bad for readiness => below 50.
+      expect(m.value!.score, lessThan(50));
+
+      // A TRULY constant baseline (SD == 0 too) still honestly abstains — we
+      // only rescue degenerate MAD, never fabricate against zero dispersion.
+      final flat = readinessComposite([rhrInput(56.0, <double>[52, 52, 52, 52])]);
+      expect(flat.present, isFalse);
+    });
   });
 
   // -------------------------------------------------------------------------
