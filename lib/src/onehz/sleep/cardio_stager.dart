@@ -715,7 +715,15 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
       continue;
     }
     beats.add(v);
-    beatTsSec.add(ts / 1000.0);
+    // Rebase to the window start (lo), NOT absolute epoch ms. Lomb–Scargle is
+      // time-shift invariant (the τ phase reference cancels any offset), so the
+      // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
+      // instead of ~1.75e9 s. Absolute epoch seconds force every sin/cos in the
+      // periodogram onto libm's __kernel_rem_pio2 multi-precision slow path
+      // (args ~9e9 rad), which — run per 30-s epoch over a full night on the
+      // main isolate — caused main-thread ANRs on Android (Crashlytics: libm.so
+      // __kernel_rem_pio2 / sin / cos, 0.9.13).
+      beatTsSec.add((ts - lo) / 1000.0);
     prev = v;
   }
   if (beats.length < 16) return (lfhf: null, rk: null); // spectral stability gate
