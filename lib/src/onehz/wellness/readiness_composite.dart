@@ -108,7 +108,14 @@ Metric<Readiness> readinessComposite(
       if (base.length > bestShortHave) bestShortHave = base.length;
       continue;
     }
-    final zr = robustZ(v, base); // null if MAD degenerate
+    // Robust z (median + MAD) first. But a QUANTIZED input (whole-bpm RHR,
+    // integer skin-temp ADC) can cluster tight enough on some nights that MAD
+    // collapses to 0 — robustZ then returns null and, if that was the only
+    // present input, the WHOLE score intermittently blanked to "—" (present some
+    // nights, absent others, even with sleep detected). Fall back to an ordinary
+    // mean/SD z so a usable input still contributes; only skip when SD is ALSO
+    // zero (a truly constant baseline with no dispersion to normalize against).
+    final zr = robustZ(v, base) ?? z(v, base);
     if (zr == null) continue;
     final oriented = inp.goodSign * zr; // + = good for readiness
     used.add(inp.label);
