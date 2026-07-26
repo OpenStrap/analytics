@@ -1,5 +1,8 @@
 # OpenStrap analytics
 
+[![test](https://github.com/OpenStrap/analytics/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/analytics/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 This is the math. Given the always-on 1 Hz substrate a WHOOP 4.0 actually hands over —
 beat-to-beat RR intervals, 1 Hz heart rate, 1 Hz tri-axial accel, and a few relative ADC
 channels (skin temp, SpO2, ambient light) — it works out the things you care about: how
@@ -105,7 +108,7 @@ not a feature, no matter how tempting the plausible-looking headline is.
 dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
 
-282 tests, nothing mocked — pure functions, fixture in, assertion out.
+290 tests, nothing mocked — pure functions, fixture in, assertion out.
 
 ## If you want to add a metric
 
@@ -118,3 +121,20 @@ Derive confidence from real coverage, and return absent (`Metric.absent(...)`, n
 fabricated fallback) when the inputs genuinely aren't there. And if your idea needs a
 cause it can't actually tell apart from three other explanations, report the state, not
 the cause.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — which repo a change belongs in, how to run the
+tests, and the rules that keep this package honest. Security issues go through
+[SECURITY.md](SECURITY.md), not a public issue.
+
+## Support the work
+
+Free, MIT, no company behind it. If OpenStrap gave your band a second life,
+[DONATE.md](https://github.com/OpenStrap/edge/blob/main/DONATE.md) has BTC and EVM
+addresses. Protocol findings and bug reports are worth more than money, though.
+
+---
+
+Not affiliated with, endorsed by, or connected to WHOOP. "WHOOP" is their trademark, used
+only to say which device this talks to.

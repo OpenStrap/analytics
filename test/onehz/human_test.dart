@@ -265,6 +265,7 @@ void main() {
             label: 'temp', value: 0.04, history: tempHist, weight: wTemp,
             lowerIsBetter: true),
       ];
+      // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
       expect(m.present, isTrue);
       final v = m.value!;
@@ -288,6 +289,7 @@ void main() {
             label: 'rhr', value: 50.2, history: hist, weight: wRhr,
             lowerIsBetter: true),
       ];
+      // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
       expect(m.value!.drivers, isEmpty);
       expect(m.value!.narrative.toLowerCase(), contains('noise'));
@@ -300,6 +302,7 @@ void main() {
         // temp has no history => dropped + reweighted, not zeroed.
         GlassBoxInput(label: 'temp', value: 0.0, history: const [], weight: wTemp),
       ];
+      // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
       expect(m.present, isTrue);
       expect(m.value!.inputsUsed, 1);
