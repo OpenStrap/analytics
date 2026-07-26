@@ -89,6 +89,116 @@ void main() {
     });
   });
 
+  group('dynAmp — calibration-invariant dynamic amplitude', () {
+    /// 1 Hz series: gravity on z, plus an alternating ±[amp] perturbation on
+    /// axis [axis] during the minutes selected by [active].
+    List<AccelSample> _series(
+      int minutes, {
+      required bool Function(int) active,
+      double amp = 0.2,
+      int axis = 0,
+      double gz = 1.0,
+    }) {
+      final out = <AccelSample>[];
+      for (var m = 0; m < minutes; m++) {
+        for (var s = 0; s < 60; s++) {
+          final i = m * 60 + s;
+          final p = active(m) ? (i.isEven ? amp : -amp) : 0.0;
+          out.add(AccelSample(
+            i * 1000.0,
+            axis == 0 ? p : 0.0,
+            axis == 1 ? p : 0.0,
+            gz + (axis == 2 ? p : 0.0),
+          ));
+        }
+      }
+      return out;
+    }
+
+    test('a still wrist reads dynAmp ≈ 0 at ANY gravity reading, while ENMO '
+        'moves with the reference', () {
+      // Same physical stillness, two orientations the sensor reads differently
+      // (this ~0.05 g spread between postures is the real, measured fault).
+      final high = enmoSeries(_series(2, active: (_) => false, gz: 1.03),
+          gRef: 1.0);
+      final low = enmoSeries(_series(2, active: (_) => false, gz: 0.94),
+          gRef: 1.0);
+      for (final m in high.minutes) {
+        expect(m.dynAmp, closeTo(0.0, 1e-12));
+      }
+      for (final m in low.minutes) {
+        expect(m.dynAmp, closeTo(0.0, 1e-12));
+      }
+      // ENMO, by contrast, is entirely determined by the reference offset.
+      expect(high.minutes.first.enmo, closeTo(0.03, 1e-9));
+      expect(low.minutes.first.enmo, closeTo(0.0, 1e-9));
+    });
+
+    test('known alternating motion → dynAmp ≈ the perturbation amplitude', () {
+      final r = enmoSeries(_series(2, active: (_) => true, amp: 0.2));
+      // A 15 s trailing-mean high-pass on a ±A square wave leaves A·(14/15) =
+      // 0.1867 (the odd-length window keeps one sample of DC leakage).
+      for (final m in r.minutes) {
+        expect(m.dynAmp, inInclusiveRange(0.17, 0.20));
+      }
+    });
+
+    test('PROPERTY: a constant per-axis offset cancels EXACTLY', () {
+      // The exact fault: per-axis bias (and the constant gravity projection of
+      // whatever posture the wrist is in) is DC, so a per-axis high-pass removes
+      // it identically. Offsets chosen larger than the walking signal itself.
+      final base = _series(6, active: (m) => m.isOdd, amp: 0.3, axis: 1);
+      const bx = 0.05, by = -0.03, bz = 0.11;
+      final shifted = [
+        for (final s in base) AccelSample(s.tsMs, s.x + bx, s.y + by, s.z + bz),
+      ];
+      final a = enmoSeries(base, gRef: 1.0);
+      final b = enmoSeries(shifted, gRef: 1.0);
+      expect(b.minutes.length, a.minutes.length);
+      for (var i = 0; i < a.minutes.length; i++) {
+        expect(b.minutes[i].dynAmp, closeTo(a.minutes[i].dynAmp, 1e-9),
+            reason: 'dynAmp must not see a constant per-axis offset');
+      }
+      // ENMO does see it — which is why it cannot carry an absolute cut-point.
+      final dEnmo = (b.minutes.first.enmo - a.minutes.first.enmo).abs();
+      expect(dEnmo, greaterThan(0.05),
+          reason: 'ENMO shifts by the offset; that is the bug being fixed');
+    });
+
+    test('a recording gap does not manufacture a dynAmp spike', () {
+      // Wrist still in posture A, an hour off-stream, then still in a totally
+      // different posture B. Nothing moved while we were recording.
+      final out = <AccelSample>[];
+      for (var i = 0; i < 300; i++) {
+        out.add(AccelSample(i * 1000.0, 0, 0, 1.0));
+      }
+      for (var i = 0; i < 300; i++) {
+        out.add(AccelSample(3600000.0 + i * 1000.0, 1.0, 0, 0));
+      }
+      final r = enmoSeries(out);
+      for (final m in r.minutes) {
+        expect(m.dynAmp, closeTo(0.0, 1e-9),
+            reason: 'the gravity window must empty across a gap, not carry '
+                'a stale orientation across it');
+      }
+    });
+
+    test('unsorted input is ordered before the gravity window runs', () {
+      final ordered = _series(2, active: (_) => true, amp: 0.25);
+      final shuffled = [...ordered.reversed];
+      final a = enmoSeries(ordered);
+      final b = enmoSeries(shuffled);
+      for (var i = 0; i < a.minutes.length; i++) {
+        expect(b.minutes[i].dynAmp, closeTo(a.minutes[i].dynAmp, 1e-9));
+      }
+    });
+
+    test('dynAmp is exported in toJson', () {
+      final r = enmoSeries(_series(1, active: (_) => true, amp: 0.2));
+      expect(r.minutes.single.toJson()['dyn_amp_g'], isA<double>());
+    });
+  });
+
   group('Static gravity-tilt → sleep position', () {
     test('z-up gravity (lying flat, watch face up) → supine', () {
       final m = staticTilt(_still(30, 0, 0, 1.0));

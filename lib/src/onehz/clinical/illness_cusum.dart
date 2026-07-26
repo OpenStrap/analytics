@@ -22,6 +22,13 @@ enum IllnessState { green, yellow, red }
 /// Required minimum valid baseline nights before the CUSUM can flag.
 const int illnessCusumMinBaseline = 7;
 
+/// Machine-readable note attached to a night whose trailing baseline is long
+/// enough but has ZERO dispersion (MAD and SD both 0 — a fully constant,
+/// quantized baseline). The standardized deviation is undefined, so the night
+/// is held green and NOT accumulated rather than standardized against a
+/// fabricated scale.
+const String degenerateBaselineNote = 'degenerate_baseline:scale=0';
+
 class IllnessDay {
   final String date;
   final IllnessState state;
@@ -91,10 +98,21 @@ List<IllnessDay> illnessCusum(
     final med = median(window)!;
     var scale = mad(window) ?? 0;
     if (scale <= 0) {
-      // Quantized/constant baseline: fall back to a small physiological floor
-      // (1 bpm) so we can still standardize, but flag low confidence by never
-      // letting tiny noise trip the alarm.
-      scale = math.max(1.0, (stddev(window) ?? 1.0));
+      // Quantized baseline (whole-bpm RHR) can collapse the MAD to 0. Fall
+      // back to the ordinary SD so a usable baseline still standardizes —
+      // the same convention as wellness/readiness_composite.dart and
+      // wellness/changepoint.dart.
+      scale = stddev(window) ?? 0;
+    }
+    if (scale <= 0 || !scale.isFinite) {
+      // Truly constant baseline: there is NO dispersion to standardize
+      // against, so z is undefined. Substituting a magic 1 bpm floor here
+      // turned a 5 bpm one-night bump into z = 5 and latched the alarm red —
+      // exactly the fabrication this package forbids. ABSTAIN instead: hold
+      // green, do not accumulate, and say why.
+      out.add(IllnessDay(dates[i], IllnessState.green, null, null,
+          need: degenerateBaselineNote));
+      continue;
     }
     final z = (r - med) / scale;
     // One-sided upper CUSUM on elevation (RHR up = potential illness).

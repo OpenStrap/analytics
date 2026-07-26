@@ -68,6 +68,17 @@ Metric<PrsaResult> _prsa(
   final kind = deceleration ? 'DC' : 'AC';
   final inputs = const ['rr_cleaned'];
   final n = nnMs.length;
+  if (l < 2) {
+    // Bauer 2006 quantifies PRSA with the Haar contrast at wavelet scale s = 2:
+    // DC = [X(0) + X(1) − X(−1) − X(−2)]/4, which needs TWO profile points on
+    // each side of the anchor. With l < 2 the profile is too short (l = 1 used
+    // to index profile[l−2] = profile[−1] and throw a RangeError).
+    return Metric<PrsaResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'PRSA ($kind) needs l≥2 for the s=2 Haar contrast',
+    );
+  }
   if (n < 2 * l + 4) {
     return Metric<PrsaResult>.absent(
       tier: Tier.high,

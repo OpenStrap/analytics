@@ -37,8 +37,24 @@ class SleepWindow {
   final double? onsetMs;
   final double? offsetMs;
 
-  /// Per-second immobility mask (true = "no movement" second), full length.
+  /// Per-second immobility mask (true = ASSERTED "no movement" second), full
+  /// length. `false` means "not asserted immobile" — which is either a real
+  /// movement OR an UNDECIDABLE second (see [immobileUnknown]). It is never a
+  /// guess: the van Hees rule needs `sustainedMin` of FUTURE angle data, and the
+  /// last `sustainedMin` of any record does not have it.
   final List<bool> immobile;
+
+  /// Per-second "undecidable" mask, full length and index-aligned with
+  /// [immobile]. `true` marks a second whose forward sustained-inactivity
+  /// window is truncated by the end of the record AND which shows no movement
+  /// in the data we do have — i.e. it could still resolve either way once the
+  /// next samples arrive. Such seconds are `false` in [immobile] (not claimed
+  /// as rest) and are excluded from the detected sleep period.
+  ///
+  /// Consumers that only read [immobile] therefore degrade conservatively (an
+  /// unresolved tail second reads as "not asserted immobile"), never
+  /// optimistically. Empty when unknown.
+  final List<bool> immobileUnknown;
 
   /// Per-second smoothed z-angle (deg), full length — reused downstream.
   final List<double> zAngleDeg;
@@ -54,7 +70,18 @@ class SleepWindow {
     required this.immobile,
     required this.zAngleDeg,
     required this.sptSec,
+    this.immobileUnknown = const <bool>[],
   });
+
+  /// Seconds at the end of the record whose immobility is genuinely
+  /// undecidable (see [immobileUnknown]).
+  int get unresolvedTailSec {
+    var c = 0;
+    for (final u in immobileUnknown) {
+      if (u) c++;
+    }
+    return c;
+  }
 
   Map<String, dynamic> toJson() => {
         'onset_idx': onsetIdx,
@@ -62,6 +89,7 @@ class SleepWindow {
         if (onsetMs != null) 'onset_ms': onsetMs,
         if (offsetMs != null) 'offset_ms': offsetMs,
         'spt_sec': sptSec,
+        if (unresolvedTailSec > 0) 'unresolved_tail_sec': unresolvedTailSec,
       };
 }
 
@@ -112,32 +140,42 @@ Metric<SleepWindow> vanHeesSleepWindow(
   }
   final win = sustainedMin * 60;
   final immobile = List<bool>.filled(n, false);
-  // A second is "no movement" if the MAX absolute angle change over the
-  // surrounding `win` seconds stays below the threshold.
+  final immobileUnknown = List<bool>.filled(n, false);
+  // A second is "no movement" if the MAX absolute angle change over the `win`
+  // seconds STARTING AT IT stays below the threshold (van Hees 2015/2018: the
+  // sustained-inactivity rule is a property of the block that follows the
+  // second, so it is evaluated PER SECOND on that second's own window).
+  //
+  // The final `win-1` seconds have a TRUNCATED forward window, which splits
+  // them into two honest cases — never into one shared verdict (pre-2026-07 the
+  // tail took a single global `[n-win, n)` answer and stamped it on every tail
+  // second, so one twitch anywhere in the last 5 min flipped the whole tail to
+  // mobile, and stillness observed BEFORE a tail second was used to certify a
+  // full sustained window that second never actually had):
+  //   * movement seen in [i, n)  → the ≥sustainedMin rule already FAILS on the
+  //     data in hand, whatever comes next ⇒ decided, not immobile.
+  //   * no movement seen, window short ⇒ UNDECIDABLE. We do not assert rest
+  //     (that would extrapolate stillness past the end of the record) and we
+  //     record it in `immobileUnknown` rather than guessing either way.
   for (var i = 0; i < n; i++) {
-    final lo = i;
     final hi = math.min(n, i + win);
-    if (hi - lo < win) {
-      // Tail shorter than a full window: fall back to the trailing window.
-      final lo2 = math.max(0, n - win);
-      var maxd = 0.0;
-      for (var k = lo2 + 1; k < n; k++) {
-        if (dAng[k] > maxd) maxd = dAng[k];
-      }
-      immobile[i] = maxd < angleThresholdDeg && (n - lo2) >= win;
-      continue;
-    }
     var maxd = 0.0;
-    for (var k = lo + 1; k < hi; k++) {
+    for (var k = i + 1; k < hi; k++) {
       if (dAng[k] > maxd) {
         maxd = dAng[k];
         if (maxd >= angleThresholdDeg) break;
       }
     }
-    immobile[i] = maxd < angleThresholdDeg;
+    final still = maxd < angleThresholdDeg;
+    final fullWindow = hi - i >= win;
+    immobile[i] = still && fullWindow;
+    immobileUnknown[i] = still && !fullWindow;
   }
 
-  // 4. longest immobile block, bridging brief gaps.
+  // 4. longest immobile block, bridging brief gaps. Only ASSERTED immobile
+  //    seconds extend a block, so a night still running when the record ends is
+  //    reported up to the last second we can actually certify — the undecidable
+  //    tail is left out rather than annexed on the assumption it stayed still.
   final bridge = bridgeGapMin * 60;
   var bestStart = -1, bestEnd = -1, bestLen = 0;
   var i = 0;
@@ -185,6 +223,11 @@ Metric<SleepWindow> vanHeesSleepWindow(
   final offsetMs =
       hasTs ? accel[math.min(bestEnd, n - 1)].tsMs : null;
 
+  var unresolved = 0;
+  for (final u in immobileUnknown) {
+    if (u) unresolved++;
+  }
+
   // Confidence grows with the detected SPT length up to a typical night.
   final conf = clamp(bestLen / (7 * 3600), 0.3, 0.95);
   return Metric<SleepWindow>(
@@ -194,6 +237,7 @@ Metric<SleepWindow> vanHeesSleepWindow(
       onsetMs: onsetMs,
       offsetMs: offsetMs,
       immobile: immobile,
+      immobileUnknown: immobileUnknown,
       zAngleDeg: ang,
       sptSec: bestLen,
     ),
@@ -201,7 +245,9 @@ Metric<SleepWindow> vanHeesSleepWindow(
     tier: Tier.high,
     inputs_used: inputs,
     note: 'van Hees angle-based REST window (5°/${sustainedMin}min); '
-        'a rest period, not PSG sleep',
+        'a rest period, not PSG sleep'
+        '${unresolved > 0 ? '; last ${unresolved}s of the record are '
+            'undecidable (forward window truncated) and are excluded' : ''}',
   );
 }
 

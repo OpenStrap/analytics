@@ -332,4 +332,222 @@ void main() {
       expect(kcal, lessThan(10)); // resting-only over 5 min is tiny (~5–6 kcal)
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // REGRESSION: unevaluable gates must BLOCK, hidden anchors must not exist,
+  // off-skin samples must not become the resting-HR baseline, and the
+  // fabricated-anchor calorie flag must reach the output.
+  // ---------------------------------------------------------------------------
+  group('WorkoutDetector — abstain-over-fabricate (regression)', () {
+    /// Build a day of [restS] still/low-HR seconds, then [workS] seconds of
+    /// sustained motion at [workBpm], then [restS] still seconds again.
+    /// [offSkinS] leading seconds report hr == 0 (the off-skin sentinel) with
+    /// static gravity.
+    ({
+      List<int> hrTs,
+      List<double> hrBpm,
+      List<int> gTs,
+      List<double> gx,
+      List<double> gy,
+      List<double> gz
+    }) day({
+      required int workS,
+      required double workBpm,
+      required double restBpm,
+      int restS = 60,
+      int offSkinS = 0,
+    }) {
+      final hrTs = <int>[];
+      final hrBpm = <double>[];
+      final gTs = <int>[];
+      final gx = <double>[];
+      final gy = <double>[];
+      final gz = <double>[];
+      var t = 0;
+      void still(int n, double bpm) {
+        for (var i = 0; i < n; i++, t++) {
+          hrTs.add(t);
+          hrBpm.add(bpm);
+          gTs.add(t);
+          gx.add(0);
+          gy.add(0);
+          gz.add(1.0); // static gravity -> ~0 motion intensity
+        }
+      }
+
+      still(offSkinS, 0); // OFF-SKIN: hr == 0 (types.dart HrSample convention)
+      still(restS, restBpm);
+      for (var i = 0; i < workS; i++, t++) {
+        hrTs.add(t);
+        hrBpm.add(workBpm);
+        gTs.add(t);
+        gx.add(i.isEven ? 0.5 : -0.5); // |delta| = 1.0 >> motionThreshold
+        gy.add(0);
+        gz.add(0.8);
+      }
+      still(restS, restBpm);
+      return (hrTs: hrTs, hrBpm: hrBpm, gTs: gTs, gx: gx, gy: gy, gz: gz);
+    }
+
+    test('no HRmax anchor => the zone-2 gate is unevaluable => NO workout', () {
+      // age null + maxHR null + <600 HR samples => estimateHRmax returns
+      // (0.0, "unknown") => effMaxHR null => zonePct empty. PRE-FIX the whole
+      // ">=50% time in zone 2+" gate was SKIPPED, so this 6.7-minute walk at
+      // RHR+16 bpm was emitted as a durable workout.
+      final d = day(workS: 400, workBpm: 76, restBpm: 60, restS: 60);
+      expect(d.hrTs.length, lessThan(600),
+          reason: 'must stay below estimateHRmax observed-sample minimum');
+
+      final out = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        restingHR: 60,
+        maxHR: null,
+        age: null,
+      );
+      expect(out, isEmpty);
+    });
+
+    test('detectWorkouts SAYS the gate could not be evaluated', () {
+      final d = day(workS: 400, workBpm: 76, restBpm: 60, restS: 60);
+      final m = detectWorkouts(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        restingHR: 60,
+      );
+      expect(m.value, isEmpty);
+      expect(m.note, contains('no HRmax anchor'));
+      // inputs_used must reflect what was actually supplied.
+      expect(m.inputs_used, contains('resting_hr'));
+      expect(m.inputs_used, isNot(contains('max_hr')));
+      expect(m.inputs_used, isNot(contains('age')));
+      expect(m.inputs_used, isNot(contains('profile')));
+    });
+
+    test('an emitted session NEVER reports strain without an HRmax anchor', () {
+      // PRE-FIX StrainScorer.strain(maxHR: null) silently used
+      // defaultMaxHR() = 220 - 30 = 190, so a session shipped a concrete strain
+      // alongside `hrmax: null, hrmax_source: "unknown"`.
+      final scenarios = <List<ExerciseSession>>[
+        for (final anchor in <double?>[null, 190])
+          WorkoutDetector.detect(
+            hrTs: day(workS: 400, workBpm: 160, restBpm: 60).hrTs,
+            hrBpm: day(workS: 400, workBpm: 160, restBpm: 60).hrBpm,
+            gravTs: day(workS: 400, workBpm: 160, restBpm: 60).gTs,
+            gx: day(workS: 400, workBpm: 160, restBpm: 60).gx,
+            gy: day(workS: 400, workBpm: 160, restBpm: 60).gy,
+            gz: day(workS: 400, workBpm: 160, restBpm: 60).gz,
+            restingHR: 60,
+            maxHR: anchor,
+          ),
+      ];
+      // With an anchor a real bout is emitted; without one, nothing is.
+      expect(scenarios[1], isNotEmpty);
+      expect(scenarios[0], isEmpty);
+      for (final list in scenarios) {
+        for (final s in list) {
+          if (s.hrmax == null) {
+            expect(s.strain, isNull,
+                reason: 'strain must abstain without a real HRmax');
+          }
+        }
+      }
+    });
+
+    test('off-skin (hr==0) samples are excluded from the resting-HR percentile',
+        () {
+      // 200 s off-skin (hr == 0) then a 400 s walk at 120 bpm on a 55 bpm day.
+      // PRE-FIX the 10th percentile of the RAW stream was 0, so restHR = 0,
+      // hrFloor = 15 and %HRR for the walk was (120-0)/190 = 63% => zone 2, so
+      // ordinary walking cleared the >=50%-in-zone-2+ gate. On-skin only, the
+      // 10th percentile is 55 and %HRR is (120-55)/135 = 48% => zone 0.
+      final d = day(
+          workS: 400, workBpm: 120, restBpm: 55, restS: 400, offSkinS: 200);
+      final out = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        maxHR: 190, // isolate the resting-HR derivation
+      );
+      expect(out, isEmpty,
+          reason: 'a 120 bpm walk is zone 0 against a real 55 bpm resting HR');
+    });
+
+    test('an all-off-skin day derives no resting HR and abstains', () {
+      final d = day(workS: 400, workBpm: 0, restBpm: 0, restS: 60);
+      final out = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        maxHR: 190,
+      );
+      expect(out, isEmpty);
+    });
+
+    test('the fabricated-anchor calorie flag reaches the session JSON', () {
+      // Calories.estimateBoutCalories returns usedDefaultAnchors precisely so a
+      // number built on the flat hrmax 220 / restingHr 60 fallback can be
+      // caveated. PRE-FIX it was computed and dropped, and ExerciseSession had
+      // no field or JSON key for it at all.
+      final flagged = Calories.estimateBoutCalories(
+        [0, 60, 120],
+        [140, 145, 150],
+        profile: const WorkoutUserProfile(),
+        hrmax: null,
+        restingHr: null,
+      );
+      expect(flagged.usedDefaultAnchors, isTrue);
+
+      final d = day(workS: 400, workBpm: 160, restBpm: 60);
+      final out = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        restingHR: 60,
+        maxHR: 190,
+        profile: const WorkoutUserProfile(
+            weightKg: 75, heightCm: 178, age: 30, sex: 'male'),
+      );
+      expect(out, isNotEmpty);
+      final j = out.first.toJson();
+      expect(j.containsKey('calories_used_default_anchors'), isTrue);
+      expect(j['calories_used_default_anchors'], isFalse,
+          reason: 'both anchors were real here');
+
+      // And the flag is genuinely carried, not hardcoded false.
+      const caveated = ExerciseSession(
+        start: 0,
+        end: 400,
+        avgHR: 150,
+        peakHR: 160,
+        strain: null,
+        durationS: 400,
+        zoneTimePct: {},
+        avgHRRPct: null,
+        hrmax: null,
+        hrmaxSource: 'unknown',
+        caloriesKcal: 123.0,
+        caloriesKJ: 514.6,
+        caloriesUsedDefaultAnchors: true,
+      );
+      expect(caveated.toJson()['calories_used_default_anchors'], isTrue);
+    });
+  });
 }

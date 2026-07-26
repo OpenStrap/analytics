@@ -111,7 +111,43 @@ Metric<CpcResult> cardiopulmonaryCoupling(
   final vlfc = couplingLs.bandPower(0.001, 0.01);
   final lfc = couplingLs.bandPower(0.01, 0.1);
   final hfc = couplingLs.bandPower(0.1, 0.4);
-  final ratio = lfc > 0 ? hfc / lfc : (hfc > 0 ? double.infinity : 0.0);
+
+  // A non-finite band power means the input itself was poisoned (a NaN/±inf RR
+  // or beat time survives every arithmetic step, and `variance <= 0` does not
+  // catch NaN). Nothing measured here is real, so nothing is reported.
+  if (!hfc.isFinite || !lfc.isFinite || !vlfc.isFinite) {
+    return const Metric<CpcResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'coupling spectrum non-finite (NaN/inf in the NN series or beat '
+          'times) — no coupling was measured',
+    );
+  }
+
+  // Thomas et al. 2005 defines the stability index as the RATIO of high- to
+  // low-frequency coupling power. With no LFC power at all the ratio is a
+  // DIVISION BY ZERO — mathematically undefined, not "infinitely stable" (and
+  // 0/0 is not "maximally unstable" either). The published method says nothing
+  // about a spectrum with an empty 0.01–0.1 Hz band, so we abstain rather than
+  // report a number. (Pre-2026-07 this emitted the sentinel 999.0 inside a live
+  // Metric at confidence up to 0.85, which downstream read as a real,
+  // extraordinarily stable night.)
+  if (lfc <= 0) {
+    return const Metric<CpcResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no low-frequency (0.01-0.1 Hz) coupling power — the Thomas 2005 '
+          'HFC/LFC stability ratio is undefined here, not "perfectly stable"',
+    );
+  }
+  final ratio = hfc / lfc;
+  if (!ratio.isFinite) {
+    return const Metric<CpcResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'HFC/LFC stability ratio overflowed — not a measurement',
+    );
+  }
 
   // Confidence grows with record length; capped (a screen, not a diagnosis).
   final conf = clamp(n / 3600.0, 0.3, 0.85);
@@ -120,7 +156,7 @@ Metric<CpcResult> cardiopulmonaryCoupling(
       hfc: hfc,
       lfc: lfc,
       vlfc: vlfc,
-      cpcRatio: ratio.isFinite ? ratio : 999.0,
+      cpcRatio: ratio,
       dominantHz: domF,
     ),
     confidence: conf,

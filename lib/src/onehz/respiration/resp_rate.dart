@@ -94,8 +94,8 @@ Metric<RespEstimate> rsaRespRate(
   // peak to be stable across them. A respiratory peak is sharp & resolution-
   // invariant; spurious HRV structure or artifact is not.
   final peaks = <double>[]; // br/min
-  double? bestPower;
-  double? bestPeakHz;
+  final peakHz = <double>[]; // the same peaks in Hz, index-aligned
+  final peakPwr = <double>[]; // their spectral power, index-aligned
   for (final grid in const [300, 450, 700]) {
     final ls = lombScargle(tSec, nnMs, freqGrid(rsaLoHz, rsaHiHz, grid));
     if (ls == null) continue;
@@ -103,14 +103,11 @@ Metric<RespEstimate> rsaRespRate(
     if (pk == null) continue;
     // Reject aliasing: a peak at/above Nyquist is not a real breathing rate.
     if (pk >= respHiHz) continue;
-    final pwr = _powerAt(ls, pk);
     peaks.add(pk * 60.0);
-    if (bestPower == null || pwr > bestPower) {
-      bestPower = pwr;
-      bestPeakHz = pk;
-    }
+    peakHz.add(pk);
+    peakPwr.add(_powerAt(ls, pk));
   }
-  if (peaks.length < 2 || bestPeakHz == null) {
+  if (peaks.length < 2) {
     return const Metric<RespEstimate>.absent(
       tier: Tier.high,
       inputs_used: inputs,
@@ -127,7 +124,23 @@ Metric<RespEstimate> rsaRespRate(
           '(spread ${round6(spread)} br/min) — withheld',
     );
   }
-  final brpm = median(peaks)!;
+  // ONE SOURCE for the reported triple. `brpm` used to be median(peaks) while
+  // `peakHz`/`power` came from the highest-POWER grid, so `peak_hz * 60` and
+  // `brpm` could disagree by up to [agreeBrpm] inside a single RespEstimate.
+  // We now pick the MEDOID grid — the grid whose peak is closest to the median
+  // across grids — and report its rate, frequency and power together, so
+  // `brpm == peakHz * 60` holds exactly and `power` is the power measured AT
+  // the reported frequency. (With three grids the medoid IS the median; with
+  // two, the nearer of the pair. Robustness still comes from the agreement gate
+  // above, which already rejected any disagreeing set.)
+  final medBrpm = median(peaks)!;
+  var best = 0;
+  for (var i = 1; i < peaks.length; i++) {
+    if ((peaks[i] - medBrpm).abs() < (peaks[best] - medBrpm).abs()) best = i;
+  }
+  final brpm = peaks[best];
+  final bestPeakHz = peakHz[best];
+  final bestPower = peakPwr[best];
   // Confidence: high when clean & resolution-stable; penalize artifacts and
   // wide spread. Cap below 1 (PRV ceiling).
   final conf = clamp(
@@ -140,8 +153,10 @@ Metric<RespEstimate> rsaRespRate(
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'RSA HF-peak respiratory rate (Lomb-Scargle on native beat times); '
-        'PRV-derived; 1 Hz Nyquist caps rate at 30 br/min',
+    note: 'RSA HF-peak respiratory rate (Lomb-Scargle on native beat times, '
+        'medoid of ${peaks.length} spectral resolutions — brpm, peak_hz and '
+        'power all come from that one grid); PRV-derived; 1 Hz Nyquist caps '
+        'rate at 30 br/min',
   );
 }
 

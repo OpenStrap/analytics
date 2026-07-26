@@ -418,4 +418,84 @@ void main() {
       expect(days[tempIllnessMinBaseline].need, isNull);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: degenerate (zero-dispersion) baseline columns must be dropped,
+  // not floored to an epsilon scale.
+  // -------------------------------------------------------------------------
+  group('multivariateAnomaly — degenerate baseline (regression)', () {
+    test('an exactly-constant baseline column is DROPPED, never floored to 1e-6',
+        () {
+      // Ten baseline nights whose skin-temp z is an exactly-constant quantized
+      // 0.0 (MAD == 0 AND SD == 0), alongside a real HRV column, then a night
+      // where temp moves by a physiologically trivial 0.4.
+      //
+      // PRE-FIX the scale was `(stddev ?? 1.0).clamp(1e-6, 1e9)` => 1e-6, so
+      // zc = 4e5, d2 ~ 1.6e11 >> the chi-square(2) gate of 13.82 and the night
+      // surfaced as an illness anomaly candidate off a 0.4 change.
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 10; i++)
+          AnomalyFeatures(hrv: 40.0 + (i.isEven ? 1.0 : -1.0), temp: 0.0),
+        const AnomalyFeatures(hrv: 40.0, temp: 0.4),
+        const AnomalyFeatures(hrv: 40.0, temp: 0.4),
+      ];
+      final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
+      final out =
+          multivariateAnomaly(dates, feats, minBaseline: 10, persistDays: 2);
+
+      expect(out[10].candidate, isFalse,
+          reason: 'a 0.4 move on a scale-less feature is not an anomaly');
+      expect(out[10].mahalanobis, isNull,
+          reason: 'only one feature survives => no distance is computable');
+      expect(out[10].need, 'degenerate_baseline:no_dispersion');
+      expect(out.where((d) => d.flagged), isEmpty);
+    });
+
+    test('a feature WITH dispersion still computes normally', () {
+      // Same shape, but temp now varies => both features are standardizable.
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 12; i++)
+          AnomalyFeatures(
+              hrv: 40.0 + (i.isEven ? 1.0 : -1.0),
+              temp: i.isEven ? 0.1 : -0.1),
+      ];
+      final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
+      final out =
+          multivariateAnomaly(dates, feats, minBaseline: 10, persistDays: 2);
+      expect(out[11].mahalanobis, isNotNull);
+      expect(out[11].need, isNull);
+      expect(out[11].drivers, hasLength(2));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: the glass-box driver detail must name the method ACTUALLY used.
+  // -------------------------------------------------------------------------
+  group('readinessComposite — disclosed method matches the method used', () {
+    test('quantized baseline (MAD=0) discloses the mean/SD fallback', () {
+      // Whole-bpm RHR pinned at 55 for most of the window: MAD collapses to 0,
+      // robustZ abstains and the deliberate `?? z(v, base)` fallback (#26)
+      // produced the contribution. PRE-FIX the detail still said "robust-z".
+      final base = <double>[55, 55, 55, 55, 55, 55, 55, 58];
+      final m = readinessComposite([rhrInput(60, base)]);
+      expect(m.present, isTrue, reason: m.note);
+      final d = m.drivers!.single;
+      expect(d.detail, contains('mean+SD fallback'));
+      expect(d.detail, isNot(contains('robust-z')));
+    });
+
+    test('a dispersed baseline still discloses robust-z (median+MAD)', () {
+      final base = <double>[50, 52, 54, 56, 58, 60, 62];
+      final m = readinessComposite([rhrInput(70, base)]);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.drivers!.single.detail, contains('robust-z (median+MAD)'));
+    });
+
+    test('a fully constant baseline (MAD=0 AND SD=0) still abstains', () {
+      // The fallback is NOT a licence to score against zero dispersion.
+      final m = readinessComposite([rhrInput(60, List<double>.filled(8, 55.0))]);
+      expect(m.present, isFalse);
+      expect(m.toJson()['value'], '—');
+    });
+  });
 }

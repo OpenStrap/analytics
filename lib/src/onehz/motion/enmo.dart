@@ -1,11 +1,40 @@
-// MOTION / ACTIVITY — ENMO + MAD per-minute amplitude index.
+// MOTION / ACTIVITY — per-minute amplitude indices on a 1 Hz accel stream.
 //
-// van Hees 2013 (ENMO = Euclidean Norm Minus One) / Vähä-Ypyä 2015 (MAD,
-// Mean Amplitude Deviation). The foundational 24/7 motion index on a 1 Hz
-// gravity-vector accel stream.
+// THREE per-minute features live here, computed in one pass:
 //
-//   ENMO_i  = max(0, ‖a_i‖ − g_ref)        per sample, then aggregated/min
-//   MAD_min = mean_i( |‖a_i‖ − mean_min(‖a‖)| )   per minute
+//   ENMO_i   = max(0, ‖a_i‖ − g_ref)                  per sample, mean/minute
+//              (van Hees 2013, Euclidean Norm Minus One)
+//   MAD_min  = mean_i( |‖a_i‖ − mean_min(‖a‖)| )      per minute
+//              (Vähä-Ypyä 2015, Mean Amplitude Deviation)
+//   dynAmp   = mean_i( ‖a_i − rollingMean(a)‖ )       per minute  ← see below
+//
+// WHY dynAmp EXISTS (calibration invariance).
+//   ENMO subtracts a SCALAR gravity reference `g_ref` from every sample. That
+//   reference has to be estimated from the data, and on a wrist the estimate is
+//   orientation-dependent: a consumer MEMS accel carries a few percent of
+//   per-axis gain and offset error, so the measured ‖a‖ of a motionless wrist
+//   differs by several 0.01 g between, say, a sleeping posture and a sitting
+//   posture. Auto-calibration keys off the stillest epochs, which on a 24 h day
+//   is the sleep block — so g_ref is biased toward the sleep orientation and is
+//   then subtracted from the whole waking day. The resulting bias is the SAME
+//   ORDER as the walking signal itself (both ~0.05 g), i.e. SNR ≈ 1 by
+//   construction. No threshold on ENMO can be stable against that.
+//
+//   Vähä-Ypyä 2015 makes exactly this argument for preferring an amplitude
+//   measure that does not depend on knowing ‖g‖. dynAmp takes it one step
+//   further and removes gravity as a VECTOR rather than as a scalar norm:
+//   gravity is constant in the SENSOR frame over a short window, motion is AC,
+//   so a per-axis high-pass leaves only the dynamic component.
+//
+//     dx_i = a_i − rollingMean(a over the last `highPassWindowS` seconds)
+//     dyn_i = ‖dx_i‖ ,  dynAmp(minute) = mean(dyn over the minute)
+//
+//   Under a per-axis affine sensor error a' = G·a + b (G diagonal gain, b
+//   offset), the rolling mean maps to G·mean + b, so the OFFSET b CANCELS
+//   EXACTLY — every constant per-axis bias, including whatever gravity happens
+//   to project onto each axis in the current posture, lands in the DC term and
+//   is removed. A residual gain G only SCALES dyn, so any threshold expressed
+//   as a quantile of the user's own dynAmp distribution is invariant to it too.
 //
 // HONESTY (catalog §"what 1 Hz accel CANNOT do", Nyquist):
 //   * 1 Hz accel gives an AMPLITUDE index only. NO steps, NO cadence, NO gait,
@@ -14,7 +43,10 @@
 //   * Intensity bands here are RELATIVE (within-user, percentile-of-you),
 //     NOT absolute METs — wrist 1 Hz cannot calibrate energy in MET units.
 //   * The 1 g reference is AUTO-CALIBRATED from the data's own still epochs,
-//     since the sensor's zero-g offset/gain drift.
+//     since the sensor's zero-g offset/gain drift. [calibrateGRef] and [enmo]
+//     are RETAINED for the callers that legitimately want a norm-based index
+//     (van Hees sleep detection, Brage energy fusion) — but any decision that
+//     needs a STABLE absolute cut-point should use [MotionMinute.dynAmp].
 
 import 'dart:math' as math;
 import '../types.dart';
@@ -27,12 +59,22 @@ class MotionMinute {
   final double enmo; // mean ENMO over the minute (g), ≥0
   final double mad; // mean amplitude deviation over the minute (g), ≥0
   final double meanMag; // mean ‖a‖ over the minute (g) — for diagnostics
+
+  /// Mean magnitude of the GRAVITY-REMOVED (per-axis high-passed) accel vector
+  /// over the minute (g), ≥0. CALIBRATION-INVARIANT: any constant per-axis
+  /// offset — sensor bias, or the projection of gravity in the current posture
+  /// — cancels exactly, and a per-axis gain only rescales it. This is the
+  /// feature to threshold when the cut-point must be stable across days; see
+  /// the file header for the derivation.
+  final double dynAmp;
+
   const MotionMinute(
     this.tsMinStartMs,
     this.nSamples,
     this.enmo,
     this.mad,
     this.meanMag,
+    this.dynAmp,
   );
   Map<String, dynamic> toJson() => {
         'ts_min_start_ms': tsMinStartMs,
@@ -40,6 +82,7 @@ class MotionMinute {
         'enmo_g': round6(enmo),
         'mad_g': round6(mad),
         'mean_mag_g': round6(meanMag),
+        'dyn_amp_g': round6(dynAmp),
       };
 }
 
@@ -76,24 +119,74 @@ double calibrateGRef(List<double> mags) {
   return g > 0 ? g : 1.0;
 }
 
-/// Compute the ENMO + MAD per-minute motion index over a 1 Hz accel series.
+/// Default high-pass window (s) that separates GRAVITY from MOTION.
+///
+/// Gravity is a constant vector in the sensor frame over short windows, so
+/// everything slower than ~1/[defaultGravityWindowS] Hz is treated as gravity
+/// (plus per-axis sensor bias) and removed; everything faster is motion.
+/// 15 s ≈ a 0.067 Hz corner: well below any voluntary movement, well above the
+/// timescale on which a wrist changes posture.
+const double defaultGravityWindowS = 15.0;
+
+/// Compute the per-minute motion indices (ENMO + MAD + dynAmp) over a 1 Hz
+/// accel series, in a single pass.
 ///
 /// [samples] need not be exactly 1 Hz nor perfectly contiguous — minutes are
-/// bucketed by wall-clock `tsMs`. Invalid (off-wrist) samples are dropped.
-/// [gRef] overrides auto-calibration when a personal/static reference is known.
-/// [minSamplesPerMinute] gates a minute as covered (default 30 = ≥50% @1 Hz).
+/// bucketed by wall-clock `tsMs`, and samples are sorted by `tsMs` first so the
+/// high-pass window is causal in real time. Invalid (off-wrist) samples are
+/// dropped. [gRef] overrides auto-calibration when a personal/static reference
+/// is known. [minSamplesPerMinute] gates a minute as covered (default 30 =
+/// ≥50% @1 Hz). [gravityWindowS] is THE GRAVITY BAND: the trailing window whose
+/// per-axis mean is treated as gravity + constant sensor bias and subtracted
+/// from each axis before taking the magnitude (see [MotionMinute.dynAmp]).
+///
+/// Edge/gap handling is honest, not padded: the trailing mean is taken over
+/// whatever samples actually fall inside the window, so the first samples of a
+/// series average over fewer points (the very first sample has dyn = 0 by
+/// construction, since it is its own mean), and a recording gap longer than
+/// [gravityWindowS] simply empties the window rather than carrying a stale
+/// gravity estimate across the gap.
 EnmoResult enmoSeries(
   List<AccelSample> samples, {
   double? gRef,
   int minSamplesPerMinute = 30,
+  double gravityWindowS = defaultGravityWindowS,
 }) {
-  final valid = samples.where((s) => s.valid).toList();
+  final valid = samples.where((s) => s.valid).toList()
+    ..sort((a, b) => a.tsMs.compareTo(b.tsMs));
   if (valid.isEmpty) return EnmoResult(gRef ?? 1.0, const [], 0.0);
 
   final mags = <double>[
     for (final s in valid) math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z)
   ];
   final ref = gRef ?? calibrateGRef(mags);
+
+  // ── per-axis high-pass → dynamic-vector magnitude (calibration-invariant) ──
+  // dx = a − trailingMean(a, gravityWindowS). A constant per-axis offset (and
+  // the constant gravity projection of the current posture) appears identically
+  // in a and in its mean, so it cancels EXACTLY. Window is bounded by TIME, not
+  // sample count, so it is sample-rate agnostic and gap-safe.
+  final dyn = List<double>.filled(valid.length, 0.0);
+  final windowMs = gravityWindowS * 1000.0;
+  var lo = 0;
+  var sx = 0.0, sy = 0.0, sz = 0.0;
+  for (var i = 0; i < valid.length; i++) {
+    final s = valid[i];
+    sx += s.x;
+    sy += s.y;
+    sz += s.z;
+    while (lo < i && (s.tsMs - valid[lo].tsMs) >= windowMs) {
+      sx -= valid[lo].x;
+      sy -= valid[lo].y;
+      sz -= valid[lo].z;
+      lo++;
+    }
+    final n = i - lo + 1;
+    final dx = s.x - sx / n;
+    final dy = s.y - sy / n;
+    final dz = s.z - sz / n;
+    dyn[i] = math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
 
   // bucket sample indices by minute
   final buckets = <int, List<int>>{};
@@ -122,6 +215,12 @@ EnmoResult enmoSeries(
       madSum += (m - meanMag).abs();
     }
     final mad = madSum / magsMin.length;
+    // dynAmp: mean gravity-removed vector magnitude over the minute.
+    var dynSum = 0.0;
+    for (final i in idxs) {
+      dynSum += dyn[i];
+    }
+    final dynAmp = dynSum / idxs.length;
     if (idxs.length >= minSamplesPerMinute) covered++;
     minutes.add(MotionMinute(
       k * 60000.0,
@@ -129,6 +228,7 @@ EnmoResult enmoSeries(
       enmo,
       mad,
       meanMag,
+      dynAmp,
     ));
   }
   final coverage = minutes.isEmpty ? 0.0 : covered / minutes.length;

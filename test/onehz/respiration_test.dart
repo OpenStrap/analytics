@@ -378,4 +378,40 @@ void main() {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: brpm, peak_hz and power inside one RespEstimate must come from
+  // ONE source. brpm used to be median(peaks) across the three spectral grids
+  // while peakHz/power came from the highest-POWER grid, so `peak_hz * 60` and
+  // `brpm` disagreed inside a single result.
+  // -------------------------------------------------------------------------
+  group('rsaRespRate — internally consistent output (regression)', () {
+    for (final hz in const [0.25, 0.20, 0.30]) {
+      test('modHz=$hz: peak_hz * 60 == brpm exactly', () {
+        final s = syntheticRsaRr(modHz: hz, beats: 500);
+        final corr = correctRr(s.rr);
+        final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+            artifactFraction: 1 - corr.cleanFraction);
+        expect(m.present, isTrue, reason: m.note);
+        final v = m.value!;
+        expect(v.brpm, isNotNull);
+        expect(v.peakHz, isNotNull);
+        expect(v.power, isNotNull);
+        expect(v.peakHz! * 60.0, closeTo(v.brpm!, 1e-9),
+            reason: 'brpm ${v.brpm} vs peak_hz*60 ${v.peakHz! * 60}');
+        // The reported rate must still be the right one.
+        expect(v.brpm!, closeTo(hz * 60.0, 1.5));
+      });
+    }
+
+    test('the JSON pair round-trips consistently', () {
+      final s = syntheticRsaRr(modHz: 0.25, beats: 500);
+      final corr = correctRr(s.rr);
+      final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      final j = m.value!.toJson();
+      expect((j['peak_hz'] as double) * 60.0,
+          closeTo(j['brpm'] as double, 1e-4));
+    });
+  });
 }

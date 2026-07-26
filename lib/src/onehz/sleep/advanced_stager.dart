@@ -1302,66 +1302,134 @@ class AdvancedSleepStager {
     return out;
   }
 
+  /// Longest accelerometer dropout (s) the dense-array build will carry the
+  /// last-known gravity vector across.
+  ///
+  /// A carry-forward is honest for a BRIEF dropout (a missed 1 Hz sample is far
+  /// more likely than a real posture change, and ENMO off a stale-but-still
+  /// vector reads "no movement" rather than fabricating motion). UNBOUNDED it
+  /// is fabrication in the opposite direction: hours with no accelerometer at
+  /// all become a perfectly still — i.e. perfectly asleep — stretch, so a
+  /// forced 8 h window holding 2 h of data scored TST 8 h / efficiency 100%.
+  ///
+  /// 60 s = two staging epochs, and the shortest wake bout the Webster/
+  /// Cole-Kripke continuity rules treat as bridgeable (Webster et al. 1982;
+  /// Cole et al. 1992) — i.e. the finest resolution at which this pipeline
+  /// claims to separate sleep from wake. A carry-forward bounded by it can
+  /// therefore never manufacture a scorable sleep bout on its own. Seconds past
+  /// the bound are UNSTAGED: they are left out of staging entirely and reported
+  /// as wake.
+  static const int maxAccelCarryForwardSec = 60;
+
   /// DEFAULT staging path — delegates to `cardioStager` (cardio_stager.dart).
   /// See the file header for why this is the default. `cardioStager` expects
   /// per-SECOND-indexed [AccelSample]/HR arrays (index i == second i from
   /// [start]), not the sparse timestamped [GravTs]/[HrTs] lists this file
   /// otherwise uses — so this builds that dense array explicitly: accel gaps
-  /// carry the last-known vector forward (a brief gap is far more likely a
-  /// missed sample than genuine movement — and ENMO from a stale-but-still
-  /// vector reads as "no movement", never fabricating motion that didn't
-  /// happen); HR gaps fill with 0, which `cardioStager` already documents as
-  /// its own "off-skin" contract — no fabrication either way.
+  /// carry the last-known vector forward for at most
+  /// [maxAccelCarryForwardSec]; HR gaps fill with 0, which `cardioStager`
+  /// already documents as its own "off-skin" contract — no fabrication either
+  /// way.
+  ///
+  /// HONESTY: seconds with no usable accelerometer are NOT staged. The window
+  /// is split at those gaps and each contiguous usable RUN is staged on its own
+  /// (so a dropout cannot pollute the neighbouring run's night baselines
+  /// either); the gap seconds, runs too short to stage, and a window where
+  /// `cardioStager` itself abstains all come back as WAKE — the "stay unstaged"
+  /// contract [stageWindow] documents. They must NEVER come back as 'light',
+  /// which is what a zero-data window used to report for its entire length.
   static List<StageSegment> _stageSessionCardio(int start, int end,
       List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
     final span = end - start;
-    if (span < 3 * epochS.round()) return [StageSegment(start, end, 'light')];
+    if (span <= 0) return const <StageSegment>[];
+    final epSec = epochS.round();
+    final minStageableSec = 3 * epSec;
+    if (span < minStageableSec) return [StageSegment(start, end, 'wake')];
+
     final gByTs = <int, GravTs>{for (final g in grav) if (g.ts >= start && g.ts < end) g.ts: g};
     final hByTs = <int, HrTs>{for (final h in hr) if (h.ts >= start && h.ts < end) h.ts: h};
     final accel = List<AccelSample>.filled(
         span, AccelSample(start * 1000.0, 0, 0, 1.0));
     final hr1hz = List<double>.filled(span, 0.0);
-    var haveGrav = false;
+    // usable[i] — second i has a real accel sample or a BOUNDED carry-forward.
+    final usable = List<bool>.filled(span, false);
+    var lastRealIdx = -1;
     for (var i = 0; i < span; i++) {
       final ts = start + i;
       final g = gByTs[ts];
       if (g != null) {
         accel[i] = AccelSample(ts * 1000.0, g.x, g.y, g.z);
-        haveGrav = true;
-      } else if (haveGrav) {
-        accel[i] = accel[i - 1]; // carry-forward — see doc comment above.
+        lastRealIdx = i;
+        usable[i] = true;
+      } else if (lastRealIdx >= 0 && (i - lastRealIdx) <= maxAccelCarryForwardSec) {
+        // Bounded carry-forward — see [maxAccelCarryForwardSec]. The TIMESTAMP
+        // is this second's, not the stale sample's: cardioStager centres its RR
+        // windows on `accel[mid].tsMs`, so copying the old sample wholesale
+        // mis-centred every RMSSD/LF-HF window inside a gap.
+        final p = accel[i - 1];
+        accel[i] = AccelSample(ts * 1000.0, p.x, p.y, p.z);
+        usable[i] = true;
       }
       hr1hz[i] = hByTs[ts]?.bpm ?? 0.0; // 0 = off-skin, cardioStager's own contract.
     }
-    if (!haveGrav) return [StageSegment(start, end, 'light')];
+
     final rSeg = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
     final rrMs = [for (final r in rSeg) r.rrMs];
     final rrTsMs = [for (final r in rSeg) r.ts * 1000.0];
 
-    final result = cardioStager(hr1hz, accel, rrMs: rrMs, rrTsMs: rrTsMs);
-    final nEpoch = result.base.stages.length;
-    if (nEpoch == 0) return [StageSegment(start, end, 'light')];
-    final labels = List<String>.generate(nEpoch, (i) {
-      switch (result.base.stages[i]) {
-        case SleepStage.wake:
-          return 'wake';
-        case SleepStage.rem:
-          return 'rem';
-        case SleepStage.nrem:
-          return (i < result.deepFlag.length && result.deepFlag[i])
-              ? 'deep'
-              : 'light';
+    // Everything not staged below stays 'wake' — the honest default.
+    final perSec = List<String>.filled(span, 'wake');
+    var i = 0;
+    while (i < span) {
+      if (!usable[i]) {
+        i++;
+        continue;
       }
-    });
-    // Reuse the same edges/segment-building [_stageSession] uses, so callers
-    // get byte-identical StageSegment semantics regardless of which staging
-    // method produced them.
-    final edges = <double>[
-      for (var i = 0; i <= nEpoch; i++) start + i * epochS,
-    ];
-    edges[nEpoch] = math.max(edges[nEpoch], end.toDouble());
-    final grid = _EpochGrid(edges, nEpoch, [], [], [], [], [], []);
-    return _buildSegments(labels, grid, end);
+      var j = i;
+      while (j < span && usable[j]) {
+        j++;
+      }
+      if ((j - i) >= minStageableSec) {
+        final result = cardioStager(
+          hr1hz.sublist(i, j),
+          accel.sublist(i, j),
+          rrMs: rrMs,
+          rrTsMs: rrTsMs,
+        );
+        final nEpoch = result.base.stages.length;
+        for (var e = 0; e < nEpoch; e++) {
+          final label = switch (result.base.stages[e]) {
+            SleepStage.wake => 'wake',
+            SleepStage.rem => 'rem',
+            SleepStage.nrem => (e < result.deepFlag.length && result.deepFlag[e])
+                ? 'deep'
+                : 'light',
+          };
+          final lo = i + e * epSec;
+          // The last epoch absorbs the run's sub-epoch remainder, exactly as
+          // [_buildSegments] extends the final segment to the window end.
+          final hi = e == nEpoch - 1 ? j : math.min(j, lo + epSec);
+          for (var k = lo; k < hi; k++) {
+            perSec[k] = label;
+          }
+        }
+      }
+      i = j;
+    }
+
+    // Coalesce the per-second labels into contiguous [StageSegment]s tiling
+    // [start, end) — same segment semantics [_buildSegments] produces.
+    final segments = <StageSegment>[];
+    var k = 0;
+    while (k < span) {
+      var m = k;
+      while (m < span && perSec[m] == perSec[k]) {
+        m++;
+      }
+      segments.add(StageSegment(start + k, start + m, perSec[k]));
+      k = m;
+    }
+    return segments;
   }
 
   static List<StageSegment> _stageSession(int start, int end, List<GravTs> grav,

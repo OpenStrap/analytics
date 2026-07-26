@@ -318,6 +318,11 @@ SleepSegmentation segmentSleep(
       offsetMs: chosen.end * 1000.0,
       immobile:
           fallbackWindow?.immobile ?? List<bool>.filled(trimmedAccel.length, false),
+      // Forward the undecidable-second mask too. Dropping it here silently
+      // downgraded "we could not tell" into "not immobile", which is the
+      // conservative direction but costs the caller `unresolvedTailSec` — the
+      // one signal that says a night ran past the end of the record.
+      immobileUnknown: fallbackWindow?.immobileUnknown ?? const [],
       zAngleDeg:
           fallbackWindow?.zAngleDeg ?? List<double>.filled(trimmedAccel.length, 0.0),
       sptSec: inBed,
@@ -342,7 +347,18 @@ class _SleepGroup {
   final int start;
   final int end;
   final double asleepMin;
+
+  /// SUM of the bridged sessions' durations — the bridge GAPS are excluded, so
+  /// this is NOT `end - start` for a multi-session group. Do not use it for
+  /// time-of-day math: `start + inBedSec ~/ 2` lands half the total gap EARLY
+  /// (a single 50-min bridge ⇒ 25 min early). Use [midsleepSec] for that.
   final int inBedSec;
+
+  /// The group's circadian centre: the midpoint of its ACTUAL SPAN. This is
+  /// what a midsleep anchor is defined against (the middle of the sleep period,
+  /// gaps included — Roenneberg's MSF/mid-sleep convention), and it is what
+  /// [_pickMainSleepGroup] must compare with a habitual-midsleep anchor.
+  int get midsleepSec => start + (end - start) ~/ 2;
 
   const _SleepGroup({
     required this.sessions,
@@ -432,8 +448,10 @@ _SleepGroup? _pickMainSleepGroup(
   }
 
   double alignmentBonusFor(_SleepGroup g) {
-    final mid = g.start + (g.inBedSec ~/ 2);
-    final dist = circularDistanceSec(localSecOfDay(mid), targetMidsleepSec);
+    // Midsleep = the middle of the SPAN, never `start + inBedSec/2` — see
+    // [_SleepGroup.inBedSec]/[_SleepGroup.midsleepSec].
+    final dist =
+        circularDistanceSec(localSecOfDay(g.midsleepSec), targetMidsleepSec);
     if (dist <= fullWindowSec) return alignmentBonusMin;
     if (dist >= zeroWindowSec) return 0.0;
     final frac = (zeroWindowSec - dist) / (zeroWindowSec - fullWindowSec);
@@ -454,12 +472,36 @@ _SleepGroup? _pickMainSleepGroup(
   return winner;
 }
 
+/// Habitual midsleep anchor (local second-of-day) from ≥[minDays] of history.
+///
+/// Timezone conversion is PER TIMESTAMP, with exactly the same precedence
+/// [segmentSleep] uses for its own local-time-of-day math — because the anchor
+/// this returns is compared against `_pickMainSleepGroup`'s per-timestamp
+/// conversion, and the two must agree:
+///   * [tzOffsetResolver] (if given) wins — inject a deterministic ts→offset map.
+///   * else a fixed [tzOffsetSeconds] (if given) — LEGACY/deterministic only.
+///   * else the machine's offset in effect AT EACH timestamp (DST-correct).
+///
+/// A single frozen offset applied to every history block is a DST bypass: the
+/// ≥14 days this function requires will regularly straddle a transition, so
+/// roughly half the days convert with the wrong offset and the circular-mean
+/// anchor is biased by up to ~30 min against the DST-correct comparison it
+/// feeds. Prefer passing NOTHING (machine-local, DST-correct) or a resolver;
+/// pass [tzOffsetSeconds] only when a caller genuinely wants one frozen offset.
 int? habitualMidsleepSecFromHistory(
   List<({int startSec, int endSec, String dayKey})> history, {
-  required int tzOffsetSeconds,
+  int? tzOffsetSeconds,
+  int Function(int tsSec)? tzOffsetResolver,
   int minDays = 14,
 }) {
   if (history.isEmpty) return null;
+  final int Function(int tsSec) tzAt = tzOffsetResolver ??
+      (tzOffsetSeconds != null
+          ? (int _) => tzOffsetSeconds
+          : (int tsSec) => DateTime.fromMillisecondsSinceEpoch(
+                tsSec * 1000,
+                isUtc: false,
+              ).timeZoneOffset.inSeconds);
   final longestByDay = <String, ({int startSec, int endSec, String dayKey})>{};
   for (final block in history) {
     final cur = longestByDay[block.dayKey];
@@ -474,10 +516,12 @@ int? habitualMidsleepSecFromHistory(
   if (longestByDay.length < minDays) return null;
   final mids = [
     for (final block in longestByDay.values)
-      _localSecOfDay(
-        block.startSec + ((block.endSec - block.startSec) ~/ 2),
-        tzOffsetSeconds,
-      ),
+      // Convert with the offset in effect AT THAT BLOCK'S midsleep instant, not
+      // one offset frozen for the whole history — see the doc comment above.
+      () {
+        final mid = block.startSec + ((block.endSec - block.startSec) ~/ 2);
+        return _localSecOfDay(mid, tzAt(mid));
+      }(),
   ];
   return _circularMeanSec(mids);
 }

@@ -215,6 +215,11 @@ Metric<StagerResult> autonomicStager(
   );
 }
 
+/// Test seam for [_websterRescore] — exposed (non-private) so the regression
+/// test can drive the continuity rule directly. Not part of the public barrel.
+void websterRescoreAutonomic(List<SleepStage> sm, int epochSec) =>
+    _websterRescore(sm, epochSec);
+
 /// Webster/Cole-Kripke sleep-continuity rescoring (in place).
 ///
 /// After sleep onset (first sleep epoch), a contiguous run of WAKE epochs that
@@ -227,16 +232,26 @@ Metric<StagerResult> autonomicStager(
 ///   sleep-before ≥15 min  AND wake-run ≤ 4 min → sleep
 /// "sleep-before" is satisfied by sustained sleep on EITHER bracketing side,
 /// so an arousal sandwiched between two long sleep bouts is bridged.
+///
+/// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
+/// hypnogram taken before the pass — Webster's rule scores each wake bout
+/// against the ORIGINAL surrounding sleep (Webster et al. 1982; Cole et al.
+/// 1992), not against sleep this same pass just manufactured. Reading the list
+/// being mutated let every bridged bout count as context for the next one, so
+/// bridging CASCADED and a genuinely fragmented night collapsed into one
+/// continuous sleep block (WASO 0, efficiency 100%).
 void _websterRescore(List<SleepStage> sm, int epochSec) {
   bool isSleep(SleepStage s) => s != SleepStage.wake;
   final n = sm.length;
   // epochs-per-minute (rounded; epochSec=30 → 2/min).
   double minToEp(double m) => m * 60.0 / epochSec;
+  // Immutable context snapshot — see the doc comment above.
+  final snap = List<SleepStage>.of(sm);
 
   // Locate sleep onset & final sleep epoch — only rescore within the sleep body.
   var onset = -1, lastSleep = -1;
   for (var i = 0; i < n; i++) {
-    if (isSleep(sm[i])) {
+    if (isSleep(snap[i])) {
       if (onset < 0) onset = i;
       lastSleep = i;
     }
@@ -247,7 +262,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   int sleepRunBefore(int i) {
     var c = 0;
     var k = i - 1;
-    while (k >= onset && isSleep(sm[k])) {
+    while (k >= onset && isSleep(snap[k])) {
       c++;
       k--;
     }
@@ -258,7 +273,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   int sleepRunAfter(int i) {
     var c = 0;
     var k = i + 1;
-    while (k <= lastSleep && isSleep(sm[k])) {
+    while (k <= lastSleep && isSleep(snap[k])) {
       c++;
       k++;
     }
@@ -279,13 +294,13 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
 
   var i = onset;
   while (i <= lastSleep) {
-    if (isSleep(sm[i])) {
+    if (isSleep(snap[i])) {
       i++;
       continue;
     }
     // WAKE run [i, j).
     var j = i;
-    while (j <= lastSleep && !isSleep(sm[j])) {
+    while (j <= lastSleep && !isSleep(snap[j])) {
       j++;
     }
     final wakeLen = j - i;

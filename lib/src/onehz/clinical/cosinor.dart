@@ -20,7 +20,12 @@ class CosinorFit {
   final double acrophaseRad; // phase of the peak (rad), in [-π, π]
   final double acrophaseHours; // acrophase expressed as clock-hours of [period]
   final double periodHours;
-  final double r2; // goodness of fit (0..1)
+  final double r2; // raw goodness of fit (0..1)
+
+  /// R² adjusted for the 3 fitted parameters (M, β, γ):
+  /// R²adj = 1 − (1−R²)·(n−1)/(n−3). This is the honest fit quality — the raw
+  /// R² of a 3-parameter fit is upward-biased and approaches 1 as n → 3.
+  final double r2Adj;
   const CosinorFit({
     required this.mesor,
     required this.amplitude,
@@ -28,6 +33,7 @@ class CosinorFit {
     required this.acrophaseHours,
     required this.periodHours,
     required this.r2,
+    required this.r2Adj,
   });
   Map<String, dynamic> toJson() => {
         'mesor': round6(mesor),
@@ -36,21 +42,31 @@ class CosinorFit {
         'acrophase_hours': round6(acrophaseHours),
         'period_hours': round6(periodHours),
         'r2': round6(r2),
+        'r2_adj': round6(r2Adj),
       };
 }
+
+/// Minimum samples for a cosinor fit. The model has 3 free parameters
+/// (M, β, γ); with n = 4 there is a single residual degree of freedom, so R²
+/// is essentially an interpolation score (4 RANDOM points routinely fit at
+/// r² 0.76–0.99). Halberg's zero-amplitude test needs real residual dof, so we
+/// require ≥8 samples over the period and report the ADJUSTED R².
+const int cosinorMinPoints = 8;
 
 /// Single-component cosinor fit.
 ///
 /// [tHours] sample times in hours (any origin). [y] sample values. [periodHours]
-/// the rhythm period (default 24). Needs ≥4 points and non-degenerate design.
+/// the rhythm period (default 24). Needs ≥[minPoints] points and a
+/// non-degenerate design.
 Metric<CosinorFit> cosinor(
   List<double> tHours,
   List<double> y, {
   double periodHours = 24,
+  int minPoints = cosinorMinPoints,
 }) {
   const inputs = ['signal_timeseries'];
   final n = y.length;
-  if (n < 4 || tHours.length != n || periodHours <= 0) {
+  if (n < math.max(4, minPoints) || tHours.length != n || periodHours <= 0) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
@@ -109,8 +125,13 @@ Metric<CosinorFit> cosinor(
     ssRes += (y[i] - fit) * (y[i] - fit);
   }
   final r2 = ssTot == 0 ? 0.0 : clamp(1 - ssRes / ssTot, 0, 1);
+  // Adjusted for the 3 fitted parameters (M, β, γ). Confidence MUST come from
+  // the adjusted value: the raw R² of a 3-parameter fit is upward-biased
+  // (E[R²] = 2/(n−1) under the null), so a handful of noise points used to
+  // score confidence 0.95 at tier HIGH.
+  final r2Adj = clamp(1 - (1 - r2) * (n - 1) / (n - 3), 0, 1);
 
-  final conf = clamp(r2, 0.1, 0.95);
+  final conf = clamp(r2Adj, 0.1, 0.95);
   return Metric<CosinorFit>(
     value: CosinorFit(
       mesor: mesor,
@@ -119,6 +140,7 @@ Metric<CosinorFit> cosinor(
       acrophaseHours: phaseHours,
       periodHours: periodHours,
       r2: r2,
+      r2Adj: r2Adj,
     ),
     confidence: conf,
     tier: Tier.high,

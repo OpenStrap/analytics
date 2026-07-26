@@ -212,7 +212,14 @@ RrCorrectionResult correctRr(
   );
 }
 
-/// Time-varying threshold: alpha × (QD = (Q3−Q1)/2) of |x| in a sliding window.
+/// Time-varying threshold: alpha × QD of the SIGNED series x in a sliding
+/// window, where QD = (Q3 − Q1)/2 (Lipponen & Tarvainen 2019, eq. for th1/th2:
+/// "th = α · quartile deviation of dRR over the 91-beat window", α = 5.2).
+///
+/// The quartile deviation MUST be taken on the SIGNED series. Taking it on |x|
+/// folds the symmetric ±dRR distribution onto one side, collapsing QD by ~an
+/// order of magnitude; the threshold then sinks to [floor] and the detector
+/// degenerates into a fixed 100 ms cut-off that flags ordinary RSA as ectopy.
 List<double> _slidingThreshold(
     List<double> x, int win, double alpha, double floor) {
   final n = x.length;
@@ -223,14 +230,15 @@ List<double> _slidingThreshold(
     final hi = math.min(n - 1, i + half);
     final seg = <double>[];
     for (var k = lo; k <= hi; k++) {
-      seg.add(x[k].abs());
+      seg.add(x[k]);
     }
     final q1 = percentile(seg, 25) ?? 0;
     final q3 = percentile(seg, 75) ?? 0;
     final qd = (q3 - q1) / 2;
-    // Floor keeps a gross outlier detectable even on (near-)quantized clean
-    // data where the QD collapses to 0 — but the floor sits well above normal
-    // beat-to-beat HRV wobble so it never flags the healthy signal.
+    // Floor keeps a gross outlier detectable on (near-)quantized clean data
+    // where the QD genuinely collapses to 0 (constant RR). On any series with
+    // real beat-to-beat variability α·QD dominates the floor, so the floor
+    // never governs a physiological signal.
     out[i] = math.max(alpha * qd, floor);
   }
   return out;

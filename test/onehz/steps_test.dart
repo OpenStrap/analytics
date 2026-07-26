@@ -160,125 +160,444 @@ void main() {
     });
   });
 
-  group('Tier B — 1 Hz step estimate', () {
-    // Build per-minute motion rows directly (bypass enmoSeries).
-    List<MotionMinute> rows(List<double> enmos) => [
-          for (var i = 0; i < enmos.length; i++)
-            MotionMinute(i * 60000.0, 60, enmos[i], enmos[i], 1.0 + enmos[i]),
+  group('Tier B — personalDynFloor', () {
+    test('insufficient pooled history → null (never a constant)', () {
+      expect(personalDynFloor(List<double>.filled(1999, 0.5)), isNull);
+      expect(personalDynFloor(List<double>.filled(2000, 0.5)), isNotNull);
+      expect(personalDynFloor(const []), isNull);
+    });
+
+    test('a degenerate (all-zero) pool → null, not a floor of 0', () {
+      // A floor of 0 would pass every minute — abstaining is the honest answer.
+      expect(personalDynFloor(List<double>.filled(3000, 0.0)), isNull);
+    });
+
+    test('returns the requested quantile of the pooled distribution', () {
+      final pool = [for (var i = 0; i < 3000; i++) i / 3000.0];
+      expect(personalDynFloor(pool), closeTo(0.9, 0.01));
+      expect(personalDynFloor(pool, quantile: 0.5), closeTo(0.5, 0.01));
+    });
+
+    test('the minimum-history requirement is a named, overridable constant', () {
+      expect(personalDynFloorMinMinutes, 2000);
+      expect(
+          personalDynFloor(List<double>.filled(50, 0.4), minMinutes: 10),
+          closeTo(0.4, 1e-9));
+    });
+  });
+
+  // The storage-bound variant. A caller that prunes its raw substrate within
+  // days cannot re-read trailing minutes, so it persists ONE value per day.
+  group('Tier B — personalDynFloorFromDailySummaries', () {
+    test('too few trailing days → null (never a constant)', () {
+      expect(
+          personalDynFloorFromDailySummaries(
+              List<double>.filled(personalDynFloorMinDays - 1, 0.44)),
+          isNull);
+      expect(
+          personalDynFloorFromDailySummaries(
+              List<double>.filled(personalDynFloorMinDays, 0.44)),
+          isNotNull);
+      expect(personalDynFloorFromDailySummaries(const []), isNull);
+    });
+
+    test('a single anomalous day cannot move the floor (median, not mean)', () {
+      // The whole point of a multi-day anchor: one day spent travelling, or
+      // with the wrist in an odd posture, must not drag the threshold.
+      final normal = <double>[0.44, 0.43, 0.45, 0.44, 0.46, 0.43, 0.45];
+      final withOutlier = [...normal, 9.0];
+      final a = personalDynFloorFromDailySummaries(normal)!;
+      final b = personalDynFloorFromDailySummaries(withOutlier)!;
+      expect((a - b).abs(), lessThan(0.02),
+          reason: 'a 20x outlier day must barely move a median-based floor');
+    });
+
+    test('degenerate/non-positive day summaries are dropped, not averaged in',
+        () {
+      expect(personalDynFloorFromDailySummaries(List<double>.filled(8, 0.0)),
+          isNull);
+      final mixed = <double>[0.44, 0.0, 0.45, -1.0, 0.43, 0.44, 0.46, 0.45];
+      // Only the 6 positive days survive, which still clears the minimum.
+      expect(personalDynFloorFromDailySummaries(mixed), closeTo(0.445, 0.01));
+    });
+  });
+
+  group('Tier B — dailyDynSummary (what the caller persists)', () {
+    List<MotionMinute> mins(List<double> dyn, {int n = 60}) => [
+          for (var i = 0; i < dyn.length; i++)
+            MotionMinute(i * 60000.0, n, 0.055, 0.02, 1.055, dyn[i]),
         ];
-    // A day = `sed` sedentary minutes (low ENMO) + `walk` walking minutes.
-    List<MotionMinute> day(int sed, int walk,
-            {double sedE = 0.006, double walkE = 0.06}) =>
-        rows([...List<double>.filled(sed, sedE), ...List<double>.filled(walk, walkE)]);
-    // A learned personal walking signature — the estimate is calibration-gated.
+
+    test('a day too thin to summarise yields null, not a fabricated level', () {
+      expect(dailyDynSummary(mins(List<double>.filled(59, 0.4))), isNull);
+      expect(dailyDynSummary(mins(List<double>.filled(60, 0.4))), isNotNull);
+      expect(dailyDynSummary(const []), isNull);
+    });
+
+    test('uncovered minutes do not count toward the summary', () {
+      // 200 rows but all sparse → below the covered-minute floor → null.
+      expect(dailyDynSummary(mins(List<double>.filled(200, 0.4), n: 5)),
+          isNull);
+    });
+
+    test('summarises this day at the same quantile the floor is defined on',
+        () {
+      final day = [for (var i = 0; i < 1000; i++) i / 1000.0];
+      expect(dailyDynSummary(mins(day)), closeTo(0.9, 0.01));
+    });
+
+    test('round-trips: per-day summaries feed the multi-day floor', () {
+      // End-to-end of the persistence path: summarise each day, pool the
+      // summaries, get a floor — the exact sequence the caller performs.
+      final summaries = <double>[
+        for (var d = 0; d < 7; d++)
+          dailyDynSummary(mins([for (var i = 0; i < 500; i++) i / 1000.0]))!
+      ];
+      final floor = personalDynFloorFromDailySummaries(summaries);
+      expect(floor, isNotNull);
+      expect(floor!, greaterThan(0));
+    });
+  });
+
+  group('Tier B — 1 Hz active-minutes estimate', () {
+    // Per-minute motion rows built directly (bypassing enmoSeries). ENMO/MAD/
+    // meanMag are filled with DELIBERATELY MISLEADING values: every sedentary
+    // minute carries an ENMO of 0.055 g, just above the absolute 0.05 g walking
+    // floor the old estimator used. If anything ever re-introduces an ENMO-based
+    // decision path, these tests break loudly instead of shipping 39k steps.
+    List<MotionMinute> rows(List<double> dyn) => [
+          for (var i = 0; i < dyn.length; i++)
+            MotionMinute(i * 60000.0, 60, 0.055, 0.02, 1.055, dyn[i]),
+        ];
+    const sedDyn = 0.02; // a sedentary minute's dynamic amplitude (g)
+    const walkDyn = 0.60; // an ambulatory minute's (g)
+    const floorG = 0.375; // the kind of value personalDynFloor yields in practice
+    // A day = `sed` sedentary minutes then `walk` ambulatory minutes.
+    List<MotionMinute> day(int sed, int walk) => rows([
+          ...List<double>.filled(sed, sedDyn),
+          ...List<double>.filled(walk, walkDyn),
+        ]);
+    // A measured personal cadence from Tier A (100 Hz, real counts).
     const cal = StepCalibration(cadenceSpm: 110, refEnmo: 0.06, n: 10);
 
-    test('uncalibrated → a bounded ballpark (no whipsaw)', () {
-      // A walking block: even uncalibrated it gives a believable number (fixed
-      // gate, continuous cadence), not 0 and not absurd.
-      final m = dailyStepEstimate(day(120, 30)); // no calib
-      expect(m.present, isTrue);
-      expect(m.value!.calibrated, isFalse);
-      expect(m.value!.steps, inInclusiveRange(1500, 5000)); // ~30 walking min
-    });
-
-    test('calibrated sedentary day → 0 steps', () {
-      final m = dailyStepEstimate(rows(List<double>.filled(600, 0.006)), calib: cal);
-      expect(m.value!.steps, 0);
-    });
-
-    test('a quiet day with HR at rest → 0 steps', () {
-      // Below-floor movement OR resting HR → nothing counts (no whipsaw to huge).
-      final m = dailyStepEstimate(rows(List<double>.filled(300, 0.02)),
-          calib: cal,
-          hrPerMin: List<double>.filled(300, 58.0),
-          restingHr: 58);
-      expect(m.value!.steps, 0);
-    });
-
-    test('a walking block over a sedentary baseline → minutes × cadence', () {
-      final m = dailyStepEstimate(day(120, 30), calib: cal);
-      expect(m.value!.ambulatoryMinutes, inInclusiveRange(28, 30));
-      expect(m.value!.steps, inInclusiveRange(2800, 3600)); // ~30 × ~110
-    });
-
-    test('more walking → more steps', () {
-      final few = dailyStepEstimate(day(120, 10), calib: cal);
-      final many = dailyStepEstimate(day(120, 40), calib: cal);
-      expect(many.value!.steps, greaterThan(few.value!.steps));
-    });
-
-    test('HR (soft veto) suppresses walking-amplitude minutes at rest HR', () {
+    test('COLD START: no personal floor → ABSTAIN with a need_baseline note', () {
       final m = dailyStepEstimate(day(120, 30),
-          calib: cal,
+          personalDynFloorG: null, pooledMinutesAvailable: 640);
+      expect(m.present, isFalse, reason: 'no constant fallback is permitted');
+      expect(m.confidence, 0);
+      expect(m.tier, Tier.estimate);
+      expect(m.note, 'need_baseline:have=640,need=$personalDynFloorMinMinutes');
+    });
+
+    test('a non-positive floor is treated as absent, not as "pass everything"',
+        () {
+      final m = dailyStepEstimate(day(120, 30), personalDynFloorG: 0.0);
+      expect(m.present, isFalse);
+      expect(m.note, startsWith('need_baseline:'));
+    });
+
+    test('REGRESSION: a day whose sedentary minutes sit just above an ABSOLUTE '
+        '0.05 g floor produces no active minutes', () {
+      // The measured failure shape: a calibration excursion lifted every
+      // sedentary minute of one day above the old absolute 0.05 g gate, and the
+      // day reported 39,384 steps against a true ~2,000. The personal floor is
+      // a multi-day reference, so a whole quiet day sitting at 0.055 g simply
+      // sits far below it — there is nothing for a drift to push it over.
+      final drifted = rows(List<double>.filled(1400, 0.055));
+      final m = dailyStepEstimate(drifted, personalDynFloorG: floorG);
+      expect(m.value!.activeMinutes, 0);
+      expect(m.value!.steps, 0);
+      expect(m.value!.stepsHigh, 0);
+    });
+
+    test('REGRESSION: a quiet day cannot collapse its own threshold', () {
+      // The mirror-image failure of a SAME-DAY relative baseline (day p20 +
+      // 4·MAD): on a quiet day the baseline collapses and everything passes.
+      // The floor here comes from history, so a quiet day stays quiet.
+      final quiet = rows(List<double>.filled(1400, sedDyn));
+      final m = dailyStepEstimate(quiet, personalDynFloorG: floorG);
+      expect(m.value!.activeMinutes, 0);
+    });
+
+    test('an ambulatory block over a sedentary day → active minutes × the '
+        'cadence band', () {
+      final m = dailyStepEstimate(day(120, 30), personalDynFloorG: floorG);
+      expect(m.present, isTrue);
+      expect(m.value!.activeMinutes, 30);
+      expect(m.value!.calibrated, isFalse);
+      // population band 100–130 spm (Tudor-Locke 2011)
+      expect(m.value!.stepsLow, 3000);
+      expect(m.value!.stepsHigh, 3900);
+      expect(m.value!.steps, 3450); // midpoint, the back-compat scalar
+      expect(m.value!.steps,
+          inInclusiveRange(m.value!.stepsLow, m.value!.stepsHigh));
+      expect(m.value!.dynFloorG, closeTo(floorG, 1e-12));
+      expect(m.tier, Tier.estimate);
+    });
+
+    test('more ambulatory minutes → more steps, and the range scales with them',
+        () {
+      final few = dailyStepEstimate(day(120, 10), personalDynFloorG: floorG);
+      final many = dailyStepEstimate(day(120, 40), personalDynFloorG: floorG);
+      expect(many.value!.activeMinutes,
+          greaterThan(few.value!.activeMinutes));
+      expect(many.value!.steps, greaterThan(few.value!.steps));
+      expect(many.value!.stepsHigh - many.value!.stepsLow,
+          greaterThan(few.value!.stepsHigh - few.value!.stepsLow));
+    });
+
+    test('VIGOROUS CEILING: motion far above the floor is not walking', () {
+      // 30 minutes of violent arm motion (shaking / a lifting set): well over
+      // floor × vigorousCeilingRatio, so it is activity but not ambulation.
+      final m = dailyStepEstimate(
+          rows([
+            ...List<double>.filled(120, sedDyn),
+            ...List<double>.filled(30, floorG * 5),
+          ]),
+          personalDynFloorG: floorG);
+      expect(m.value!.activeMinutes, 0);
+      // …and raising the ceiling lets the same minutes through, proving the
+      // ceiling (not some other gate) was what rejected them.
+      final loose = dailyStepEstimate(
+          rows([
+            ...List<double>.filled(120, sedDyn),
+            ...List<double>.filled(30, floorG * 5),
+          ]),
+          personalDynFloorG: floorG,
+          vigorousCeilingRatio: 10.0);
+      expect(loose.value!.activeMinutes, 30);
+    });
+
+    test('HR GATE: ambulatory-amplitude minutes at resting HR do not count', () {
+      final m = dailyStepEstimate(day(120, 30),
+          personalDynFloorG: floorG,
           hrPerMin: [
             ...List<double>.filled(120, 58.0),
             ...List<double>.filled(30, 58.0)
           ],
           restingHr: 58);
-      expect(m.value!.ambulatoryMinutes, 0, reason: 'HR at rest → not walking');
+      expect(m.value!.activeMinutes, 0, reason: 'HR at rest → not walking');
     });
 
-    test('HR elevated over the walking block → it counts', () {
+    test('HR GATE: HR elevated over the block → it counts', () {
       final m = dailyStepEstimate(day(120, 30),
-          calib: cal,
+          personalDynFloorG: floorG,
           hrPerMin: [
             ...List<double>.filled(120, 58.0),
             ...List<double>.filled(30, 95.0)
           ],
           restingHr: 58);
-      expect(m.value!.ambulatoryMinutes, greaterThan(20));
+      expect(m.value!.activeMinutes, 30);
     });
 
-    test('an isolated elevated minute does not count on its own (bout gate)', () {
-      final e = List<double>.filled(60, 0.006);
-      e[30] = 0.20; // one elevated minute, surrounded by sedentary ones
-      final m = dailyStepEstimate(rows(e), calib: cal);
-      // a single minute alone isn't a real walk (a brief HR/movement blip
-      // shouldn't turn into phantom steps) - needs minBoutMin=3 in a row.
-      expect(m.value!.ambulatoryMinutes, 0);
+    test('HR GATE: resting HR falls back to the day p10 when none is supplied',
+        () {
+      final m = dailyStepEstimate(day(120, 30),
+          personalDynFloorG: floorG,
+          hrPerMin: [
+            ...List<double>.filled(120, 55.0),
+            ...List<double>.filled(30, 57.0), // < p10 + 8 bpm
+          ]);
+      expect(m.value!.activeMinutes, 0);
+    });
+
+    test('BOUT GATE: an isolated elevated minute does not count on its own', () {
+      final d = List<double>.filled(60, sedDyn);
+      d[30] = walkDyn;
+      final m = dailyStepEstimate(rows(d), personalDynFloorG: floorG);
+      expect(m.value!.activeMinutes, 0);
       expect(m.value!.steps, 0);
     });
 
-    test('exactly at the bout boundary: 3 in a row counts, 2 does not', () {
-      final e2 = List<double>.filled(60, 0.006);
-      e2[30] = 0.20;
-      e2[31] = 0.20;
-      final justTwo = dailyStepEstimate(rows(e2), calib: cal);
-      expect(justTwo.value!.ambulatoryMinutes, 0);
+    test('BOUT GATE: exactly at the boundary — 3 in a row counts, 2 does not',
+        () {
+      final d2 = List<double>.filled(60, sedDyn);
+      d2[30] = walkDyn;
+      d2[31] = walkDyn;
+      expect(dailyStepEstimate(rows(d2), personalDynFloorG: floorG)
+          .value!
+          .activeMinutes,
+          0);
 
-      final e3 = List<double>.filled(60, 0.006);
-      e3[30] = 0.20;
-      e3[31] = 0.20;
-      e3[32] = 0.20;
-      final justThree = dailyStepEstimate(rows(e3), calib: cal);
-      expect(justThree.value!.ambulatoryMinutes, 3);
+      final d3 = List<double>.filled(60, sedDyn);
+      d3[30] = walkDyn;
+      d3[31] = walkDyn;
+      d3[32] = walkDyn;
+      expect(dailyStepEstimate(rows(d3), personalDynFloorG: floorG)
+          .value!
+          .activeMinutes,
+          3);
     });
 
-    test('a coverage gap breaks the run instead of stitching two short bouts together', () {
-      // 2 elevated minutes, a sedentary gap, then 2 more elevated minutes -
-      // 4 elevated minutes total but never 3 in a row, so none of it counts.
-      final e = List<double>.filled(60, 0.006);
-      e[10] = 0.20;
-      e[11] = 0.20;
-      e[20] = 0.20;
-      e[21] = 0.20;
-      final m = dailyStepEstimate(rows(e), calib: cal);
-      expect(m.value!.ambulatoryMinutes, 0);
+    test('BOUT GATE: a coverage gap breaks the run rather than stitching two '
+        'short bouts together', () {
+      // 4 elevated minutes total but never 3 adjacent, so none of it counts.
+      final d = List<double>.filled(60, sedDyn);
+      d[10] = walkDyn;
+      d[11] = walkDyn;
+      d[20] = walkDyn;
+      d[21] = walkDyn;
+      final m = dailyStepEstimate(rows(d), personalDynFloorG: floorG);
+      expect(m.value!.activeMinutes, 0);
     });
 
-    test('a higher personal cadence lifts the count', () {
-      final slow = dailyStepEstimate(day(120, 30), calib: cal);
+    test('a MEASURED personal cadence narrows the reported range', () {
+      final pop = dailyStepEstimate(day(120, 30), personalDynFloorG: floorG);
+      final personal = dailyStepEstimate(day(120, 30),
+          personalDynFloorG: floorG, calib: cal);
+      expect(personal.value!.calibrated, isTrue);
+      expect(personal.value!.activeMinutes, pop.value!.activeMinutes);
+      expect(personal.value!.stepsHigh - personal.value!.stepsLow,
+          lessThan(pop.value!.stepsHigh - pop.value!.stepsLow),
+          reason: 'a measured cadence is a narrower band than the population');
+      // ±10% around a measured 110 spm
+      expect(personal.value!.cadenceLowSpm, closeTo(99.0, 1e-9));
+      expect(personal.value!.cadenceHighSpm, closeTo(121.0, 1e-9));
+      expect(personal.confidence, greaterThan(pop.confidence));
+    });
+
+    test('a faster measured cadence lifts the count', () {
+      final slow =
+          dailyStepEstimate(day(120, 30), personalDynFloorG: floorG, calib: cal);
       final fast = dailyStepEstimate(day(120, 30),
+          personalDynFloorG: floorG,
           calib: const StepCalibration(cadenceSpm: 135, refEnmo: 0.06, n: 10));
-      expect(fast.value!.cadenceUsed, greaterThan(slow.value!.cadenceUsed));
       expect(fast.value!.steps, greaterThan(slow.value!.steps));
     });
 
+    test('a thin calibration (n < 3) does not claim a personal cadence', () {
+      final m = dailyStepEstimate(day(120, 30),
+          personalDynFloorG: floorG,
+          calib: const StepCalibration(cadenceSpm: 110, refEnmo: 0.06, n: 1));
+      expect(m.value!.calibrated, isFalse);
+      expect(m.value!.cadenceLowSpm, freeLivingCadenceLowSpm);
+    });
+
     test('empty motion → absent ESTIMATE', () {
-      final m = dailyStepEstimate(const []);
+      final m = dailyStepEstimate(const [], personalDynFloorG: floorG);
       expect(m.present, isFalse);
       expect(m.tier, Tier.estimate);
+      expect(m.note, 'no motion minutes');
+    });
+
+    test('too few covered minutes → absent, not a fabricated zero', () {
+      final sparse = [
+        for (var i = 0; i < 3; i++)
+          MotionMinute(i * 60000.0, 60, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      final m = dailyStepEstimate(sparse, personalDynFloorG: floorG);
+      expect(m.present, isFalse);
+      // uncovered minutes are excluded before the count, too
+      final uncovered = [
+        for (var i = 0; i < 100; i++)
+          MotionMinute(i * 60000.0, 5, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      expect(dailyStepEstimate(uncovered, personalDynFloorG: floorG).present,
+          isFalse);
+    });
+
+    test('toJson leads with active minutes and carries the range', () {
+      final j = dailyStepEstimate(day(120, 30), personalDynFloorG: floorG)
+          .value!
+          .toJson();
+      expect(j['active_min'], 30);
+      expect(j['steps_low'], 3000);
+      expect(j['steps_high'], 3900);
+      expect(j['steps'], 3450);
+      expect(j['cadence_source'], 'population_band');
+    });
+  });
+
+  group('Tier B — PROPERTY: calibration invariance end to end', () {
+    // Build a synthetic 1 Hz day, run the whole pipeline (enmoSeries →
+    // personalDynFloor → dailyStepEstimate), then run it again through a
+    // corrupted sensor — a constant per-axis OFFSET plus a per-axis GAIN — and
+    // require the same number of active minutes. This is the exact fault that
+    // produced 39,384 steps on a real day, so it is the regression that matters
+    // most: the answer must not depend on the sensor's calibration state.
+    List<AccelSample> synth(
+      int minutes, {
+      required double Function(int) amp,
+      double gx = 1.0,
+      double gy = 1.0,
+      double gz = 1.0,
+      double bx = 0.0,
+      double by = 0.0,
+      double bz = 0.0,
+    }) {
+      final out = <AccelSample>[];
+      for (var m = 0; m < minutes; m++) {
+        final a = amp(m);
+        // Motion DIRECTION rotates between axes so per-axis gains cannot cancel
+        // by a trivial common factor — the invariance being tested is real.
+        final axis = m % 3;
+        for (var s = 0; s < 60; s++) {
+          final i = m * 60 + s;
+          final p = i.isEven ? a : -a;
+          final x = (axis == 0 ? p : 0.0);
+          final y = (axis == 1 ? p : 0.0) - 0.05;
+          final z = (axis == 2 ? p : 0.0) + 1.03;
+          out.add(AccelSample(
+              i * 1000.0, gx * x + bx, gy * y + by, gz * z + bz));
+        }
+      }
+      return out;
+    }
+
+    // History pool: a CONTINUOUS, low-skewed spread of minute intensities, the
+    // shape a real 24/7 wrist stream has — most minutes near-still, a long
+    // right tail. Its p90 is what personalDynFloor will pick up.
+    double poolAmp(int m) {
+      final u = (m % 200) / 200.0;
+      return 0.01 + 0.5 * u * u;
+    }
+
+    // The day under test: near-still, except one 30-minute walk.
+    double dayAmp(int m) =>
+        (m >= 600 && m < 630) ? 0.60 : 0.01 + 0.0004 * (m % 40);
+
+    ({int active, double floor}) run({
+      double gx = 1.0,
+      double gy = 1.0,
+      double gz = 1.0,
+      double bx = 0.0,
+      double by = 0.0,
+      double bz = 0.0,
+    }) {
+      final pool = enmoSeries(synth(2400,
+          amp: poolAmp, gx: gx, gy: gy, gz: gz, bx: bx, by: by, bz: bz));
+      final today = enmoSeries(synth(720,
+          amp: dayAmp, gx: gx, gy: gy, gz: gz, bx: bx, by: by, bz: bz));
+      final floor =
+          personalDynFloor([for (final m in pool.minutes) m.dynAmp]);
+      expect(floor, isNotNull, reason: '2400 pooled minutes is enough history');
+      final est =
+          dailyStepEstimate(today.minutes, personalDynFloorG: floor);
+      expect(est.present, isTrue);
+      return (active: est.value!.activeMinutes, floor: floor!);
+    }
+
+    test('the clean sensor finds the walk', () {
+      final r = run();
+      expect(r.active, 30, reason: 'the one 30-minute walk, and only it');
+    });
+
+    test('a constant per-axis OFFSET changes nothing', () {
+      expect(run(bx: 0.05, by: -0.04, bz: 0.06).active, run().active);
+    });
+
+    test('a per-axis GAIN error changes nothing', () {
+      expect(run(gx: 1.05, gy: 0.96, gz: 1.03).active, run().active);
+    });
+
+    test('OFFSET + GAIN together change nothing', () {
+      final clean = run();
+      final corrupt =
+          run(gx: 1.05, gy: 0.96, gz: 1.03, bx: 0.05, by: -0.04, bz: 0.06);
+      expect(corrupt.active, clean.active);
+      // The floor itself DOES move — it rides the same gain the feature does,
+      // which is precisely why the decision does not move.
+      expect(corrupt.floor, isNot(closeTo(clean.floor, 1e-12)));
     });
   });
 
