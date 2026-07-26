@@ -2,6 +2,8 @@
 
 [![test](https://github.com/OpenStrap/analytics/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/analytics/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![stars](https://img.shields.io/github/stars/OpenStrap/analytics?style=flat&color=e2825f)](https://github.com/OpenStrap/analytics/stargazers)
+[![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
 
 This is the math. Given the always-on 1 Hz substrate a WHOOP 4.0 actually hands over —
 beat-to-beat RR intervals, 1 Hz heart rate, 1 Hz tri-axial accel, and a few relative ADC
@@ -130,9 +132,17 @@ tests, and the rules that keep this package honest. Security issues go through
 
 ## Support the work
 
-Free, MIT, no company behind it. If OpenStrap gave your band a second life,
-[DONATE.md](https://github.com/OpenStrap/edge/blob/main/DONATE.md) has BTC and EVM
-addresses. Protocol findings and bug reports are worth more than money, though.
+No subscription, no paywall, no company behind this. If OpenStrap gave your band a second
+life, a small tip genuinely helps:
+
+- **BTC** — `bc1qvtcch38dcwp967ar764uu6eetw7tf907844wfq`
+- **EVM** (Ethereum · Base · Arbitrum · Optimism · Polygon) —
+  `0x8310C89393366b7eBCD47ABa82e1dfB5ECeFFbD9`
+
+[What donations actually pay for →](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
+
+Nothing is gated behind paying, and nothing ever will be. Protocol findings and bug
+reports are worth more than money, though.
 
 ---
 
