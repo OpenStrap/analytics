@@ -1,3 +1,9 @@
+// This file deliberately exercises `autonomicStager`, which is deprecated but
+// still exported for back-compat. Testing shipped-but-deprecated API is the
+// point, so the deprecation notice is suppressed for the whole file. Older Dart
+// analyzers report `deprecated_member_use_from_same_package` where newer ones
+// don't, and CI runs `--fatal-infos` on both, so this has to be file-level.
+// ignore_for_file: deprecated_member_use_from_same_package
 // SLEEP & CIRCADIAN family — synthetic known-answer + real-capture plausibility.
 //
 // No TS oracle exists for the 1 Hz sleep/circadian methods, so every method is
