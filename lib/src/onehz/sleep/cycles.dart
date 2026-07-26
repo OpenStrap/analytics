@@ -83,7 +83,12 @@ SleepCyclesResult detectSleepCycles(
   final perMin = List<double?>.filled(nMin, null);
   final bins = List<List<double>>.generate(nMin, (_) => <double>[]);
   for (var k = 0; k < rrMs.length; k++) {
-    final m = (rrTsMs[k] ~/ 1000 - onsetSec) ~/ 60;
+    // FLOOR-divide, don't truncate. Dart's `~/` rounds toward ZERO, so a beat
+    // 1–59 s BEFORE onset produced bin 0 instead of a negative bin and slipped
+    // past the `m < 0` guard below — up to 59 s of pre-onset (often awake,
+    // high-variability) beats polluted minute 0 of the cycle series.
+    final relSec = (rrTsMs[k] / 1000.0).floor() - onsetSec;
+    final m = (relSec / 60.0).floor();
     if (m < 0 || m >= nMin) continue;
     final v = rrMs[k];
     if (v >= _rrMin && v <= _rrMax) bins[m].add(v);

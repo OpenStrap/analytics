@@ -373,4 +373,63 @@ void main() {
       expect(p.value!.percentile, inInclusiveRange(0, 100));
     });
   });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: mid-sleep is CIRCULAR. A midnight-straddling weekday midpoint
+  // must not report ~22.5 h of social jetlag for a ~1.4 h drift.
+  // [PUB Wittmann/Roenneberg, Chronobiol Int 2006; MCTQ MSFsc]
+  // -------------------------------------------------------------------------
+  group('social jetlag / chronotype — circular clock (regression)', () {
+    test('midnight-straddling weekday mid-sleep gives the SHORT arc', () {
+      // ~23:50 weekday mid-sleep vs ~01:10 weekend => a real +1.4 h drift.
+      // PRE-FIX: median() on raw clock-hours gave msw 23.7, msf 1.15 and a
+      // headline sjl of −22.55 h.
+      final work = [23.7, 0.3, 23.9, 0.1, 23.8];
+      final free = [1.0, 1.3];
+      final m = socialJetlag(free, work);
+      expect(m.present, isTrue, reason: m.note);
+      final v = m.value!;
+      expect(v.sjlHours, greaterThan(0), reason: 'weekend runs later');
+      expect(v.sjlHours, closeTo(1.25, 0.4));
+      expect(v.absHours, lessThan(2.0));
+    });
+
+    test('|SJL| can never exceed 12 h (shortest arc on the 24 h circle)', () {
+      // ~23:06 free vs ~01:06 work: 2 h EARLIER, not 22 h later.
+      final m = socialJetlag([23.0, 23.2], [1.0, 1.2, 1.1]);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.absHours, closeTo(2.0, 0.3));
+      expect(m.value!.absHours, lessThanOrEqualTo(12.0));
+      expect(m.value!.sjlHours, lessThan(0), reason: 'weekend runs EARLIER');
+    });
+
+    test('the ordinary (non-wrapping) case is unchanged', () {
+      final m = socialJetlag([5.4, 5.6, 5.5], [3.4, 3.6, 3.5, 3.5, 3.4]);
+      expect(m.value!.sjlHours, closeTo(2.0, 0.15));
+    });
+
+    test('chronotype: a 23:30 free-day mid-sleep is EARLY, not evening', () {
+      // PRE-FIX msfSc = 23.5 fell through every band to "evening type" — the
+      // exact opposite of the truth. The label bands now read the MCTQ band
+      // axis (clock-hours unwrapped about 06:00).
+      final m = chronotype(
+        [23.4, 23.6, 23.5],
+        [8.0, 8.0, 8.0],
+        avgWeekSleepDurH: 8.0,
+        totalDaysObserved: 21,
+      );
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.typeLabel, 'early type');
+    });
+
+    test('chronotype: a late free-day mid-sleep is still an evening type', () {
+      final m = chronotype(
+        [5.3, 5.6, 5.5],
+        [8.5, 9.0, 8.8],
+        avgWeekSleepDurH: 8.7,
+        totalDaysObserved: 21,
+      );
+      expect(m.value!.typeLabel, contains('evening'));
+    });
+  });
 }

@@ -288,10 +288,22 @@ Metric<double> vo2maxEstimate({
   required Sex sex,
   required double? age,
 }) {
-  if (restingHr == null || maxHr == null || maxHr <= restingHr) {
+  // Uth-Sørensen-Overgaard-Pedersen 2004: VO2max ≈ 15.3 · (HRmax / HRrest).
+  // The ratio is only defined for a STRICTLY POSITIVE resting HR — a 0 (the
+  // package's off-skin sentinel, see types.dart HrSample) divides to Infinity,
+  // which Metric.toJson emits raw and jsonEncode then throws on. `maxHr <=
+  // restingHr` does not catch it, so guard the denominator explicitly and
+  // abstain. Non-finite inputs abstain for the same reason.
+  if (restingHr == null ||
+      maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
+      restingHr <= 0 ||
+      maxHr <= restingHr) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: ['resting_hr', 'max_hr'],
+      note: 'VO2max needs a positive resting HR below HRmax — "—" (never imputed)',
     );
   }
   final vo2 = 15.3 * (maxHr / restingHr);
@@ -324,6 +336,29 @@ Metric<PhysioAge> physiologicalAge({
   required double? sleepEfficiency,
   required double? dailySteps,
 }) {
+  // ABSTAIN when NOTHING physiological was supplied. `score` starts at the
+  // chronological age and only the blocks below move it, so with every
+  // physiological input null this used to return a PRESENT metric reading
+  // "physioAge == your age, delta 0" — a fabricated result — while claiming six
+  // inputs it never saw. A physiological age with no physiology in it is not an
+  // estimate, it is the birth date restated.
+  final used = <String>[
+    if (vo2max != null) 'vo2max',
+    if (restingHr != null) 'resting_hr',
+    if (rmssd != null) 'rmssd',
+    if (sleepDurationH != null) 'sleep_duration',
+    if (sleepEfficiency != null) 'sleep_efficiency',
+    if (dailySteps != null) 'steps',
+  ];
+  if (used.isEmpty) {
+    return const Metric<PhysioAge>.absent(
+      tier: Tier.estimate,
+      inputs_used: ['profile'],
+      note: 'no physiological input present — "—" (never imputed; '
+          'chronological age alone is not a physiological age)',
+    );
+  }
+
   var score = chronologicalAge;
   if (vo2max != null) {
     score -= ((vo2max - 35.0) / 5.0).clamp(-8.0, 8.0);
@@ -349,18 +384,26 @@ Metric<PhysioAge> physiologicalAge({
   score = score.clamp(18.0, 95.0);
   return Metric<PhysioAge>(
     value: PhysioAge(physioAge: score, deltaYears: score - chronologicalAge),
-    confidence: 0.35,
+    // Confidence tracks how much physiology actually went in: one input is a
+    // hint, all six is the intended estimate.
+    confidence: (0.15 + 0.035 * used.length).clamp(0.15, 0.35),
     tier: Tier.estimate,
-    inputs_used: const [
-      'profile',
-      'vo2max',
-      'resting_hr',
-      'rmssd',
-      'sleep',
-      'steps',
-    ],
-    note: 'directional physiological-age estimate',
+    // inputs_used reports what was ACTUALLY used, never the full menu.
+    inputs_used: ['profile', ...used],
+    note: 'directional physiological-age estimate from ${used.length}/6 '
+        'physiological inputs',
   );
+}
+
+/// Unbiased (n−1) sample variance about a known mean. 0 for n < 2.
+double _sampleVar(List<double> xs, double m) {
+  if (xs.length < 2) return 0.0;
+  var s = 0.0;
+  for (final x in xs) {
+    final dx = x - m;
+    s += dx * dx;
+  }
+  return s / (xs.length - 1);
 }
 
 class JournalDay {
@@ -378,6 +421,15 @@ class JournalEffect {
   final int nUntagged;
   final bool insufficient;
   final bool meaningful;
+
+  /// Standardized effect size — Cohen's d = delta / pooled SD (Cohen 1988).
+  /// Null when the pooled within-group SD is 0 (both sides constant) or the
+  /// comparison was not run at all. Disclosed so the "meaningful" verdict is
+  /// auditable rather than a bare percentage.
+  final double? cohensD;
+
+  /// Pooled within-group SD used for [cohensD]; null when not computed.
+  final double? pooledSd;
   const JournalEffect({
     required this.outcome,
     required this.delta,
@@ -387,6 +439,8 @@ class JournalEffect {
     required this.nUntagged,
     required this.insufficient,
     required this.meaningful,
+    this.cohensD,
+    this.pooledSd,
   });
 }
 
@@ -396,10 +450,26 @@ class JournalTagCorrelation {
   const JournalTagCorrelation(this.tag, this.effects);
 }
 
+/// Per-tag effect of a journal entry on each outcome series.
+///
+/// [outcomes] values must be POSITIONALLY ALIGNED to [dates] (same length); a
+/// series of a different length cannot be attributed to dates at all, so it is
+/// reported as insufficient rather than silently truncated or index-crashed.
+///
+/// [minEffectPct] and [minCohensD] set the "meaningful" bar. A percentage
+/// difference of means alone is NOT evidence: with 2 days per side, two
+/// noisy series routinely differ by several percent. The verdict therefore also
+/// requires a standardized effect size (Cohen's d = delta / pooled SD ≥ 0.5,
+/// Cohen's conventional "medium" effect) so within-group spread is accounted
+/// for. When both sides are exactly constant (pooled SD = 0) d is undefined and
+/// we require [minNForZeroSpread] observations per side before calling it.
 List<JournalTagCorrelation> journalCorrelations({
   required List<JournalDay> journal,
   required List<String> dates,
   required Map<String, List<double?>> outcomes,
+  double minEffectPct = 3.0,
+  double minCohensD = 0.5,
+  int minNForZeroSpread = 3,
 }) {
   final allTags = <String>{for (final j in journal) ...j.tags};
   final tagByDate = {for (final j in journal) j.date: j.tags};
@@ -407,6 +477,25 @@ List<JournalTagCorrelation> journalCorrelations({
   for (final tag in allTags) {
     final effects = <JournalEffect>[];
     for (final entry in outcomes.entries) {
+      // LENGTH GUARD: `entry.value[i]` used to be indexed by dates.length with
+      // no check, so any outcome list shorter than `dates` threw RangeError.
+      // A misaligned series is not partially usable — we cannot know which
+      // dates the values belong to — so abstain for this outcome.
+      if (entry.value.length != dates.length) {
+        effects.add(
+          JournalEffect(
+            outcome: entry.key,
+            delta: 0,
+            pctChange: null,
+            higherSide: 'neither',
+            nTagged: 0,
+            nUntagged: 0,
+            insufficient: true,
+            meaningful: false,
+          ),
+        );
+        continue;
+      }
       final tagged = <double>[];
       final untagged = <double>[];
       for (var i = 0; i < dates.length; i++) {
@@ -437,6 +526,30 @@ List<JournalTagCorrelation> journalCorrelations({
       final pct = untaggedMean.abs() < 1e-9
           ? null
           : (delta / untaggedMean.abs()) * 100.0;
+
+      // DISPERSION TEST. Pooled within-group SD (Cohen 1988):
+      //   sp = sqrt( ((n1-1)·s1² + (n2-1)·s2²) / (n1+n2-2) ),  d = delta / sp.
+      // Without it, "3% difference of two means" was reported as a meaningful
+      // journal effect off 2 days per side — a difference smaller than the
+      // day-to-day noise of either side.
+      final st = _sampleVar(tagged, taggedMean);
+      final su = _sampleVar(untagged, untaggedMean);
+      final dof = tagged.length + untagged.length - 2;
+      final pooledVar = dof > 0
+          ? ((tagged.length - 1) * st + (untagged.length - 1) * su) / dof
+          : 0.0;
+      final pooledSd = pooledVar > 0 ? math.sqrt(pooledVar) : 0.0;
+      final d = pooledSd > 0 ? delta / pooledSd : null;
+
+      final bigEnough = pct != null && pct.abs() >= minEffectPct;
+      final separated = d != null
+          ? d.abs() >= minCohensD
+          // Both sides exactly constant: d is undefined. Only trust it with a
+          // real number of observations behind each constant.
+          : (delta.abs() > 0 &&
+              tagged.length >= minNForZeroSpread &&
+              untagged.length >= minNForZeroSpread);
+
       effects.add(
         JournalEffect(
           outcome: entry.key,
@@ -446,7 +559,9 @@ List<JournalTagCorrelation> journalCorrelations({
           nTagged: tagged.length,
           nUntagged: untagged.length,
           insufficient: false,
-          meaningful: pct != null && pct.abs() >= 3.0,
+          meaningful: bigEnough && separated,
+          cohensD: d,
+          pooledSd: pooledSd,
         ),
       );
     }

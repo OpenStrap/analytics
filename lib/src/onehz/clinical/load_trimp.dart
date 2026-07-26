@@ -17,8 +17,16 @@ import '../util.dart';
 
 /// Banister TRIMP over a series of per-minute mean HRs.
 ///
+/// TRIMP = Σ Δt(min) · ΔHRr · y(ΔHRr) with the PUBLISHED sex-specific weighting
+/// factor (Banister 1991; Morton 1990):
+///   men   y = 0.64 · e^(1.92·x)
+///   women y = 0.86 · e^(1.67·x)
+/// Delegates to [StrainScorer.banisterY] so this file has exactly ONE Banister
+/// implementation (it previously dropped the 0.64/0.86 coefficient entirely,
+/// disagreeing with [StrainScorer.banisterTRIMP] by a factor of 1.5625).
+///
 /// [hrPerMin] mean HR for each worn minute (bpm; pass only valid minutes).
-/// [restingHr], [maxHr] the personal anchors. [sex] selects the b constant.
+/// [restingHr], [maxHr] the personal anchors. [sex] selects the coefficients.
 /// Returns absent if anchors are missing/degenerate (no fabrication).
 Metric<double> banisterTrimp(
   List<double> hrPerMin, {
@@ -37,7 +45,6 @@ Metric<double> banisterTrimp(
       note: 'Banister TRIMP needs measured RHR and HRmax (HRmax>RHR)',
     );
   }
-  final b = sex == Sex.male ? 1.92 : 1.67;
   final reserve = maxHr - restingHr;
   var trimp = 0.0;
   for (final hr in hrPerMin) {
@@ -45,7 +52,9 @@ Metric<double> banisterTrimp(
     var hrr = (hr - restingHr) / reserve;
     if (hrr < 0) hrr = 0;
     if (hrr > 1) hrr = 1;
-    trimp += 1.0 * hrr * math.exp(b * hrr); // 1 minute each
+    // ONE Banister implementation for the whole package: the sex-specific
+    // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
+    trimp += 1.0 * hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
   }
   return Metric<double>(
     value: trimp,
@@ -125,14 +134,17 @@ Metric<double> edwardsTrimp(List<double> zoneMinutes) {
 //
 //   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
 //   2. Per-sample intensity %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
-//   3. TRIMP over the window:
+//   3. TRIMP over the window (each sample carries its OWN duration, measured
+//      from the real timestamps and capped at the stream's median cadence so a
+//      gap is never counted as effort):
 //        a. Edwards 5-zone (default): sample contributes its zone weight (1..5 at
-//           50/60/70/80/90 %HRR cut-offs) × per-sample duration (min).
-//        b. Banister exponential: sample contributes dur × x × 0.64 × e^(b·x).
+//           50/60/70/80/90 %HRR cut-offs) × that sample's duration (min).
+//        b. Banister exponential: sample contributes dur × x × y(x), with
+//           y = 0.64·e^(1.92x) (men) / 0.86·e^(1.67x) (women).
 //   4. strain = 100 × ln(TRIMP + 1) / ln(D), D = 7201 (TRIMP 7200 ≈ max).
 //
-// References: Karvonen 1957; Edwards 1993; Banister 1991 (b = 1.92 M / 1.67 F);
-// Tanaka 2001 (HRmax = 208 − 0.7·age).
+// References: Karvonen 1957; Edwards 1993; Banister 1991 (y = 0.64·e^(1.92x)
+// men / 0.86·e^(1.67x) women); Tanaka 2001 (HRmax = 208 − 0.7·age).
 //
 // NOTE (steps/active-energy floor): strain is PURELY HR-derived
 // (Edwards/Banister TRIMP → log map). Steps and active calories are computed as
@@ -171,10 +183,26 @@ class StrainScorer {
   /// Upper percentile for the observed-HRmax estimate.
   static const double hrmaxPercentile = 99.5;
 
-  /// Banister coefficients.
-  static const double banisterScale = 0.64;
+  /// Banister 1991 weighting factor y = c · e^(b·x), x = fractional %HRR.
+  /// PUBLISHED coefficients are sex-specific in BOTH terms:
+  ///   men   c = 0.64, b = 1.92
+  ///   women c = 0.86, b = 1.67
+  /// (Applying the male c = 0.64 to women — as this class used to — understates
+  /// female TRIMP by ~26 %.)
+  static const double banisterScaleMen = 0.64;
+  static const double banisterScaleWomen = 0.86;
   static const double banisterBMen = 1.92;
   static const double banisterBWomen = 1.67;
+
+  /// Deprecated alias for [banisterScaleMen]; kept so existing call sites keep
+  /// resolving. Prefer [banisterY], which pairs c and b correctly by sex.
+  static const double banisterScale = banisterScaleMen;
+
+  /// The sex-specific Banister weighting factor y(x) — the single source of
+  /// truth for Banister weighting in this package.
+  static double banisterY(double x, {required bool female}) =>
+      (female ? banisterScaleWomen : banisterScaleMen) *
+      math.exp((female ? banisterBWomen : banisterBMen) * x);
 
   /// Edwards zone cut-offs as (%HRR threshold, weight), highest-first.
   static const List<List<num>> edwardsZones = [
@@ -242,29 +270,70 @@ class StrainScorer {
 
   // ── TRIMP accumulation ──────────────────────────────────────────────────────
 
-  /// Per-sample duration (minutes) from the first two timestamps (seconds).
-  /// Falls back to 1 s when <2 samples or coincident timestamps.
-  static double sampleDurationMinutes(List<double> tsSec) {
-    if (tsSec.length < 2) return fallbackSampleMin;
-    final deltaS = (tsSec[1] - tsSec[0]).abs();
-    return deltaS > 0 ? deltaS / 60.0 : fallbackSampleMin;
-  }
-
-  static double edwardsTRIMP(List<double> bpm, double restingHR, double hrReserve,
-      double sampleDurationMin) {
-    var weighted = 0;
-    for (final s in bpm) {
-      weighted += zoneWeight(s, restingHR, hrReserve);
+  /// Median inter-sample interval (seconds) of a time-ordered stream, ignoring
+  /// non-positive steps and pathological (>[maxPlausibleGapSec]) ones. Floored
+  /// at [fallbackSampleMin] minutes' worth. Mirrors the convention already used
+  /// by `HeartRateZones.timeInZone`.
+  static double medianIntervalSeconds(List<double> tsSec,
+      {double maxPlausibleGapSec = 300.0}) {
+    final gaps = <double>[];
+    for (var i = 1; i < tsSec.length; i++) {
+      final g = tsSec[i] - tsSec[i - 1];
+      if (g > 0 && g <= maxPlausibleGapSec) gaps.add(g);
     }
-    return weighted * sampleDurationMin;
+    if (gaps.isEmpty) return fallbackSampleMin * 60.0;
+    gaps.sort();
+    return math.max(gaps[gaps.length ~/ 2], fallbackSampleMin * 60.0);
   }
 
-  static double banisterTRIMP(List<double> bpm, double restingHR, double hrReserve,
-      double sampleDurationMin, double b) {
+  /// PER-SAMPLE effort durations (minutes) from the ACTUAL timestamps.
+  ///
+  /// Sample i is credited with the interval to sample i+1; the tail sample gets
+  /// the stream's median cadence. Every interval is CAPPED at that median, so a
+  /// hole in the stream can never be counted as sustained effort (the same gap
+  /// policy as `HeartRateZones.timeInZone`).
+  ///
+  /// This replaces the old `sampleDurationMinutes`, which read ONE interval
+  /// (the first two timestamps) and applied it to every sample — catastrophic
+  /// on exactly the sparse/irregular streams [minSparseReadings] admits: 21
+  /// samples over 20 min with the first two 1 s apart scored strain 8.08
+  /// instead of ~47, and a 1 Hz stream with a 5-min leading gap scored 104.
+  static List<double> sampleDurationsMinutes(List<double> tsSec) {
+    final n = tsSec.length;
+    if (n == 0) return const [];
+    if (n == 1) return [fallbackSampleMin];
+    final capSec = medianIntervalSeconds(tsSec);
+    final out = List<double>.filled(n, capSec / 60.0);
+    for (var i = 0; i < n - 1; i++) {
+      final g = tsSec[i + 1] - tsSec[i];
+      out[i] = (g > 0 ? math.min(g, capSec) : capSec) / 60.0;
+    }
+    return out;
+  }
+
+  /// Edwards 5-zone TRIMP: Σ zoneWeight(sample) × that sample's duration (min).
+  static double edwardsTRIMP(List<double> bpm, double restingHR,
+      double hrReserve, List<double> durationsMin) {
     var acc = 0.0;
-    for (final s in bpm) {
-      final x = pctHRR(s, restingHR, hrReserve) / 100.0;
-      if (x > 0) acc += sampleDurationMin * x * banisterScale * math.exp(b * x);
+    for (var i = 0; i < bpm.length; i++) {
+      final dur = i < durationsMin.length
+          ? durationsMin[i]
+          : (durationsMin.isEmpty ? fallbackSampleMin : durationsMin.last);
+      acc += zoneWeight(bpm[i], restingHR, hrReserve) * dur;
+    }
+    return acc;
+  }
+
+  /// Banister exponential TRIMP: Σ duration(min) × x × y(x), y per [banisterY].
+  static double banisterTRIMP(List<double> bpm, double restingHR,
+      double hrReserve, List<double> durationsMin, {bool female = false}) {
+    var acc = 0.0;
+    for (var i = 0; i < bpm.length; i++) {
+      final dur = i < durationsMin.length
+          ? durationsMin[i]
+          : (durationsMin.isEmpty ? fallbackSampleMin : durationsMin.last);
+      final x = pctHRR(bpm[i], restingHR, hrReserve) / 100.0;
+      if (x > 0) acc += dur * x * banisterY(x, female: female);
     }
     return acc;
   }
@@ -272,11 +341,14 @@ class StrainScorer {
   // ── Logarithmic map ─────────────────────────────────────────────────────────
 
   /// Map accumulated TRIMP onto [0, 100] via 100 × ln(TRIMP+1) / ln(D), 2 dp.
-  /// TRIMP ≤ 0 → 0.
+  /// TRIMP ≤ 0 → 0; above the D−1 ceiling the score is CLAMPED at [maxStrain]
+  /// (it used to run off the top of its own documented range: TRIMP 14400 →
+  /// 107.8, while the sibling [strainScore] clamped correctly).
   static double trimpToStrain(double trimp, {double denominator = strainDenominator}) {
     if (trimp <= 0) return 0;
     final value = maxStrain * math.log(trimp + 1.0) / math.log(denominator);
-    return (value * 100).roundToDouble() / 100;
+    final clamped = math.min(maxStrain, math.max(0.0, value));
+    return (clamped * 100).roundToDouble() / 100;
   }
 
   // ── TRIMP method ──────────────────────────────────────────────────────────────
@@ -316,15 +388,15 @@ class StrainScorer {
     }
     if (!enoughData || effMax <= restingHR) return null;
 
-    final sampleDur = sampleDurationMinutes(tsSec);
+    final durations = sampleDurationsMinutes(tsSec);
     final hrReserve = effMax - restingHR;
 
     final double trimp;
     if (edwards) {
-      trimp = edwardsTRIMP(bpm, restingHR, hrReserve, sampleDur);
+      trimp = edwardsTRIMP(bpm, restingHR, hrReserve, durations);
     } else {
-      final b = female ? banisterBWomen : banisterBMen;
-      trimp = banisterTRIMP(bpm, restingHR, hrReserve, sampleDur, b);
+      trimp = banisterTRIMP(bpm, restingHR, hrReserve, durations,
+          female: female);
     }
     return trimpToStrain(trimp, denominator: denominator);
   }
@@ -396,24 +468,44 @@ class LoadState {
       };
 }
 
+/// Minimum days of daily-TRIMP history before CTL/ATL/TSB are reported.
+/// Two weeks: enough for the 7-day ATL to be converged and for the CTL prime
+/// to rest on a real week of load rather than a single day.
+const int ctlAtlMinDays = 14;
+
 /// CTL/ATL/TSB from a time-ordered daily-TRIMP series (oldest→newest).
 /// EWMA with time constants 42 d (CTL) and 7 d (ATL): λ = 1 − e^(−1/τ).
 /// A missing day contributes a 0-load impulse (rest day) — the EWMA decays.
+///
+/// SEEDING (Banister 1975 impulse-response; the load before the record started
+/// is UNKNOWN): both accumulators used to be seeded at `dailyTrimp.first`,
+/// which asserted that a single observed day had already been sustained for the
+/// full 42-day chronic window — `ctlAtlTsb([500])` returned ctl 500 / atl 500 /
+/// tsb 0, a fully-adapted, perfectly-fresh athlete conjured from one workout.
+/// Now: ABSTAIN below [minDays] with the standard need_baseline note, and prime
+/// both accumulators with the MEAN of the first [primeDays] observed days
+/// (never a single day, never future days) before running the EWMA over the
+/// remainder.
 Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
-    {double ctlDays = 42, double atlDays = 7}) {
+    {double ctlDays = 42,
+    double atlDays = 7,
+    int minDays = ctlAtlMinDays,
+    int primeDays = 7}) {
   const inputs = ['daily_trimp'];
-  if (dailyTrimp.isEmpty) {
-    return const Metric<LoadState>.absent(
+  if (dailyTrimp.length < minDays) {
+    return Metric<LoadState>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'no daily TRIMP history',
+      note: needBaselineNote(have: dailyTrimp.length, need: minDays),
     );
   }
   final lc = 1 - math.exp(-1 / ctlDays);
   final la = 1 - math.exp(-1 / atlDays);
-  var ctl = dailyTrimp.first;
-  var atl = dailyTrimp.first;
-  for (var i = 1; i < dailyTrimp.length; i++) {
+  final prime = math.min(math.max(primeDays, 1), dailyTrimp.length);
+  final seed = mean(dailyTrimp.sublist(0, prime))!;
+  var ctl = seed;
+  var atl = seed;
+  for (var i = prime; i < dailyTrimp.length; i++) {
     ctl = ctl + lc * (dailyTrimp[i] - ctl);
     atl = atl + la * (dailyTrimp[i] - atl);
   }
@@ -423,6 +515,7 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'Banister CTL(42d)/ATL(7d)/TSB; descriptive load, not injury risk',
+    note: 'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $prime observed '
+        'days; descriptive load, not injury risk',
   );
 }

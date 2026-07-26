@@ -45,7 +45,15 @@ class StressIndex {
 /// variation range (MxDMn) is maximal, which drives SI to ~0 (a bug we hit on
 /// real data: whole-night SI read ~7). So we slide ~5-min windows (~256 beats),
 /// compute SI per window, and report the MEDIAN — the robust resting SI.
-Metric<StressIndex> baevskyStressIndex(List<double> nnMs) {
+///
+/// [minRangeMs] guards the MxDMn denominator. Baevsky's SI is defined on an RR
+/// histogram whose variation range is a physiological quantity (0.15–0.5 s at
+/// rest); a 5-min window whose whole RR range is a few ms is beat-timing
+/// QUANTIZATION, not physiology, and 1/MxDMn then explodes (300 beats
+/// alternating 1000/1001 ms → SI ≈ 48 780, reported as 'high'). Windows below
+/// the guard are dropped; if no window survives, the metric is ABSENT.
+Metric<StressIndex> baevskyStressIndex(List<double> nnMs,
+    {double minRangeMs = 20.0}) {
   const inputs = ['rr_cleaned'];
   final nn = nnMs.where((v) => v >= 300 && v <= 2000).toList();
   if (nn.length < 30) {
@@ -63,7 +71,7 @@ Metric<StressIndex> baevskyStressIndex(List<double> nnMs) {
   for (var start = 0; start + 30 <= nn.length; start += step) {
     final seg = nn.sublist(start, math.min(start + win, nn.length));
     if (seg.length < 30) break;
-    final r = _siOfSegment(seg);
+    final r = _siOfSegment(seg, minRangeMs);
     if (r != null) {
       sis.add(r[0]);
       modes.add(r[1]);
@@ -104,8 +112,9 @@ Metric<StressIndex> baevskyStressIndex(List<double> nnMs) {
   );
 }
 
-/// SI of one short NN segment → [si, modeS, amoPct, mxdmnS], or null if degenerate.
-List<double>? _siOfSegment(List<double> seg) {
+/// SI of one short NN segment → [si, modeS, amoPct, mxdmnS], or null if
+/// degenerate (mode undefined, or a variation range below [minRangeMs]).
+List<double>? _siOfSegment(List<double> seg, double minRangeMs) {
   const binMs = 50.0;
   final counts = <int, int>{};
   for (final v in seg) {
@@ -121,7 +130,10 @@ List<double>? _siOfSegment(List<double> seg) {
   });
   final modeS = ((modeBin + 0.5) * binMs) / 1000.0;
   final amoPct = 100.0 * modeCount / seg.length;
-  final mxdmnS = (seg.reduce(math.max) - seg.reduce(math.min)) / 1000.0;
-  if (modeS <= 0 || mxdmnS <= 0) return null;
+  final mxdmnMs = seg.reduce(math.max) - seg.reduce(math.min);
+  final mxdmnS = mxdmnMs / 1000.0;
+  // MxDMn sits in the denominator: a range at or below the beat-timing
+  // resolution is not a measurement of autonomic tension, it is quantization.
+  if (modeS <= 0 || mxdmnMs < minRangeMs) return null;
   return [amoPct / (2.0 * modeS * mxdmnS), modeS, amoPct, mxdmnS];
 }

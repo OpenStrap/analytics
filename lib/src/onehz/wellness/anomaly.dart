@@ -14,7 +14,10 @@
 // (HRV is negated: a DROP in HRV is the illness direction).
 //
 // HONESTY: this is a complement, not a diagnosis. Missing features reduce the
-// vector dimension (we never impute). Persistence + a conservative chi-square
+// vector dimension (we never impute), and so does a feature whose baseline has
+// no dispersion at all (MAD = 0 AND SD = 0) — there is no scale to standardize
+// against, so it is DROPPED rather than floored to an epsilon. Persistence + a
+// conservative chi-square
 // gate keep the false-positive rate honest, and we report the per-feature
 // contributions so a flag is explainable.
 
@@ -42,9 +45,13 @@ class AnomalyDay {
   final bool candidate; // distance crossed gate THIS night (pre-persistence)
   final List<Driver> drivers; // per-feature signed contribution
 
-  /// Machine-readable "need_baseline:have=H,need=N" note set on nights that
-  /// could not be evaluated for lack of baseline coverage (H = best per-feature
-  /// baseline count available, N = required minimum). Null when evaluated.
+  /// Machine-readable note set on nights that could not be evaluated:
+  ///   * "need_baseline:have=H,need=N" — insufficient baseline coverage (H =
+  ///     best per-feature baseline count available, N = required minimum).
+  ///   * "degenerate_baseline:no_dispersion" — the surviving baseline columns
+  ///     are exactly constant (MAD = 0 AND SD = 0), so there is no scale to
+  ///     standardize against and we abstain rather than invent one.
+  /// Null when the night WAS evaluated.
   final String? need;
   const AnomalyDay(this.date, this.mahalanobis, this.flagged, this.candidate,
       this.drivers, {this.need});
@@ -125,20 +132,41 @@ List<AnomalyDay> multivariateAnomaly(
       run = 0;
       continue;
     }
-    // Robust center (median) + scale (MAD) per available feature.
-    final center = [for (final f in idx) median(cols[f])!];
-    final scale = [
-      for (final f in idx)
-        () {
-          final s = mad(cols[f]) ?? 0;
-          return s <= 0 ? (stddev(cols[f]) ?? 1.0).clamp(1e-6, 1e9) : s;
-        }()
-    ];
+    // Robust center (median) + scale (MAD, ordinary SD as the coarser fallback)
+    // per available feature.
+    //
+    // ABSTAIN, NEVER FLOOR: a feature whose trailing baseline has NO dispersion
+    // at all (MAD == 0 AND SD == 0 — an exactly-constant, fully-quantized column
+    // such as a skin-temp z that reads 0.0 every night) has no scale to
+    // standardize against. Clamping the scale to an epsilon (the old `.clamp(
+    // 1e-6, 1e9)`) turned any deviation into a ~1e6 z, so d² blew past the χ²
+    // gate unconditionally and a 0.4-unit change surfaced as an illness anomaly.
+    // The sibling modules already refuse this case — readiness_composite's
+    // `robustZ(v, base) ?? z(v, base)` yields null when SD is also 0, and
+    // changepoint guards zero variance — so we match them: DROP the degenerate
+    // feature from the vector, and if fewer than 2 features survive, abstain.
+    final keep = <int>[];
+    final center = <double>[];
+    final scale = <double>[];
+    for (final f in idx) {
+      final m = mad(cols[f]) ?? 0;
+      final sc = m > 0 ? m : (stddev(cols[f]) ?? 0);
+      if (!sc.isFinite || sc <= 0) continue; // no dispersion → not standardizable
+      keep.add(f);
+      center.add(median(cols[f])!);
+      scale.add(sc);
+    }
+    if (keep.length < 2) {
+      out.add(AnomalyDay(dates[i], null, false, false, const [],
+          need: 'degenerate_baseline:no_dispersion'));
+      run = 0;
+      continue;
+    }
     // Standardized current vector.
-    final zc = [for (var a = 0; a < idx.length; a++) (cur[idx[a]]! - center[a]) / scale[a]];
+    final zc = [for (var a = 0; a < keep.length; a++) (cur[keep[a]]! - center[a]) / scale[a]];
 
     // Robust correlation matrix from aligned rows (standardized), regularized.
-    final cov = _robustCorr(rows, idx, center, scale, ridge);
+    final cov = _robustCorr(rows, keep, center, scale, ridge);
     final inv = _invert(cov);
     double d2;
     if (inv == null) {
@@ -157,13 +185,13 @@ List<AnomalyDay> multivariateAnomaly(
 
     // Per-feature contribution to d² (diagonal share), for the "why".
     final drivers = <Driver>[];
-    for (var a = 0; a < idx.length; a++) {
-      drivers.add(Driver(_featLabels[idx[a]], round6(zc[a]),
+    for (var a = 0; a < keep.length; a++) {
+      drivers.add(Driver(_featLabels[keep[a]], round6(zc[a]),
           detail: 'standardized deviation'));
     }
     drivers.sort((x, y) => y.contribution.abs().compareTo(x.contribution.abs()));
 
-    final gate = chiSqGate ?? _chiSq999(idx.length);
+    final gate = chiSqGate ?? _chiSq999(keep.length);
     final candidate = d2 > gate;
     if (candidate) {
       run++;

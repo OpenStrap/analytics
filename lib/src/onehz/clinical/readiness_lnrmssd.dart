@@ -82,29 +82,38 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   }
   final m = mean(priorWindow)!;
   final sd = stddev(priorWindow);
-  final cv = (m != 0 && sd != null) ? (sd / m).abs() * 100 : 0.0;
-  final z = (sd != null && sd > 0) ? (today - m) / sd : null;
+  if (sd == null || m == 0) {
+    // The published outputs of this stack (CV, SWC, band) are all defined
+    // RELATIVE to the baseline's dispersion. With a single prior night the SD
+    // is UNDEFINED — and the metric used to fill in cvPct 0.0 and band
+    // 'normal', asserting "tonight is typical" on the strength of nothing at
+    // all. Abstain instead (a zero-but-DEFINED SD is a different case: CV is
+    // genuinely 0 and SWC is genuinely 0, so that still computes below).
+    return Metric<ReadinessLnRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'lnRMSSD baseline dispersion undefined (needs ≥2 prior nights) — '
+          'CV/z/SWC/band are undefined',
+    );
+  }
+  final cv = (sd / m).abs() * 100;
+  final z = sd > 0 ? (today - m) / sd : null;
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
-  final swc = sd != null ? 0.5 * sd : null;
+  final swc = 0.5 * sd;
 
-  String band;
-  if (swc != null) {
-    if (today < m - swc) {
-      band = 'suppressed';
-    } else if (today > m + swc) {
-      band = 'elevated';
-    } else {
-      band = 'normal';
-    }
+  final String band;
+  if (today < m - swc) {
+    band = 'suppressed';
+  } else if (today > m + swc) {
+    band = 'elevated';
   } else {
     band = 'normal';
   }
 
   // LnRMSSD:RR saturation guard: when mean NN is long (low HR, high vagal tone)
   // and lnRMSSD is at the top of the personal range, the metric saturates.
-  final saturation = meanNnTodayMs != null &&
-      meanNnTodayMs > 1100 &&
-      (sd != null && sd > 0 && (today - m) / sd > 1.0);
+  final saturation =
+      meanNnTodayMs != null && meanNnTodayMs > 1100 && z != null && z > 1.0;
 
   final conf = clamp(priorWindow.length / windowDays.toDouble(), 0.3, 0.9);
   return Metric<ReadinessLnRmssd>(

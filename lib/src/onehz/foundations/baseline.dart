@@ -97,6 +97,15 @@ List<EwmaPoint> gapAwareEwma(
       continue;
     }
     final dt = timesMs[i] - lastT!;
+    if (dt <= 0 || halfLifeMs <= 0 || !dt.isFinite) {
+      // Duplicate or non-monotonic timestamp: NO time has elapsed, so the
+      // estimate earns no new weight (λ = 0). Letting λ = 1 − 2^(−dt/H) go
+      // negative here EXTRAPOLATES the estimate outside the data (Roberts 1959
+      // requires λ ∈ [0,1]). We also keep lastT at the latest time already
+      // seen so an out-of-order sample cannot corrupt the next dt.
+      out.add(EwmaPoint(est, false));
+      continue;
+    }
     // Time-aware λ: half-life expressed in ms => decay over the elapsed dt.
     var lambda = 1 - math.pow(2, -dt / halfLifeMs).toDouble();
     final isGap = maxGapMs > 0 && dt > maxGapMs;

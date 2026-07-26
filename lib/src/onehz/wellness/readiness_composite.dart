@@ -115,15 +115,23 @@ Metric<Readiness> readinessComposite(
     // nights, absent others, even with sleep detected). Fall back to an ordinary
     // mean/SD z so a usable input still contributes; only skip when SD is ALSO
     // zero (a truly constant baseline with no dispersion to normalize against).
-    final zr = robustZ(v, base) ?? z(v, base);
+    final rz = robustZ(v, base);
+    final zr = rz ?? z(v, base);
     if (zr == null) continue;
     final oriented = inp.goodSign * zr; // + = good for readiness
     used.add(inp.label);
     weightSum += inp.weight;
     weightedZ += inp.weight * oriented;
     // Driver contribution is the signed weighted z (renormalized later).
+    // GLASS-BOX: the disclosed method must be the method ACTUALLY used — on a
+    // quantized baseline the MAD collapses and the mean/SD fallback above
+    // produced this z, so saying "robust-z" there would misstate how the
+    // contribution was computed.
+    final method = rz != null
+        ? 'robust-z (median+MAD)'
+        : 'z (mean+SD fallback — MAD=0 on a quantized baseline)';
     drivers.add(Driver(inp.label, inp.weight * oriented,
-        detail: 'oriented robust-z=${round6(oriented)}'));
+        detail: 'oriented $method=${round6(oriented)}'));
   }
   if (used.isEmpty || weightSum == 0) {
     // If inputs HAD values but their baselines were too short, say so in the

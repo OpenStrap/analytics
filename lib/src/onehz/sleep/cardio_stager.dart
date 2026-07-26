@@ -263,18 +263,7 @@ CardioStagerResult cardioStager(
   final profile = userProfile ?? cardioUserProfile;
   final n = math.min(hr1hz.length, accel.length);
   final nEpoch = n ~/ epochSec;
-  if (nEpoch < 3) {
-    return CardioStagerResult(
-      const StagerResult(
-          stages: <SleepStage>[],
-          epochSec: _epochSec,
-          wakePct: 0,
-          nremPct: 0,
-          remPct: 0),
-      const <bool>[],
-      0,
-    );
-  }
+  if (nEpoch < 3) return _abstain(epochSec);
 
   // ── per-second ENMO (motion) against a LOCALLY-ADAPTIVE 1 g reference ──────
   // A single whole-night gravity-magnitude reference (the old approach) is
@@ -374,8 +363,18 @@ CardioStagerResult cardioStager(
     for (var e = 0; e < nEpoch; e++)
       if (still(e) && !hr[e].isNaN) hr[e]
   ];
-  final hrMedGlobal =
-      median(sleepHr) ?? (mean([for (final h in hr) if (!h.isNaN) h]) ?? 60);
+  // HONESTY GATE — no HR anywhere ⇒ ABSTAIN, never substitute a nominal resting
+  // HR. Every decision below is HR-RELATIVE (the wake/arousal gate, the REM
+  // p25 HR floor, the deep cardiac-trough cut), so with `hr[e]` NaN for every
+  // epoch none of them can ever fire and the classifier falls through to NREM
+  // for the whole window — i.e. a band sitting on the nightstand would be
+  // reported as a perfect night of sleep. The old `?? 60` fallback made that
+  // fabrication look like a real baseline. A window with SOME HR still gets the
+  // whole-window mean as the baseline when no epoch qualifies as `still` (that
+  // is a real measurement, just not a quiet one).
+  final hrAll = <double>[for (final h in hr) if (!h.isNaN) h];
+  if (hrAll.isEmpty) return _abstain(epochSec);
+  final hrMedGlobal = median(sleepHr) ?? mean(hrAll)!;
   final hrFloor = percentile(sleepHr, 10) ?? hrMedGlobal;
 
   // ── LOCAL rolling HR baseline for the WAKE/REM autonomic gates ─────────────
@@ -580,6 +579,21 @@ CardioStagerResult cardioStager(
   );
 }
 
+/// Honest "cannot stage this window" result: NO epochs, no deep flags, zero
+/// confidence. Callers must treat an empty [StagerResult.stages] as UNSTAGED
+/// (see `advanced_stager._stageSessionCardio`), never as sleep.
+CardioStagerResult _abstain(int epochSec) => CardioStagerResult(
+      StagerResult(
+        stages: const <SleepStage>[],
+        epochSec: epochSec,
+        wakePct: 0,
+        nremPct: 0,
+        remPct: 0,
+      ),
+      const <bool>[],
+      0,
+    );
+
 /// RMSSD (ms) of cleaned RR beats whose absolute time falls within a ±2.5-min
 /// window centred on epoch [s,t). Returns NaN when too few clean beats.
 double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
@@ -620,13 +634,28 @@ double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
 /// are re-labelled sleep (NREM). This is the published actigraphy step that
 /// prevents normal in-sleep repositioning from inflating WASO.
+///
+/// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
+/// hypnogram taken before the pass — Webster's rule scores each wake bout
+/// against the ORIGINAL surrounding sleep (Webster et al. 1982; Cole et al.
+/// 1992), not against sleep this same pass just manufactured. Reading the list
+/// being mutated let every bridged bout count as context for the next one, so
+/// bridging CASCADED: a fragmented night of short sleep bouts separated by long
+/// wake bouts collapsed into one continuous sleep block (WASO 0, efficiency
+/// 100%). Exposed (non-private) so the regression test can drive the rule
+/// directly; not part of the package's public barrel.
+void websterRescoreCardio(List<SleepStage> sm, int epochSec) =>
+    _websterRescore(sm, epochSec);
+
 void _websterRescore(List<SleepStage> sm, int epochSec) {
   bool isSleep(SleepStage s) => s != SleepStage.wake;
   final n = sm.length;
   double minToEp(double m) => m * 60.0 / epochSec;
+  // Immutable context snapshot — see the doc comment above.
+  final snap = List<SleepStage>.of(sm);
   var onset = -1, lastSleep = -1;
   for (var i = 0; i < n; i++) {
-    if (isSleep(sm[i])) {
+    if (isSleep(snap[i])) {
       if (onset < 0) onset = i;
       lastSleep = i;
     }
@@ -634,7 +663,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   if (onset < 0) return;
   int runBefore(int i) {
     var c = 0, k = i - 1;
-    while (k >= onset && isSleep(sm[k])) {
+    while (k >= onset && isSleep(snap[k])) {
       c++;
       k--;
     }
@@ -642,7 +671,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   }
   int runAfter(int i) {
     var c = 0, k = i + 1;
-    while (k <= lastSleep && isSleep(sm[k])) {
+    while (k <= lastSleep && isSleep(snap[k])) {
       c++;
       k++;
     }
@@ -659,12 +688,12 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   ];
   var i = onset;
   while (i <= lastSleep) {
-    if (isSleep(sm[i])) {
+    if (isSleep(snap[i])) {
       i++;
       continue;
     }
     var j = i;
-    while (j <= lastSleep && !isSleep(sm[j])) {
+    while (j <= lastSleep && !isSleep(snap[j])) {
       j++;
     }
     final wakeLen = (j - i).toDouble();

@@ -1,4 +1,5 @@
 // Item 2 — FOUNDATIONS. Synthetic, known-answer tests.
+import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
@@ -95,7 +96,64 @@ void main() {
       final r = correctRr(rr);
       expect(r.cleanFraction, closeTo(1.0, 1e-9));
       expect(r.droppedCount, 0);
+      expect(r.correctedCount, 0);
       expect(r.nn.length, 60);
+      // Nothing was substituted: the cleaned series IS the input.
+      for (var i = 0; i < rr.length; i++) {
+        expect(r.nn[i], closeTo(rr[i], 1e-12));
+      }
+    });
+
+    // 400 beats of ORDINARY resting variability: RSA at ~13 beats/breath +
+    // a slow LF wave + a little jitter. RR 928-1172 ms, max |dRR| 56 ms,
+    // ZERO injected artifacts.
+    List<double> cleanRsa() {
+      final rnd = math.Random(11);
+      return [
+        for (var i = 0; i < 400; i++)
+          1050 +
+              95 * math.sin(2 * math.pi * i / 13.0) +
+              25 * math.sin(2 * math.pi * i / 61.0) +
+              (rnd.nextDouble() - 0.5) * 10
+      ];
+    }
+
+    test('REGRESSION: a clean physiological RSA record is NOT flagged — the '
+        'quartile deviation is taken on the SIGNED dRR series '
+        '(Lipponen-Tarvainen 2019)', () {
+      // Taking the QD of |dRR| folds the symmetric ±dRR distribution onto one
+      // side, collapsing the dispersion so far that the threshold sinks to the
+      // minThresholdMs floor and the detector degenerates into a fixed 100 ms
+      // cut-off. On THIS artifact-free record that flagged 32 of 400 healthy
+      // beats (cleanFraction 0.92) and shrank SDNN 69.82 -> 64.78 (-7%).
+      final rr = cleanRsa();
+      var maxAbsDrr = 0.0;
+      for (var i = 1; i < rr.length; i++) {
+        final d = (rr[i] - rr[i - 1]).abs();
+        if (d > maxAbsDrr) maxAbsDrr = d;
+      }
+      expect(maxAbsDrr, lessThan(100),
+          reason: 'sanity: every beat-to-beat step is below the 100 ms floor');
+
+      final r = correctRr(rr);
+      expect(r.cleanFraction, 1.0);
+      expect(r.correctedCount, 0);
+      expect(r.droppedCount, 0);
+      expect(r.nn.length, 400);
+      // The HRV of a clean record must survive correction untouched.
+      final before = hrvTime(rr).value!;
+      final after = hrvTime(r.nn).value!;
+      expect(after.rmssd!, closeTo(before.rmssd!, 1e-9));
+      expect(after.sdnn!, closeTo(before.sdnn!, 1e-9));
+    });
+
+    test('a genuine gross outlier is still caught on that same record', () {
+      // The signed-QD threshold must not have blinded the detector.
+      final rr = cleanRsa();
+      rr[200] = 350; // impossible beat
+      final r = correctRr(rr);
+      expect(r.classes[200], isNot(BeatClass.normal));
+      expect(r.cleanFraction, lessThan(1.0));
     });
 
     test('flags EXACTLY one injected isolated ectopic and spline-corrects it', () {
@@ -181,6 +239,23 @@ void main() {
       // clamped: one late sample can't fully take over (<= 0.5 weight).
       expect(e.last.value, lessThan(20));
       expect(e.last.value, greaterThan(10));
+    });
+    test('REGRESSION: gap-aware EWMA never extrapolates outside the data on a '
+        'duplicate or non-monotonic timestamp', () {
+      // dt <= 0 made lambda = 1 - 2^(-dt/H) NEGATIVE, so the update ran
+      // BACKWARDS: [0,1000,500] with values [10,10,20] produced 5.857 — below
+      // every input (all >= 10).
+      final e = gapAwareEwma([0, 1000, 500], [10, 10, 20], halfLifeMs: 1000);
+      expect(e.length, 3);
+      for (final p in e) {
+        expect(p.value, greaterThanOrEqualTo(10.0));
+        expect(p.value, lessThanOrEqualTo(20.0));
+      }
+      // No elapsed time => no new weight => the estimate does not move.
+      expect(e.last.value, closeTo(10.0, 1e-12));
+      // Duplicate timestamps behave the same way.
+      final dup = gapAwareEwma([0, 0, 0], [10, 50, 50], halfLifeMs: 1000);
+      expect(dup.map((p) => p.value), everyElement(closeTo(10.0, 1e-12)));
     });
     test('MDC gate: small change suppressed, large surfaced', () {
       final b = robustBaseline([10, 11, 9, 10, 12, 8, 10, 11, 9, 10]);

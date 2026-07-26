@@ -57,6 +57,29 @@ void main() {
       expect(m.value!.hf, isNull); // HF withheld honestly
       expect(m.value!.lf, isNotNull); // LF still reported
     });
+
+    test('REGRESSION: a gated HF is not republished through `total`', () {
+      // total used to sum hfRaw back in, so the gated and ungated totals were
+      // bit-identical (0.49944 in both) — the suppression was cosmetic.
+      final rr = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < 400; i++) {
+        final v = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000));
+        rr.add(v);
+        t += v;
+        times.add(t);
+      }
+      final clean = hrvFreq(rr, times, artifactFraction: 0.0);
+      final gated = hrvFreq(rr, times, artifactFraction: 0.5);
+      expect(clean.value!.total, isNotNull);
+      expect(gated.value!.hfGated, isTrue);
+      expect(gated.value!.total, isNull,
+          reason: 'total power is a sum over ALL bands; with HF withheld it is '
+              'not computable');
+      expect(gated.value!.toJson().containsKey('total'), isFalse);
+      expect(gated.note, contains('total'));
+    });
   });
 
   group('PRSA DC/AC (Bauer 2006)', () {
@@ -78,6 +101,20 @@ void main() {
     test('absent without enough beats', () {
       expect(decelerationCapacity([1000, 1010, 990]).present, isFalse);
     });
+    test('REGRESSION: l=1 is refused, not a RangeError', () {
+      // The Haar contrast at wavelet scale s=2 reads X(-2) = profile[l-2],
+      // i.e. profile[-1] for l=1 — it used to throw RangeError.
+      final rr = <double>[
+        for (var i = 0; i < 200; i++) 1000 + 20 * math.sin(2 * math.pi * i / 20)
+      ];
+      final dc = decelerationCapacity(rr, l: 1);
+      expect(dc.present, isFalse);
+      expect(dc.confidence, 0);
+      expect(dc.note, contains('l≥2'));
+      expect(accelerationCapacity(rr, l: 1).present, isFalse);
+      // l=2 (the default) still works on the same series.
+      expect(decelerationCapacity(rr, l: 2).present, isTrue);
+    });
   });
 
   group('nocturnal RHR + dip', () {
@@ -96,14 +133,55 @@ void main() {
       expect(m.value!.p1, closeTo(50, 1.0));
     });
     test('dip band classification', () {
-      final day = <double>[for (var i = 0; i < 200; i++) 80];
-      final night = <double>[for (var i = 0; i < 200; i++) 60];
+      final day = <double>[for (var i = 0; i < 400; i++) 80];
+      final night = <double>[for (var i = 0; i < 400; i++) 60];
       final m = hrDip(day, night);
       expect(m.value!.dipPct, closeTo(25, 1e-9)); // (80-60)/80
       expect(m.value!.band, 'dipper');
-      // riser case
-      final r = hrDip(<double>[60, 60, 60], <double>[70, 70, 70]);
+      // riser case. NOTE: this used to use 3 samples a side; a 3-sample "day"
+      // and "night" is exactly the fabrication hrDipMinSamples now refuses, so
+      // the case is expressed with a real (5-min) period of coverage instead.
+      final r = hrDip(<double>[for (var i = 0; i < 400; i++) 60],
+          <double>[for (var i = 0; i < 400; i++) 70]);
       expect(r.value!.band, 'riser');
+    });
+
+    test('REGRESSION: lowest-30-min mean needs a REAL contiguous 30-min window',
+        () {
+      // 900 valid samples ramping 100 -> 50 bpm. The gate admitted
+      // length >= windowSamples~/2 and then w = min(1800, 900) made the sliding
+      // loop never execute, so low30Mean was the WHOLE-STREAM mean (75.0) —
+      // published as a "lowest-30-min" trough with confidence 0.4.
+      final ramp = <double>[for (var i = 0; i < 900; i++) 100 - i * 50 / 900];
+      final m = nocturnalRhr(ramp);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+    });
+
+    test('REGRESSION: off-skin gaps are not compacted into a fake window', () {
+      // 1800 valid samples scattered one-per-16-s across 8 h. Compacting the
+      // valid stream made this a "30-min" window that actually spans 8 hours.
+      final scattered = <double>[
+        for (var i = 0; i < 28800; i++) (i % 16 == 0) ? 60.0 : 0.0
+      ];
+      expect(nocturnalRhr(scattered).present, isFalse);
+      // A genuinely contiguous 30-min block of the same samples DOES resolve.
+      final contiguous = <double>[
+        ...List<double>.filled(1000, 0),
+        ...List<double>.filled(1800, 60.0),
+        ...List<double>.filled(1000, 0),
+      ];
+      final ok = nocturnalRhr(contiguous);
+      expect(ok.present, isTrue);
+      expect(ok.value!.low30Mean, closeTo(60, 1e-9));
+    });
+
+    test('REGRESSION: hrDip refuses a 1-sample day and a 1-sample night', () {
+      final m = hrDip([70], [60]);
+      expect(m.present, isFalse);
+      expect(m.confidence, 0);
+      expect(m.note, contains('${hrDipMinSamples}'));
     });
   });
 
@@ -139,6 +217,39 @@ void main() {
       expect(out.every((d) => d.state == IllnessState.green), isTrue);
       expect(out.every((d) => d.cusum == null), isTrue);
     });
+    test('REGRESSION: a DEGENERATE (zero-dispersion) baseline abstains instead '
+        'of standardizing against a fabricated 1 bpm scale', () {
+      // 9 identical quantized nights, then a 5 bpm bump. MAD = 0 AND SD = 0, so
+      // there is no dispersion at all. The old `max(1.0, SD)` fallback made
+      // scale = 1 bpm => z = 5 => cusum 4.5 > h=4 => yellow, red by night 12:
+      // a one-night bump latching a sustained "illness" red.
+      final rhr = <double?>[...List<double>.filled(9, 55.0), 60.0, 58.0, 58.0];
+      final dates = [for (var i = 0; i < rhr.length; i++) 'd$i'];
+      final out = illnessCusum(dates, rhr);
+      // Before: green×9, then yellow, then RED, RED.
+      expect(out.every((d) => d.state == IllnessState.green), isTrue,
+          reason: 'no alarm can be raised without a dispersion estimate');
+      // Night 9 has a long-enough baseline that is perfectly constant
+      // (MAD = 0 AND SD = 0) => abstained, not standardized against 1 bpm.
+      expect(out[9].cusum, isNull);
+      expect(out[9].z, isNull);
+      expect(out[9].need, degenerateBaselineNote);
+      // Nights 10-11 gain a real SD once the 60 enters the window, so they are
+      // evaluated — but from an honest scale, and they never trip the alarm.
+      expect(out[10].z, isNotNull);
+      expect(out[10].cusum!, lessThan(4.0));
+    });
+    test('a merely QUANTIZED baseline (MAD=0 but SD>0) still evaluates', () {
+      // MAD collapses on this baseline but SD does not — same convention as
+      // wellness/readiness_composite.dart: fall back to SD, only abstain when
+      // BOTH are zero.
+      final rhr = <double?>[...List<double>.filled(8, 55.0), 56.0, 60.0];
+      final dates = [for (var i = 0; i < rhr.length; i++) 'd$i'];
+      final out = illnessCusum(dates, rhr);
+      expect(out.last.z, isNotNull);
+      expect(out.last.cusum, isNotNull);
+      expect(out.last.need, isNull);
+    });
   });
 
   group('lnRMSSD readiness stack', () {
@@ -161,6 +272,23 @@ void main() {
       final m = readinessLnRmssd(hist);
       expect(m.present, isTrue);
       expect(m.value!.rolling7Mean, 4.0);
+    });
+    test('REGRESSION: an UNDEFINED baseline SD abstains instead of emitting '
+        'cvPct 0.0 / band "normal"', () {
+      // One prior night => stddev() is null => CV, SWC and the band are
+      // undefined. The metric used to publish cvPct 0.0, swc null and
+      // band 'normal' anyway: "tonight is typical", asserted from nothing.
+      final m = readinessLnRmssd([4.0, 2.0], minNights: 2);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+      expect(m.note, contains('dispersion undefined'));
+      // A DEFINED (even zero) dispersion still computes — CV really is 0 there.
+      final flat = readinessLnRmssd([4.0, 4.0, 4.0, 2.0]);
+      expect(flat.present, isTrue);
+      expect(flat.value!.cvPct, 0.0);
+      expect(flat.value!.z, isNull); // z is undefined at SD = 0
+      expect(flat.value!.band, 'suppressed');
     });
   });
 
@@ -187,6 +315,39 @@ void main() {
       final m = cosinor(t, y);
       expect(m.value!.r2, lessThan(0.2));
     });
+    test('REGRESSION: 4 random points never score a confident circadian fit',
+        () {
+      // A 3-parameter fit (M, β, γ) on 4 points has ONE residual degree of
+      // freedom: 4 random points scored raw r² 0.76–0.99 and were published at
+      // confidence 0.95, tier HIGH. Now: refused outright (< cosinorMinPoints).
+      final rnd = math.Random(20260726);
+      for (var trial = 0; trial < 200; trial++) {
+        final t = <double>[0, 6, 12, 18];
+        final y = <double>[for (var i = 0; i < 4; i++) rnd.nextDouble()];
+        final m = cosinor(t, y);
+        expect(m.present, isFalse);
+        expect(m.confidence, 0);
+      }
+    });
+    test('REGRESSION: confidence comes from the ADJUSTED R² (3 fitted params)',
+        () {
+      // 8 points of noise: raw R² is upward-biased, adjusted R² is not.
+      final rnd = math.Random(4242);
+      final t = <double>[for (var i = 0; i < 8; i++) i * 3.0];
+      final y = <double>[for (var i = 0; i < 8; i++) rnd.nextDouble()];
+      final m = cosinor(t, y);
+      expect(m.present, isTrue);
+      expect(m.value!.r2Adj, lessThan(m.value!.r2));
+      expect(m.confidence, closeTo(m.value!.r2Adj.clamp(0.1, 0.95), 1e-12));
+      // A genuine 24-h rhythm still earns full confidence.
+      final tt = <double>[for (var h = 0; h < 48; h++) h.toDouble()];
+      final yy = <double>[
+        for (var h = 0; h < 48; h++) 60 + 10 * math.cos(2 * math.pi * h / 24)
+      ];
+      final good = cosinor(tt, yy);
+      expect(good.value!.r2Adj, closeTo(1.0, 1e-6));
+      expect(good.confidence, 0.95);
+    });
   });
 
   group('TRIMP + CTL/ATL/TSB', () {
@@ -196,6 +357,38 @@ void main() {
       final m = banisterTrimp([120, 140, 160],
           restingHr: 50, maxHr: 190, sex: Sex.male);
       expect(m.value!, greaterThan(0));
+    });
+
+    test('REGRESSION: ONE Banister implementation, matching the published '
+        'sex-specific y = c·e^(b·x)', () {
+      // The two implementations in this file disagreed by 1.5625× (the
+      // top-level one dropped the 0.64/0.86 coefficient entirely) and the
+      // StrainScorer one applied the MALE 0.64 to women (−26% on female load).
+      const x = (150.0 - 50.0) / (190.0 - 50.0); // 0.714286 %HRR
+      final expectedMale = x * 0.64 * math.exp(1.92 * x);
+      final expectedFemale = x * 0.86 * math.exp(1.67 * x);
+
+      final male =
+          banisterTrimp([150], restingHr: 50, maxHr: 190, sex: Sex.male);
+      final female =
+          banisterTrimp([150], restingHr: 50, maxHr: 190, sex: Sex.female);
+      expect(male.value!, closeTo(expectedMale, 1e-9));
+      expect(female.value!, closeTo(expectedFemale, 1e-9));
+      // 1 min at 150 bpm (RHR 50, HRmax 190): 1.8016 male / 2.0250 female.
+      // Before: 2.8150 from the top-level fn (no c at all) and 1.5070 from
+      // StrainScorer for a woman (male c on the female b).
+      expect(male.value!, closeTo(1.801589, 1e-5));
+      expect(female.value!, closeTo(2.024984, 1e-5));
+
+      // The StrainScorer path agrees exactly with the top-level one.
+      expect(StrainScorer.banisterTRIMP([150], 50, 140, [1.0], female: false),
+          closeTo(male.value!, 1e-12));
+      expect(StrainScorer.banisterTRIMP([150], 50, 140, [1.0], female: true),
+          closeTo(female.value!, 1e-12));
+      expect(StrainScorer.banisterY(x, female: false),
+          closeTo(0.64 * math.exp(1.92 * x), 1e-12));
+      expect(StrainScorer.banisterY(x, female: true),
+          closeTo(0.86 * math.exp(1.67 * x), 1e-12));
     });
     test('Edwards zone-sum is the weighted dot product', () {
       // zones [10,5,0,0,0] -> 10*1 + 5*2 = 20
@@ -213,6 +406,35 @@ void main() {
       final s = ctlAtlTsb(spiked);
       expect(s.value!.atl, greaterThan(s.value!.ctl));
       expect(s.value!.tsb, lessThan(0));
+    });
+
+    test('REGRESSION: one training day does NOT fabricate 42 days of chronic '
+        'load', () {
+      // ctlAtlTsb([500]) used to seed BOTH accumulators at dailyTrimp.first →
+      // ctl 500, atl 500, tsb 0.0: a fully-adapted, perfectly-fresh athlete
+      // conjured from a single workout.
+      final one = ctlAtlTsb([500.0]);
+      expect(one.present, isFalse);
+      expect(one.value, isNull);
+      expect(one.confidence, 0);
+      expect(one.note, 'need_baseline:have=1,need=$ctlAtlMinDays');
+      // Still absent one day short of the minimum...
+      expect(ctlAtlTsb(List<double>.filled(ctlAtlMinDays - 1, 50.0)).present,
+          isFalse);
+      // ...and present at the minimum.
+      expect(
+          ctlAtlTsb(List<double>.filled(ctlAtlMinDays, 50.0)).present, isTrue);
+    });
+
+    test('REGRESSION: the seed is a week of observed load, not day one', () {
+      // A single huge opening day must not become the chronic baseline.
+      final hist = <double>[600.0, for (var i = 0; i < 20; i++) 0.0];
+      final m = ctlAtlTsb(hist);
+      expect(m.present, isTrue);
+      // Prime = mean of the first 7 days = 600/7 ≈ 85.7, then 14 rest days
+      // decay it — nowhere near the old ctl≈600 anchor.
+      expect(m.value!.ctl, lessThan(90));
+      expect(m.value!.atl, lessThan(m.value!.ctl));
     });
   });
 
@@ -388,6 +610,54 @@ void main() {
       expect((v * 100).round() / 100, v);
     });
 
+    test('REGRESSION: trimpToStrain is CLAMPED to maxStrain', () {
+      // Docstring says "Map accumulated TRIMP onto [0, 100]" but nothing
+      // clamped: 14400 → 107.8. (The sibling strainScore() always clamped.)
+      expect(StrainScorer.trimpToStrain(14400), 100.0);
+      expect(StrainScorer.trimpToStrain(1e9), StrainScorer.maxStrain);
+      expect(StrainScorer.trimpToStrain(7200), closeTo(100.0, 1e-9));
+      // Below the ceiling nothing changed.
+      expect(StrainScorer.trimpToStrain(335), lessThan(100.0));
+    });
+
+    test('REGRESSION: strain integrates PER-SAMPLE durations, not the first '
+        'inter-sample gap applied to everything', () {
+      const bpmv = 150.0;
+      // (a) 21 samples over 20 min whose FIRST two are 1 s apart — exactly the
+      // sparse stream minSparseReadings admits. sampleDuration was 1 s for all
+      // 21 samples → strain 8.08 instead of ~47.
+      final tsIrregular = <double>[0, 1, for (var i = 1; i < 20; i++) 1 + i * 63.1];
+      final bpm21 = List<double>.filled(21, bpmv);
+      final irregular =
+          StrainScorer.strain(bpm21, tsIrregular, maxHR: 190, restingHR: 50)!;
+      final uniform = StrainScorer.strain(
+          bpm21, [for (var i = 0; i < 21; i++) i * 60.0],
+          maxHR: 190, restingHR: 50)!;
+      expect(irregular, greaterThan(40.0));
+      expect(irregular, closeTo(uniform, 3.0),
+          reason: 'same HR over the same wall-clock span → similar strain');
+
+      // (b) The inverse: 700 samples at 1 Hz behind a 300 s leading gap. The
+      // 5-min first gap became every sample's duration → strain 104.25.
+      final tsGap = <double>[0, for (var i = 0; i < 699; i++) 300.0 + i];
+      final gapped = StrainScorer.strain(
+          List<double>.filled(700, bpmv), tsGap,
+          maxHR: 190, restingHR: 50)!;
+      final dense = StrainScorer.strain(List<double>.filled(700, bpmv),
+          [for (var i = 0; i < 700; i++) i.toDouble()],
+          maxHR: 190, restingHR: 50)!;
+      expect(gapped, lessThanOrEqualTo(StrainScorer.maxStrain));
+      expect(gapped, closeTo(dense, 1.0),
+          reason: 'a hole in the stream is not elapsed effort');
+      expect(gapped, lessThan(60.0));
+
+      // Per-sample durations: gaps capped at the median cadence, tail gets it.
+      final durs = StrainScorer.sampleDurationsMinutes(tsGap);
+      expect(durs.length, 700);
+      expect(durs.first, closeTo(1 / 60.0, 1e-12));
+      expect(durs.reduce(math.max), closeTo(1 / 60.0, 1e-12));
+    });
+
     test('Edwards zone weight at %HRR boundaries (RHR=0,reserve=100 → bpm=%HRR)', () {
       int w(double pct) => StrainScorer.zoneWeight(pct, 0, 100);
       expect(w(49), 0);
@@ -404,12 +674,11 @@ void main() {
       final lo = List<double>.filled(30, 100.0);
       final hi = List<double>.filled(30, 150.0);
       final ts = [for (var i = 0; i < 30; i++) i.toDouble()];
-      final tLo = StrainScorer.banisterTRIMP(
-          lo, 50, 150, StrainScorer.sampleDurationMinutes(ts),
-          StrainScorer.banisterBMen);
-      final tHi = StrainScorer.banisterTRIMP(
-          hi, 50, 150, StrainScorer.sampleDurationMinutes(ts),
-          StrainScorer.banisterBMen);
+      // API change: TRIMP now integrates PER-SAMPLE durations, and the
+      // Banister sex is selected by name (b and its scale must stay paired).
+      final durs = StrainScorer.sampleDurationsMinutes(ts);
+      final tLo = StrainScorer.banisterTRIMP(lo, 50, 150, durs);
+      final tHi = StrainScorer.banisterTRIMP(hi, 50, 150, durs);
       expect(tHi, greaterThan(tLo));
     });
 
@@ -535,6 +804,26 @@ void main() {
       final m = baevskyStressIndex(<double>[for (var i = 0; i < 300; i++) 900.0]);
       expect(m.present, isFalse);
       expect(m.value, isNull);
+    });
+
+    test('REGRESSION: a NEAR-degenerate RR range abstains instead of reporting '
+        'SI 48780 / "high"', () {
+      // 300 beats alternating 1000/1001 ms — plausible 1 Hz beat-timing
+      // quantization at a steady sleeping HR. The guard was only mxdmnS <= 0,
+      // so MxDMn = 0.001 s blew the 1/MxDMn denominator up to si 48780,
+      // level 'high'.
+      final nn = <double>[
+        for (var i = 0; i < 300; i++) i.isEven ? 1000.0 : 1001.0
+      ];
+      final m = baevskyStressIndex(nn);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+      // A genuinely varying series of the same length still computes.
+      final ok = baevskyStressIndex(<double>[
+        for (var i = 0; i < 300; i++) 900.0 + 15.0 * math.sin(i.toDouble())
+      ]);
+      expect(ok.present, isTrue);
     });
   });
 

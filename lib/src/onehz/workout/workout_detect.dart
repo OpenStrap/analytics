@@ -45,6 +45,15 @@ class ExerciseSession {
   final double? caloriesKcal;
   final double? caloriesKJ;
 
+  /// True when [caloriesKcal]/[caloriesKJ] were computed against a FABRICATED
+  /// anchor — [Calories.estimateBoutCalories] falls back to a flat
+  /// `hrmax = 220` / `restingHr = 60` when either is null, and returns
+  /// `usedDefaultAnchors` precisely so that number can be caveated instead of
+  /// shown as if it were personal. The flag used to be computed and thrown
+  /// away; it is now carried through to [toJson]. False when no calories were
+  /// computed at all.
+  final bool caloriesUsedDefaultAnchors;
+
   /// Sport label from the classifier seam ("detected" by default).
   final String sport;
 
@@ -61,6 +70,7 @@ class ExerciseSession {
     required this.hrmaxSource,
     required this.caloriesKcal,
     required this.caloriesKJ,
+    this.caloriesUsedDefaultAnchors = false,
     this.sport = defaultSportLabel,
   });
 
@@ -77,6 +87,7 @@ class ExerciseSession {
         'hrmax_source': hrmaxSource,
         'calories_kcal': caloriesKcal == null ? null : round6(caloriesKcal!),
         'calories_kj': caloriesKJ == null ? null : round6(caloriesKJ!),
+        'calories_used_default_anchors': caloriesUsedDefaultAnchors,
         'sport': sport,
       };
 }
@@ -134,12 +145,22 @@ class WorkoutDetector {
     return out;
   }
 
-  /// Day resting-HR baseline = nearest-rank RESTING_PERCENTILE of bpm values.
-  /// Derive resting HR from a sorted series. [bpmSorted] must already be sorted ascending.
-  static double _deriveRestingHR(List<double> bpmSorted) {
-    final rank =
-        math.max(1, (restingPercentile / 100.0 * bpmSorted.length).ceil());
-    return bpmSorted[rank - 1];
+  /// Day resting-HR baseline = nearest-rank RESTING_PERCENTILE of the ON-SKIN
+  /// bpm values.
+  ///
+  /// OFF-SKIN FILTER: the package convention (types.dart, `HrSample`) is that
+  /// `hr == 0` means the sensor was off the wrist, NEVER bradycardia. Taking the
+  /// 10th percentile of the RAW stream on a day with ≥10 % dropout returned
+  /// restHR = 0, which dragged hrFloor down to 15 bpm and inflated every
+  /// downstream %HRR — an ordinary 120 bpm walk read as 63 % HRR (zone 2)
+  /// instead of 48 % (zone 0), so it cleared the zone-2 workout gate. Zeros are
+  /// dropped before the percentile; null when nothing on-skin remains (we
+  /// abstain rather than invent a resting HR).
+  static double? _deriveRestingHR(List<double> bpm) {
+    final onSkin = [for (final b in bpm) if (b > 0 && b.isFinite) b]..sort();
+    if (onSkin.isEmpty) return null;
+    final rank = math.max(1, (restingPercentile / 100.0 * onSkin.length).ceil());
+    return onSkin[rank - 1];
   }
 
   /// Value whose ts is nearest [target] within [tol] s, else null. Ties → later
@@ -286,7 +307,10 @@ class WorkoutDetector {
     final motion = activitySeries(gravTs, gx, gy, gz);
     if (motion.isEmpty) return const [];
 
-    final restHR = restingHR ?? _deriveRestingHR([...sBpm]..sort());
+    final restHR = restingHR ?? _deriveRestingHR(sBpm);
+    // No caller RHR and no on-skin sample to derive one from → no baseline, so
+    // no honest HR gate. Abstain rather than gate against a fabricated floor.
+    if (restHR == null) return const [];
     final hrFloor = restHR + hrMarginBPM;
 
     final double? effMaxHR;
@@ -355,14 +379,21 @@ class WorkoutDetector {
       }
 
       // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+.
-      if (zonePct.isNotEmpty) {
-        var z2plus = 0.0;
-        for (var z = 2; z <= 5; z++) {
-          z2plus += zonePct[z] ?? 0.0;
-        }
-        z2plus /= 100.0;
-        if (z2plus < minIntensityZ2Plus) continue;
+      //
+      // AN UNEVALUABLE GATE BLOCKS, IT DOES NOT PASS. `zonePct` is empty exactly
+      // when there is no usable HRmax anchor (no caller HRmax, no age for
+      // Tanaka, <600 samples for an observed estimate → estimateHRmax returns
+      // ("unknown", 0)), or when the anchor is at/below resting HR. The old code
+      // skipped the whole gate in that case, so a 6-minute walk at RHR+16 bpm
+      // was emitted as a durable workout. With no zone breakdown we cannot know
+      // whether the bout qualified, so we drop it.
+      if (zonePct.isEmpty) continue;
+      var z2plus = 0.0;
+      for (var z = 2; z <= 5; z++) {
+        z2plus += zonePct[z] ?? 0.0;
       }
+      z2plus /= 100.0;
+      if (z2plus < minIntensityZ2Plus) continue;
 
       // OVERLAP-DEDUP: drop a detected bout overlapping a saved/manual span.
       if (savedSpans.any((s) => _overlaps(start, end, s.startSec, s.endSec))) {
@@ -370,6 +401,11 @@ class WorkoutDetector {
       }
 
       double? kcal, kj;
+      // Carry [Calories.estimateBoutCalories]'s usedDefaultAnchors through to
+      // the session — it exists so a calorie number built on the flat
+      // `hrmax ?? 220` / `restingHr ?? 60` fallback can be caveated, and it used
+      // to be computed and dropped on the floor here.
+      var calUsedDefaultAnchors = false;
       if (profile != null) {
         final winBpmInt = [for (final b in winBpm) b];
         final cal = Calories.estimateBoutCalories(
@@ -382,17 +418,29 @@ class WorkoutDetector {
         );
         kcal = cal.kcal;
         kj = cal.kj;
+        calUsedDefaultAnchors = cal.usedDefaultAnchors;
       }
 
       final avg = winBpm.reduce((a, b) => a + b) / winBpm.length;
       final peak = winBpm.reduce(math.max).round();
       // Strain via the existing StrainScorer (reused, NOT re-derived).
-      final strain = StrainScorer.strain(
-        winBpm,
-        [for (final t in winTs) t.toDouble()],
-        maxHR: effMaxHR,
-        restingHR: restHR,
-      );
+      //
+      // NO HIDDEN ANCHOR: StrainScorer.strain silently substitutes
+      // `defaultMaxHR() = 220 − 30 = 190` when maxHR is null, so a session used
+      // to report `hrmax: null, hrmax_source: 'unknown'` next to a concrete
+      // strain scored against an invented 190. We ABSTAIN instead — no anchor,
+      // no strain. (The zone gate above already drops such bouts; this keeps the
+      // guarantee local so it survives any future change to that gate. The
+      // fallback itself lives in clinical/load_trimp.dart and is not ours to
+      // change.)
+      final strain = effMaxHR == null
+          ? null
+          : StrainScorer.strain(
+              winBpm,
+              [for (final t in winTs) t.toDouble()],
+              maxHR: effMaxHR,
+              restingHR: restHR,
+            );
 
       // HYBRID SEAM: type the bout.
       final bout = WorkoutBout(
@@ -428,6 +476,7 @@ class WorkoutDetector {
         hrmaxSource: hrmaxSource,
         caloriesKcal: kcal,
         caloriesKJ: kj,
+        caloriesUsedDefaultAnchors: calUsedDefaultAnchors,
         sport: sport,
       ));
     }
@@ -465,12 +514,28 @@ Metric<List<ExerciseSession>> detectWorkouts({
     savedSpans: savedSpans,
     classify: classify,
   );
+  // Distinguish "no workouts today" from "the zone-2 qualification gate could
+  // not be evaluated because there is no HRmax anchor" — with no anchor the
+  // detector correctly emits nothing, and the caller deserves to know why.
+  final noAnchor =
+      maxHR == null && StrainScorer.estimateHRmax(hrBpm, age).$1 == 0.0;
   return Metric<List<ExerciseSession>>(
     value: list,
     confidence: list.isEmpty ? 0.0 : 0.6,
     tier: Tier.estimate,
-    inputs_used: const ['hr_1hz', 'gravity_1hz', 'profile'],
-    note: 'detected workouts (HR + motion gated, ≥5 min, ≥50% time in zone 2+); '
-        'wrist-HR ESTIMATE, not medical advice',
+    inputs_used: [
+      'hr_1hz',
+      'gravity_1hz',
+      if (profile != null) 'profile',
+      if (maxHR != null) 'max_hr',
+      if (age != null) 'age',
+      if (restingHR != null) 'resting_hr',
+    ],
+    note: noAnchor
+        ? 'no HRmax anchor (no caller HRmax, no age, too few HR samples for an '
+            'observed estimate) — the ≥50% time-in-zone-2+ qualification gate '
+            'cannot be evaluated, so NO workout is emitted (never guessed)'
+        : 'detected workouts (HR + motion gated, ≥5 min, ≥50% time in zone 2+); '
+            'wrist-HR ESTIMATE, not medical advice',
   );
 }

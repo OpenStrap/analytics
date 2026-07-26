@@ -1,5 +1,7 @@
 // Coaching surface — synthetic known-answer tests, incl. a regression for the
 // physiological-age oversleep bug. Covers PR #11's untested coaching API.
+import 'dart:convert';
+
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/src/onehz/types.dart';
 import 'package:openstrap_analytics/src/onehz/human/coaching.dart';
@@ -465,6 +467,195 @@ void main() {
       expect(m.present, isTrue);
       // The only sleep block IS the main sleep → excluded → empty list.
       expect(m.value, isEmpty);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: physiologicalAge must ABSTAIN with no physiology, and must
+  // report the inputs it ACTUALLY used.
+  // -------------------------------------------------------------------------
+  group('physiologicalAge — honesty envelope (regression)', () {
+    test('every physiological input null => ABSENT, not "your age"', () {
+      // PRE-FIX: score started at chronologicalAge, nothing moved it, and the
+      // function returned a PRESENT metric (physioAge 30, delta 0, conf 0.35)
+      // claiming six inputs it had never seen.
+      final m = physiologicalAge(
+        chronologicalAge: 30,
+        sex: Sex.male,
+        vo2max: null,
+        restingHr: null,
+        rmssd: null,
+        sleepDurationH: null,
+        sleepEfficiency: null,
+        dailySteps: null,
+      );
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0);
+      expect(m.toJson()['value'], '—');
+      expect(m.inputs_used, ['profile']);
+    });
+
+    test('inputs_used lists only the inputs actually supplied', () {
+      // PRE-FIX this was a hardcoded six-entry list in EVERY partial case.
+      final m = physiologicalAge(
+        chronologicalAge: 30,
+        sex: Sex.male,
+        vo2max: null,
+        restingHr: 55,
+        rmssd: null,
+        sleepDurationH: 7.5,
+        sleepEfficiency: null,
+        dailySteps: null,
+      );
+      expect(m.present, isTrue);
+      expect(m.inputs_used, ['profile', 'resting_hr', 'sleep_duration']);
+      expect(m.inputs_used, isNot(contains('vo2max')));
+      expect(m.inputs_used, isNot(contains('rmssd')));
+      expect(m.inputs_used, isNot(contains('steps')));
+    });
+
+    test('confidence scales with how much physiology went in', () {
+      Metric<PhysioAge> build(int n) => physiologicalAge(
+            chronologicalAge: 40,
+            sex: Sex.male,
+            vo2max: n >= 1 ? 50 : null,
+            restingHr: n >= 2 ? 48 : null,
+            rmssd: n >= 3 ? 60 : null,
+            sleepDurationH: n >= 4 ? 7.5 : null,
+            sleepEfficiency: n >= 5 ? 94 : null,
+            dailySteps: n >= 6 ? 12000 : null,
+          );
+      expect(build(6).confidence, greaterThan(build(1).confidence));
+      expect(build(6).inputs_used, hasLength(7)); // profile + 6
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: vo2maxEstimate must not divide by a zero resting HR.
+  // -------------------------------------------------------------------------
+  group('vo2maxEstimate — zero resting HR (regression)', () {
+    test('restingHr == 0 (the off-skin sentinel) ABSTAINS, never Infinity', () {
+      // PRE-FIX `maxHr <= restingHr` did not catch it: 15.3 * (190/0) produced
+      // value: Infinity, which Metric.toJson emits raw and jsonEncode throws on.
+      final m = vo2maxEstimate(restingHr: 0, maxHr: 190, sex: Sex.male, age: 30);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(() => jsonEncode(m.toJson()), returnsNormally);
+    });
+
+    test('a negative or non-finite resting HR also abstains', () {
+      expect(
+          vo2maxEstimate(restingHr: -5, maxHr: 190, sex: Sex.male, age: 30)
+              .present,
+          isFalse);
+      expect(
+          vo2maxEstimate(
+                  restingHr: double.nan, maxHr: 190, sex: Sex.male, age: 30)
+              .present,
+          isFalse);
+    });
+
+    test('a valid pair still computes', () {
+      final m = vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
+      expect(m.present, isTrue);
+      expect(m.value!.isFinite, isTrue);
+      expect(() => jsonEncode(m.toJson()), returnsNormally);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // REGRESSION: journalCorrelations needs a dispersion test, and must not
+  // index an outcome list by dates.length without checking.
+  // -------------------------------------------------------------------------
+  group('journalCorrelations — dispersion + length guard (regression)', () {
+    test('a 3% mean gap swamped by within-group spread is NOT meaningful', () {
+      // tagged [50,80] mean 65 vs untagged [40,86] mean 63 => +3.17%, which
+      // PRE-FIX cleared the bare `pct.abs() >= 3.0` bar. Each side spans 30–46
+      // points, so Cohen's d is ~0.07: this is noise, not a journal effect.
+      final journal = <JournalDay>[
+        const JournalDay('d0', {'coffee'}),
+        const JournalDay('d1', {'coffee'}),
+        const JournalDay('d2', {}),
+        const JournalDay('d3', {}),
+      ];
+      final out = journalCorrelations(
+        journal: journal,
+        dates: const ['d0', 'd1', 'd2', 'd3'],
+        outcomes: const {
+          'recovery': [50, 80, 40, 86]
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'coffee').effects.single;
+      expect(eff.insufficient, isFalse);
+      expect(eff.pctChange!.abs(), greaterThanOrEqualTo(3.0),
+          reason: 'the old percentage bar IS cleared');
+      expect(eff.cohensD, isNotNull);
+      expect(eff.cohensD!.abs(), lessThan(0.5));
+      expect(eff.meaningful, isFalse,
+          reason: 'dispersion test must veto it (d=${eff.cohensD})');
+    });
+
+    test('a large, well-separated effect is still meaningful', () {
+      final out = journalCorrelations(
+        journal: const [
+          JournalDay('d0', {'alcohol'}),
+          JournalDay('d1', {'alcohol'}),
+          JournalDay('d2', {}),
+          JournalDay('d3', {}),
+        ],
+        dates: const ['d0', 'd1', 'd2', 'd3'],
+        outcomes: const {
+          'recovery': [40, 42, 80, 82]
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
+      expect(eff.meaningful, isTrue);
+      expect(eff.cohensD!.abs(), greaterThan(0.5));
+    });
+
+    test('two constant sides with only 2 days each are NOT meaningful', () {
+      // Pooled SD is 0 so Cohen's d is undefined; refuse to call it.
+      final out = journalCorrelations(
+        journal: const [
+          JournalDay('d0', {'x'}),
+          JournalDay('d1', {'x'}),
+          JournalDay('d2', {}),
+          JournalDay('d3', {}),
+        ],
+        dates: const ['d0', 'd1', 'd2', 'd3'],
+        outcomes: const {
+          'recovery': [60, 60, 70, 70]
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'x').effects.single;
+      expect(eff.cohensD, isNull);
+      expect(eff.meaningful, isFalse);
+    });
+
+    test('an outcome list shorter than dates is guarded, not a RangeError', () {
+      // PRE-FIX `entry.value[i]` was indexed by dates.length => RangeError.
+      late final List<JournalTagCorrelation> out;
+      expect(
+        () => out = journalCorrelations(
+          journal: const [
+            JournalDay('d0', {'x'}),
+            JournalDay('d1', {'x'}),
+            JournalDay('d2', {}),
+            JournalDay('d3', {}),
+          ],
+          dates: const ['d0', 'd1', 'd2', 'd3'],
+          outcomes: const {
+            'recovery': [60, 62] // misaligned: 2 values for 4 dates
+          },
+        ),
+        returnsNormally,
+      );
+      final eff = out.firstWhere((c) => c.tag == 'x').effects.single;
+      expect(eff.insufficient, isTrue);
+      expect(eff.meaningful, isFalse);
+      expect(eff.nTagged, 0);
+      expect(eff.nUntagged, 0);
     });
   });
 }

@@ -105,7 +105,14 @@ Metric<HrvFreq> hrvFreq(
     nuLf = 100.0 * lf / (lf + hf);
     nuHf = 100.0 * hf / (lf + hf);
   }
-  final total = (ulf ?? 0) + (vlf ?? 0) + lf + hfRaw;
+  // TOTAL POWER is by definition the sum over ALL bands (Task Force 1996).
+  // When HF is suppressed we do not have a trustworthy HF term, so a "total"
+  // is not computable: silently summing the withheld hfRaw back in republished
+  // exactly the quantity the gate withheld (the gated and ungated totals came
+  // out bit-identical), and dropping HF from the sum would republish a
+  // different quantity under the same name. Either way it would be dishonest —
+  // so total is WITHHELD alongside HF.
+  final total = hfGated ? null : (ulf ?? 0) + (vlf ?? 0) + lf + hfRaw;
 
   // Confidence: penalize artifacts heavily; low-band-only reads still HIGH-ish.
   final conf = clamp((1 - artifactFraction) * (hfGated ? 0.6 : 0.9), 0.2, 0.9);
@@ -126,7 +133,7 @@ Metric<HrvFreq> hrvFreq(
     inputs_used: inputs,
     note: hfGated
         ? 'HF suppressed: artifact fraction ${round6(artifactFraction)} '
-            '> gate — LF/VLF reported, HF/LF-HF/nu withheld'
+            '> gate — LF/VLF reported, HF/LF-HF/nu/total withheld'
         : 'PRV spectrum; HF band quantization-limited at 1 Hz',
   );
 }
