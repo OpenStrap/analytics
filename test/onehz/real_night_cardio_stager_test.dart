@@ -41,7 +41,6 @@
 // counter/device fields).
 
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 

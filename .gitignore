@@ -6,3 +6,7 @@ build/
 .DS_Store
 # legacy ts/ tooling scratch, dont want another node_modules commit
 node_modules/
+
+# Local dev override redirecting sibling packages to in-tree checkouts.
+# Never committed — pubspec.yaml pins real SHAs so CI and fresh clones work.
+pubspec_overrides.yaml

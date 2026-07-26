@@ -1,13 +1,26 @@
 name: openstrap_analytics
-description: Pure-Dart 1:1 port of openstrap-analytics (published-algorithm analytics over minute rollups).
+description: >-
+  Recovery, strain, sleep and more, computed from a WHOOP 4.0's 1 Hz sensor
+  stream using published, cited methods only. Pure Dart, zero runtime
+  dependencies, deterministic, on-device.
 version: 1.0.0
 publish_to: none
 
 environment:
   sdk: ^3.5.0
 
+# NOTE: no runtime dependencies, by design. openstrap_protocol is a DEV-only
+# dependency — the tests replay real records through it, but nothing under lib/
+# imports it. That is what keeps this package pure Dart with zero runtime deps.
 dev_dependencies:
   test: ^1.25.0
   lints: ^4.0.0
+  # Pinned to a commit SHA, not a floating branch ref, so a given analytics
+  # commit always tests against exactly one protocol revision. (This used to be
+  # `path: ../openstrap-protocol-dart`, which only resolved on the author's
+  # machine — a fresh clone could not `pub get` at all.) Local development still
+  # builds against ../protocol via a gitignored pubspec_overrides.yaml.
   openstrap_protocol:
-    path: ../openstrap-protocol-dart
+    git:
+      url: https://github.com/OpenStrap/protocol.git
+      ref: 02fc8e5f2310ded690a522cd9884bf51b4cdc7e1 # tip of protocol main
