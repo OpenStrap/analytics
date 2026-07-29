@@ -441,6 +441,12 @@ CardioStagerResult cardioStager(
     for (var e = 0; e < nEpoch; e++)
       if (still(e) && !rk[e].isNaN) rk[e]
   ];
+  // These three samples are fixed for the rest of the stage, so take their
+  // median+MAD once instead of re-deriving them per epoch inside the classify
+  // loop below. Same values, ~2,880 fewer sorts on a full night.
+  final rmssdScale = RobustScale.of(sleepRmssd);
+  final lfhfScale = RobustScale.of(sleepLfhf);
+  final rkScale = RobustScale.of(sleepRk);
   final hrSdSample = [for (final s in hrSd) if (s > 0) s];
   final hrSdMed = median(hrSdSample) ?? double.infinity;
   // RMSSD reference for the deep "not-elevated-HRV" gate, blended toward profile.
@@ -475,17 +481,17 @@ CardioStagerResult cardioStager(
     // large movement) AND an HR floor (HR ≥ the local p25 — REM is not the
     // quiescent cardiac trough). This recovers REM the RMSSD-only rule missed.
     final rmZ = (rmssdMed != null && !rmssd[e].isNaN && sleepRmssd.length >= 4)
-        ? robustZ(rmssd[e], sleepRmssd)
+        ? rmssdScale?.z(rmssd[e])
         : null;
     final rmssdDown = rmZ != null && rmZ < -0.4; // RMSSD notably below sleep base
     // LF/HF elevated (sympathetic shift) vs the night's sleeping LF/HF.
     final lfhfZ = (sleepLfhf.length >= 4 && !lfhf[e].isNaN)
-        ? robustZ(lfhf[e], sleepLfhf)
+        ? lfhfScale?.z(lfhf[e])
         : null;
     final lfhfHigh = lfhfZ != null && lfhfZ > _remLfhfZ;
     // R(k) burst: instantaneous-HR variability elevated vs sleeping R(k).
     final rkZ = (sleepRk.length >= 4 && !rk[e].isNaN)
-        ? robustZ(rk[e], sleepRk)
+        ? rkScale?.z(rk[e])
         : null;
     final rkBurst = rkZ != null && rkZ > _remRkZ;
     final remAutonomic = rmssdDown || lfhfHigh || rkBurst;
