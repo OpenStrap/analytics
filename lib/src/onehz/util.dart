@@ -70,12 +70,30 @@ double? mad(List<double> xs, {bool scaled = true}) {
 /// Iglewicz–Hoaglin modified z-score of [x] against a sample, using
 /// median + MAD. Returns null if MAD is 0 (degenerate / fully-quantized) so
 /// the caller can fall back to a coarser test rather than divide by zero.
-double? robustZ(double x, List<double> sample) {
-  if (sample.length < 2) return null;
-  final m = median(sample)!;
-  final s = mad(sample);
-  if (s == null || s == 0) return null;
-  return (x - m) / s;
+double? robustZ(double x, List<double> sample) => RobustScale.of(sample)?.z(x);
+
+/// The median + MAD of a sample, computed once.
+///
+/// [robustZ] re-derives both on every call, which sorts the sample twice. When
+/// scoring many values against the SAME unchanging sample — the usual case
+/// inside a per-epoch loop — build one of these outside the loop instead.
+/// Results are identical to [robustZ], including its null semantics: absent
+/// for a sample under two values or a MAD of zero.
+class RobustScale {
+  final double med;
+  final double scale;
+
+  const RobustScale(this.med, this.scale);
+
+  static RobustScale? of(List<double> sample) {
+    if (sample.length < 2) return null;
+    final m = median(sample)!;
+    final s = mad(sample);
+    if (s == null || s == 0) return null;
+    return RobustScale(m, s);
+  }
+
+  double z(double x) => (x - med) / scale;
 }
 
 /// Ordinary z-score against a sample (mean+SD). Null if SD undefined or 0.
