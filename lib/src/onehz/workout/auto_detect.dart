@@ -295,7 +295,7 @@ class AutoWorkoutDetector {
           final preMean =
               _meanBpmInRange(ts, bpm, start - onsetLookbackS, start);
           final earlyMean = _meanBpmInRange(
-              ts, bpm, start, math.min(end, start + onsetWindowS) + 1);
+              ts, bpm, start, math.min(end + 1, start + onsetWindowS));
           if (preMean == null ||
               earlyMean == null ||
               (earlyMean - preMean) < onsetRiseBpm) {
