@@ -79,20 +79,8 @@ void main() {
       expect(out, isEmpty);
     });
 
-    test('motion confirmation gate: low motion drops it, high keeps it', () {
+    test('motion confirmation gate: high motion keeps it', () {
       final d = _hrDay();
-      // Low motion over the bout → below motionConfirmMean (0.15).
-      final lowMotion = [
-        for (var t = 600; t <= 1499; t++) MotionPoint(t, 0.01),
-      ];
-      final dropped = AutoWorkoutDetector.detect(
-        hrTs: d.ts,
-        hrBpm: d.bpm,
-        restingBpm: 60,
-        motion: lowMotion,
-      );
-      expect(dropped, isEmpty);
-
       final highMotion = [
         for (var t = 600; t <= 1499; t++) MotionPoint(t, 0.5),
       ];
@@ -103,6 +91,74 @@ void main() {
         motion: highMotion,
       );
       expect(kept, hasLength(1));
+    });
+
+    test('motion gate + onset bypass: sharp HR onset from rest keeps a '
+        'low-motion bout (cycling/rowing — wrist stays still)', () {
+      // Same shape as _hrDay(): 60 bpm rest for 600 s, then a sharp step to
+      // 140 bpm — a genuine exercise onset even though the wrist motion stays
+      // near-zero throughout (handlebar/oar grip).
+      final d = _hrDay();
+      final lowMotion = [
+        for (var t = 600; t <= 1499; t++) MotionPoint(t, 0.01),
+      ];
+      final out = AutoWorkoutDetector.detect(
+        hrTs: d.ts,
+        hrBpm: d.bpm,
+        restingBpm: 60,
+        motion: lowMotion,
+      );
+      expect(out, hasLength(1));
+      expect(out.first.startSec, 600);
+    });
+
+    test('motion gate + onset bypass: a slow-drifting elevation with no '
+        'discernible start (fever/heat/anxiety) stays dropped even at low '
+        'motion', () {
+      // Ramp gradually from 60 to 140 over 10 min (well under onsetRiseBpm's
+      // 25 bpm/3 min bar at any point), then hold — no sharp onset anywhere,
+      // so the low-motion gate must still reject it.
+      final ts = <int>[];
+      final bpm = <int>[];
+      var t = 0;
+      for (; t < 600; t++) {
+        ts.add(t);
+        bpm.add(60);
+      }
+      // 600 s ramp: +8 bpm/min over 10 min => 60 -> 140.
+      for (var i = 0; i < 600; i++, t++) {
+        ts.add(t);
+        bpm.add(60 + (i * 80 / 600).round());
+      }
+      for (var i = 0; i < 900; i++, t++) {
+        ts.add(t);
+        bpm.add(140);
+      }
+      final lowMotion = [
+        for (var tt = 0; tt < t; tt++) MotionPoint(tt, 0.01),
+      ];
+      final out = AutoWorkoutDetector.detect(
+        hrTs: ts,
+        hrBpm: bpm,
+        restingBpm: 60,
+        motion: lowMotion,
+      );
+      expect(out, isEmpty);
+    });
+
+    test('motion gate + onset bypass: no pre-window (span starts at the '
+        'first sample) cannot evaluate onset — stays dropped', () {
+      // Elevated from t=0 with no preceding rest data at all.
+      final ts = <int>[for (var t = 0; t < 900; t++) t];
+      final bpm = <int>[for (var t = 0; t < 900; t++) 140];
+      final lowMotion = [for (final t in ts) MotionPoint(t, 0.01)];
+      final out = AutoWorkoutDetector.detect(
+        hrTs: ts,
+        hrBpm: bpm,
+        restingBpm: 60,
+        motion: lowMotion,
+      );
+      expect(out, isEmpty);
     });
 
     test('brief dip ≤ maxDipS does not break the span', () {
