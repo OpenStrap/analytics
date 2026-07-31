@@ -113,6 +113,32 @@ class AutoWorkoutDetector {
   /// Ignored in HR-only mode.
   static const double motionConfirmMean = 0.15;
 
+  /// Lookback immediately before a span's start, used to test for an
+  /// exercise-like HR ONSET as a motion-gate bypass — see [onsetRiseBpm].
+  static const int onsetLookbackS = 180;
+
+  /// The onset check's "post" window: the first stretch of the span itself.
+  static const int onsetWindowS = 180;
+
+  /// Bypass the motion-confirmation gate when it fails BUT the HR shows a
+  /// genuine exercise ONSET: mean bpm over [onsetWindowS] at the START of the
+  /// span must rise by at least this many bpm versus mean bpm over
+  /// [onsetLookbackS] immediately BEFORE it.
+  ///
+  /// Real aerobic effort produces a fast (~1-2 min time-constant) phase-II HR
+  /// kinetic response right as exertion begins (Whipp & Wasserman 1972) —
+  /// exactly what low-limb-swing cardio (cycling, rowing) shows even though
+  /// the wrist stays still on a handlebar/oar and [motionConfirmMean] (tuned
+  /// for arm-swing activities) never clears. A slow-drifting elevation —
+  /// fever, heat, anxiety climbing over many minutes, or a plateau with no
+  /// visible start because the data begins mid-elevation — shows no such rise
+  /// and stays gated: this is what keeps the bypass from turning "every
+  /// sustained heart-rate elevation" into a suggested activity. No usable
+  /// pre-window (nothing in [onsetLookbackS], e.g. the day/recording starts
+  /// mid-span) → the onset can't be evaluated → abstain, motion gate stays in
+  /// force (never fabricate an onset that isn't there).
+  static const double onsetRiseBpm = 25.0;
+
   /// Resting-HR fallback when the caller has no nightly RHR.
   static const int defaultRestingHR = 60;
 
@@ -264,7 +290,18 @@ class AutoWorkoutDetector {
           }
         }
         meanMotion = cnt == 0 ? 0.0 : sum / cnt;
-        if (meanMotion < motionConfirmMean) continue;
+        if (meanMotion < motionConfirmMean) {
+          // Low-motion but a genuine exercise-like onset — see [onsetRiseBpm].
+          final preMean =
+              _meanBpmInRange(ts, bpm, start - onsetLookbackS, start);
+          final earlyMean = _meanBpmInRange(
+              ts, bpm, start, math.min(end + 1, start + onsetWindowS));
+          if (preMean == null ||
+              earlyMean == null ||
+              (earlyMean - preMean) < onsetRiseBpm) {
+            continue;
+          }
+        }
       }
 
       var sum = 0;
@@ -304,6 +341,20 @@ class AutoWorkoutDetector {
   /// Closed-interval overlap (touching endpoints count).
   static bool _overlaps(int aStart, int aEnd, int bStart, int bEnd) =>
       aStart <= bEnd && bStart <= aEnd;
+
+  /// Mean bpm for samples with `lo <= ts < hi`. Null when nothing falls in
+  /// range (can't evaluate — caller must abstain, not substitute a default).
+  static double? _meanBpmInRange(
+      List<int> ts, List<int> bpm, int lo, int hi) {
+    var sum = 0, cnt = 0;
+    for (var k = 0; k < ts.length; k++) {
+      if (ts[k] >= lo && ts[k] < hi) {
+        sum += bpm[k];
+        cnt++;
+      }
+    }
+    return cnt == 0 ? null : sum / cnt;
+  }
 }
 
 /// Wrap a list of [DetectedWorkout] in the honesty envelope. Always present
