@@ -446,12 +446,28 @@ void main() {
       expect(m.tier, Tier.estimate);
       expect(m.value, isNotEmpty);
       for (final nap in m.value!) {
-        // Every reported nap honors the 20 min – 3 h envelope.
+        // Every reported nap honors the 20 min – 6 h envelope.
         expect(nap.durationSec, greaterThanOrEqualTo(20 * 60));
-        expect(nap.durationSec, lessThanOrEqualTo(3 * 3600));
+        expect(nap.durationSec, lessThanOrEqualTo(6 * 3600));
         expect(nap.endSec, greaterThan(nap.startSec));
         expect(nap.confidence, inInclusiveRange(0.0, 1.0));
       }
+    });
+
+    test('a long secondary sleep block (>3h, <=6h) is now captured, not dropped', () {
+      final day = buildDay(activeMin: 90, napMin: 4 * 60);
+      final m = detectNaps(day.accel, day.hr); // no main window → not excluded
+      expect(m.present, isTrue);
+      expect(m.value, isNotEmpty);
+      expect(m.value!.first.durationSec, greaterThan(3 * 3600));
+      expect(m.value!.first.durationSec, lessThanOrEqualTo(6 * 3600));
+    });
+
+    test('a block longer than 6h is still rejected as a nap', () {
+      final day = buildDay(activeMin: 90, napMin: 7 * 60);
+      final m = detectNaps(day.accel, day.hr);
+      // 7h exceeds maxNapSec — no qualifying nap reported for that block.
+      expect(m.value, isEmpty);
     });
 
     test('the main sleep window is carved out (no nap overlaps it)', () {
