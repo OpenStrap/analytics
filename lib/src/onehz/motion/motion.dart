@@ -30,9 +30,16 @@
 ///   * [calibrateCadence] lets the live path narrow that range to the user's
 ///     own measured cadence.
 /// Still genuinely impossible / not faked: dynamic-orientation limb tracking,
-/// frequency-domain activity TYPE classification (walk vs run vs cycle).
-/// At 1 Hz only an AMPLITUDE index + STATIC orientation are recoverable, and
-/// intensity is RELATIVE-to-you, never absolute METs.
+/// frequency-domain activity TYPE classification (walk vs run vs cycle) AT
+/// 1 HZ. At 1 Hz only an AMPLITUDE index + STATIC orientation are
+/// recoverable, and intensity is RELATIVE-to-you, never absolute METs.
+/// ─────────────────────────────────────────────────────────────────────────
+/// IMU GAIT-BAND (foreground, LAYER 2) — see imu_activity.dart. A 100 Hz-class
+/// accel+gyro buffer (first available from a WHOOP5 R22 opt-in raw buffer;
+/// gen4 has no gyroscope at all) unlocks a real spectral cadence + motion-
+/// energy estimate that 1 Hz structurally cannot — still an ESTIMATE, still
+/// not a step count, and purely additive (nothing else in this package calls
+/// it yet).
 /// ─────────────────────────────────────────────────────────────────────────
 library onehz_motion;
 
@@ -40,3 +47,4 @@ export 'enmo.dart';
 export 'orientation.dart';
 export 'energy_fusion.dart';
 export 'steps.dart';
+export 'imu_activity.dart';

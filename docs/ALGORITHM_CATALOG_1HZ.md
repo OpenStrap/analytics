@@ -79,6 +79,11 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 ## LAYER 2 — Foreground-only (live spot-check tier, high-rate accel/gyro/PPG)
 - **Karlen Smart-Fusion RR** (RIIV+RIAV+RIFV, 419 Hz PPG) — reference-grade spot breathing rate.
 - **Autocorrelation cadence + step/stride regularity & symmetry** (Moe-Nilssen 2004) — robust gait.
+  **BUILT (spectral variant)**: `motion/imu_activity.dart`'s `imuActivityFeatures` —
+  Lomb-Scargle gait-band (1.2–3.5 Hz) peak + band-strength gate over a 6-axis
+  accel+gyro buffer, ESTIMATE tier, honest-absent below the band-strength gate.
+  First feedable band-native source: a WHOOP5/gen5 R22 opt-in raw IMU buffer
+  (gen4 has no gyroscope); purely additive, no gen4/gen5 branch anywhere in it.
 - **AN-2554 / windowed peak-detection step counter** (100 Hz accel) — gate to ambulation; wrist over/under-count caveats (Tudor-Locke).
 - **Madgwick / Mahony quaternion orientation** — limb tracking during workouts.
 - **Frequency-domain activity typing** (dominant freq + spectral entropy, Wang 2009) — walk/run/cycle.
