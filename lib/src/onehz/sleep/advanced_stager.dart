@@ -266,6 +266,22 @@ class AdvancedSleepStager {
   /// and the file header for why [StagingMethod.cardio] is the default.
   /// [wristOff]/[bandSleepState] are optional auxiliary signals for the
   /// off-wrist / morning-stillness guards.
+  ///
+  /// [bandSleepState]'s `state` is this module's OWN canonical scheme (see
+  /// [bandStateAsleep]) — the caller (edge/protocol) must already have
+  /// translated whatever the source band's raw on-wire encoding is into that
+  /// scheme before calling. This matters concretely for WHOOP5/gen5: its raw
+  /// per-second sleep-state nibble has a genuinely unresolved bit-ordering
+  /// ambiguity in the protocol spec (whoop-rs and noop each shift the same
+  /// bits but gloss the still/wake mapping differently, and no
+  /// labelled-sleep capture has disambiguated it yet). This module never
+  /// sees or interprets that raw nibble — it is pure auxiliary
+  /// CORROBORATION (never a primary stage source; see
+  /// [_bandStateConfirmsAsleep]'s 60%-of-window gate), so a caller that has
+  /// not yet resolved the ambiguity should simply omit gen5 sleep-state data
+  /// here (pass `const []`) rather than guess — passing a wrongly-oriented
+  /// state would silently bias the morning re-onset guard, which this module
+  /// has no way to detect from the ints alone.
   static List<SleepSession> detectSleep(
     List<GravTs> gravity,
     List<HrTs> hr, {

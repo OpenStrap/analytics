@@ -20,6 +20,15 @@
 // conservative chi-square
 // gate keep the false-positive rate honest, and we report the per-feature
 // contributions so a flag is explainable.
+//
+// BAND-AGNOSTIC BY DESIGN (checked against the gen5 spec's "hr_anomaly.rs
+// generation blind spot" concern): that concern is real for a per-second
+// detector gated on activity_class/sleep_state/signal_quality, all fields
+// gen4 never populates. This module operates on NIGHTLY aggregates (RHR,
+// HRV, relative skin-temp, resp rate) that are already computed upstream
+// from whatever per-second fields a given band actually provides — it never
+// reads activity_class/sleep_state/signal_quality itself, so there is no
+// gen4-specific gap to inherit here. No change needed for gen5.
 
 import 'dart:math' as math;
 import '../types.dart';

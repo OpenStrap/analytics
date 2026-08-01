@@ -18,6 +18,21 @@
 // RELATIVE tier and the explicit "never %SpO₂" guard.
 //
 // HONESTY: RELATIVE tier always. Output carries no absolute %. ODI is a SCREEN.
+//
+// BAND-AGNOSTIC BY CONSTRUCTION — this only computes anything when it is
+// handed BOTH a red AND an ir channel (see [relativeOdi]'s `inputs`). A
+// WHOOP5/gen5 session's per-second record has no such dual-wavelength pair —
+// its only oximetry-adjacent signal is a single experimental byte
+// (spo2_candidate, unvalidated cross-device per the protocol spec) and,
+// separately, a single-wavelength ~24 Hz PPG waveform (no red/IR pair
+// either). NEITHER should ever be reshaped into fake red/ir arrays to feed
+// this module — that would silently fabricate a relative-R signal this
+// module has no way to know is bogus. The correct, already-honest behavior
+// is simply not calling this module for a gen5-only session (or calling it
+// with empty channels, which degrades to the existing "absent" path below)
+// — do not add a gen4/gen5 branch here to enforce that; the enforcement
+// point is upstream, in whatever assembles the red/ir arrays in the first
+// place.
 
 import 'dart:math' as math;
 import '../types.dart';

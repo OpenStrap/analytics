@@ -53,6 +53,22 @@
 //     resolve cadence at all (gait 1.4–2.5 Hz; 2.0 Hz aliases exactly to DC).
 //
 // Pure: dart:math only. No I/O, no clock, no randomness.
+//
+// DELIBERATELY NOT CONSUMED HERE: a band's own on-chip cumulative step
+// counter. WHOOP5/gen5's per-second record adds one (`step_motion_counter`,
+// monotonic, no midnight reset) that gen4 never had — but this package
+// already paid, once, for trusting an on-device-adjacent derived quantity
+// without independent validation: the original ENMO-scalar approach (see the
+// TIER B section header below) read 39,384 steps/day off a gravity-reference
+// artifact until it was rebuilt from scratch on dynAmp + a personal floor.
+// The gen5 counter comes with no ground-truth cross-check anywhere in the
+// protocol spec (contrast Tier A below, calibrated against a real 100-step
+// walk) and no documented reset/rollover/pause semantics, so wiring it in now
+// would repeat exactly that failure mode on a new field. If a future spec
+// revision supplies a validated accuracy characterization, the right seam is
+// a NEW optional corroboration signal alongside HR in [dailyStepEstimate]
+// (never a replacement for the honest 1 Hz estimate) — not a special-cased
+// gen4/gen5 branch, and not a silent substitute for either Tier below.
 
 import 'dart:math' as math;
 import '../types.dart';
