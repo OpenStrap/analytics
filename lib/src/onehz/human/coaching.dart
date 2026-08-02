@@ -44,7 +44,12 @@ Metric<List<NapWindow>> detectNaps(
 }) {
   const inputs = ['accel_1hz', 'hr_1hz'];
   const minNapSec = 20 * 60;
-  const maxNapSec = 3 * 3600;
+  // Was 3h, which silently dropped a real second sleep block (biphasic/
+  // split sleep, shift work) — it's too long to be a nap but also loses to
+  // the main sleep pick, so it just vanished from every output with no
+  // signal it ever existed. 6h still excludes anything long enough to be
+  // arguably its own main sleep, while catching genuine secondary sleep.
+  const maxNapSec = 6 * 3600;
   final n = math.min(accel.length, hr.length);
   if (n < minNapSec) {
     return const Metric<List<NapWindow>>.absent(
