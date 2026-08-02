@@ -18,15 +18,32 @@
 // Per 30-s epoch we measure, over the in-bed window only:
 //   motion = mean ENMO (van Hees 2013 amplitude index, g), against a LOCALLY
 //            re-estimated 1 g reference (see below), NOT a whole-night scalar
-//   hr     = mean valid HR (bpm)
-//   rmssd  = RMSSD of cleaned RR beats in a ±2.5-min window (ms), or null
-// then classify against baselines:
+//   hr     = mean valid HR (bpm)          hrSd = within-epoch SD of HR (bpm)
+//   rmssd, sdnn = over a ±2.5-min RR window (ms)
+//   lfhf, Rk    = over a ±90-s RR window
+// then classify against the night's own baselines:
 //   WAKE  : clearly elevated motion OR HR arousal above a LOCAL sleeping HR
 //           median (a 90-min rolling window, not the whole night)
-//   REM   : still body + RMSSD well BELOW the night's sleep RMSSD + HR ≥ a
-//           LOCAL p25 HR floor (see below for why p25, not median)
-//   DEEP  : HR near the night floor + RMSSD high + very stable (NREM subtype)
+//   REM   : weighted score over Rk / sdnn / hrSd / lfhf above a cutoff, GATED
+//           by atonia (no big movement) and HR ≥ a LOCAL p25 floor
+//   DEEP  : weighted score over the same axes in the opposite direction
+//           (NREM subtype, low confidence)
 //   LIGHT : remaining NREM
+//
+// 2026-08 — WHY SCORES, NOT CONJUNCTIONS, AND WHY NOT RMSSD. The rules above
+// replace an earlier design that AND-ed boolean gates and used an RMSSD drop as
+// the PRIMARY REM detector. Measured against 99 PSG-labelled wrist nights
+// (DREAMT) via `tool/stager_harness.dart`, that design scored kappa 0.036 —
+// deep PPV 5.7% against a 4.5% base rate, REM PPV 12.1% against 14.0%, i.e. at
+// or below chance for both minority classes. Per-subject effect sizes explain
+// why: RMSSD does not separate the stages at all (54% of subjects, d -0.02;
+// Herzig 2017 reports the same flatness on PSG+ECG), mean HR in deep sleep runs
+// HIGHER than light on the wrist (62% of subjects, d +0.31 — the old gate was
+// inverted), and the two axes that DO separate (Rk d -0.53/+0.43, sdnn
+// -0.41/+0.32) were respectively throttled to z>4 and not computed at all.
+// AND-ing one good gate with one null and one inverted gate is why deep sleep
+// emerged as isolated 30-second specks that the 3-min bout rule then deleted.
+// A weighted sum degrades gracefully where a conjunction vetoes.
 // Post: Webster continuity rescore (bridges brief arousals into sleep — this is
 // what kills the over-call) + consolidateSleepStages (no single-epoch flicker).
 //
@@ -59,20 +76,65 @@ class CardioStagerResult {
 
 const int _epochSec = 30;
 
-/// Robust-z cutoffs for the SECONDARY REM axes (LF/HF elevation, R(k) burst).
-/// Deliberately STRICT (4.0 robust-SD): the RMSSD drop is the PRIMARY REM
-/// detector; LF/HF and R(k) only ADD REM where a strong, unambiguous autonomic
-/// shift the RMSSD rule missed exists, so the OR-combination recovers
-/// under-called REM without stealing normal light sleep. Calibrated on the real
-/// 2026-07 overnight fixture (Apple-Watch GT: wake 3 / light 330 / deep 38 /
-/// REM 162 min). RMSSD-only under-called REM at 134 min; a threshold sweep
-/// showed z=2.5→204, 3.0→191, 3.5→182, 4.0→172 min REM. 4.0 lands closest to GT
-/// (REM 172, light 304) while still adding +38 min of strong-signature REM over
-/// RMSSD-only — a conservative, bounded sensitivity gain for the nights the
-/// RMSSD rule under-calls (the motivating case: 64 min REM vs a ~115 signature),
-/// erring toward specificity so the axes never re-open a Wake/REM over-call.
-const double _remLfhfZ = 4.0;
-const double _remRkZ = 4.0;
+// The previous rule OR-ed three boolean axes (RMSSD drop as PRIMARY, plus
+// LF/HF and R(k) throttled to z>4.0) and was calibrated against a single
+// Apple-Watch-labelled night. Measurement against 99 PSG-labelled wrist nights
+// showed the primary axis was at chance and the two throttled axes were the
+// informative ones; see the weighted-score block in [classifyCardioEpochs].
+
+// ── Stage-score axis weights ────────────────────────────────────────────────
+// These are MEASURED Cohen's d values (DREAMT, 99 PSG-labelled wrist nights,
+// per-subject within-night z-scored), not tuned parameters. Under equal
+// variance an LD's optimal weights are proportional to d, so the effect size
+// IS the weight. Only the two decision cutoffs below are calibrated, on a
+// locked development split.
+const double _wRemRk = 0.43;
+const double _wRemSdnn = 0.32;
+const double _wRemHrSd = 0.27;
+const double _wRemLfhf = 0.12;
+
+const double _wDeepRk = 0.53;
+const double _wDeepHrSd = 0.43;
+const double _wDeepSdnn = 0.41;
+const double _wDeepLfhf = 0.33;
+
+/// Decision cutoffs on the weighted robust-z stage scores.
+///
+/// The WEIGHTS above come from DREAMT (PSG ground truth) because that is what
+/// an external corpus can tell us: which axes carry stage information, and in
+/// which direction. The CUTOFFS cannot come from there. They sit on a score
+/// whose spread depends on OUR feature extraction, and the DREAMT-optimal
+/// values do not transfer: at remCut 0.8 DREAMT yields a normative ~23% REM
+/// while real WHOOP captures yield 10.3%, and the same night the Apple-Watch
+/// reference put at ~162 min REM came out at 62 min. Calibrating cutoffs on a
+/// different sensor's feature distribution is exactly the train/serve mismatch
+/// this file's header criticises Walch for.
+///
+/// So the cutoffs are swept on REAL DEVICE CAPTURES
+/// (`tool/whoop_proportions.dart`, 11 nights) and chosen to land the stage
+/// proportions in the normative population range — REM 20-25% of TST, Deep
+/// 13-23% of TST (Mitterling 2015 percentile curves; Boulos 2019
+/// meta-regression, N=5,273, AASM scoring):
+///
+///   remCut   median %REM of TST        deepCut   median %Deep of TST
+///     0.4          25.7%                  0.2           19.5%
+///     0.5         ~21%    <- chosen       0.3           16.8%  <- chosen
+///     0.6          16.4%                  0.4           12.5%
+///     0.8          10.3%  (DREAMT opt)
+///
+/// NOT calibrated to maximise kappa, on purpose. On DREAMT, kappa rises
+/// monotonically as deep is suppressed (deepCut 0.3 -> 16.2% deep, kappa 0.121;
+/// deepCut 1.0 -> 0.2% deep, kappa 0.158). That is arithmetic on a sleep-clinic
+/// cohort where deep is only 4.5% of asleep epochs, not physiology, and
+/// shipping the kappa optimum would recreate the "user sees ~0 deep sleep"
+/// defect this change exists to fix.
+///
+/// HONESTY: proportion-matching is distributional plausibility, NOT accuracy.
+/// It says the hypnogram has a believable shape, not that any given epoch is
+/// right. Only concurrent PSG on this device can settle that, and we do not
+/// have it.
+const double _remScoreCut = 0.5;
+const double _deepScoreCut = 0.3;
 
 /// Physiologic RR gate (project rule): keep 300–2000 ms; drop successive jumps
 /// > 200 ms (ectopy / artifact). Used per-window before RMSSD.
@@ -257,6 +319,8 @@ CardioStagerResult cardioStager(
   List<double> rrTsMs = const [],
   int epochSec = _epochSec,
   SleepUserProfile? userProfile,
+  double remScoreCut = _remScoreCut,
+  double deepScoreCut = _deepScoreCut,
 }) {
   // Explicit arg wins (unit tests); else the ambient profile the edge set for
   // this staging pass; else null ⇒ pure per-night-local (cold-start behavior).
@@ -303,6 +367,7 @@ CardioStagerResult cardioStager(
   final hr = List<double>.filled(nEpoch, double.nan);
   final hrSd = List<double>.filled(nEpoch, 0);
   final rmssd = List<double>.filled(nEpoch, double.nan);
+  final sdnn = List<double>.filled(nEpoch, double.nan);
   // REM autonomic features (P1): LF/HF from the RR spectrum + R(k) = rolling
   // mean |ΔIHR|. REM's signature at 1 Hz beat-timing is a SYMPATHETIC shift —
   // LF/HF rises, RR variability drops (low RMSSD), and instantaneous HR gets
@@ -328,11 +393,102 @@ CardioStagerResult cardioStager(
     if (hv.length >= 2) hrSd[e] = stddev(hv) ?? 0;
     // rmssd over RR beats within a ±2.5-min window centred on the epoch
     rmssd[e] = _windowRmssd(rrMs, rrTsMs, accel, s, t, epochSec);
+    sdnn[e] = _windowSdnn(rrMs, rrTsMs, accel, s, t, epochSec);
     // LF/HF + R(k) over a ±90-s RR window centred on the epoch.
     final rem = _windowRemFeatures(rrMs, rrTsMs, accel, s, t, epochSec);
     if (rem.lfhf != null) lfhf[e] = rem.lfhf!;
     if (rem.rk != null) rk[e] = rem.rk!;
   }
+
+  return classifyCardioEpochs(
+    CardioEpochFeatures(
+      motion: motion,
+      hr: hr,
+      hrSd: hrSd,
+      rmssd: rmssd,
+      lfhf: lfhf,
+      rk: rk,
+      sdnn: sdnn,
+    ),
+    epochSec: epochSec,
+    userProfile: profile,
+    remScoreCut: remScoreCut,
+    deepScoreCut: deepScoreCut,
+  );
+}
+
+/// Per-epoch feature vectors — the ONLY thing the staging DECISION layer sees.
+///
+/// Splitting these out from [cardioStager] draws the line between "turn 1 Hz
+/// sensor streams into per-epoch numbers" (device-specific, hard to validate)
+/// and "turn per-epoch numbers into stages" (the rules, which are what actually
+/// encode our physiological assumptions). Only the second half can be scored
+/// against an external PSG-labelled corpus whose raw signals we do not have, so
+/// it needs to be callable on its own. All lists must be the same length; NaN
+/// marks "not measurable for this epoch" and is never treated as a value.
+class CardioEpochFeatures {
+  /// Mean positive ENMO over the epoch against a LOCAL 1 g reference (g).
+  final List<double> motion;
+
+  /// Mean valid HR over the epoch (bpm); NaN when the epoch had no valid HR.
+  final List<double> hr;
+
+  /// Within-epoch SD of HR (bpm); 0 when fewer than 2 valid samples.
+  final List<double> hrSd;
+
+  /// RMSSD over a ±2.5-min window centred on the epoch (ms); NaN when sparse.
+  final List<double> rmssd;
+
+  /// LF/HF band-power ratio over a ±90 s RR window; NaN when sparse.
+  final List<double> lfhf;
+
+  /// R(k) = mean |ΔIHR| over a ±90 s RR window (bpm); NaN when sparse.
+  final List<double> rk;
+
+  /// SDNN over the same ±2.5-min window as [rmssd] (ms); NaN when sparse.
+  /// Unlike RMSSD, SDNN DOES separate the stages — see the effect sizes in
+  /// [classifyCardioEpochs].
+  final List<double> sdnn;
+
+  const CardioEpochFeatures({
+    required this.motion,
+    required this.hr,
+    required this.hrSd,
+    required this.rmssd,
+    required this.lfhf,
+    required this.rk,
+    required this.sdnn,
+  });
+
+  int get length => motion.length;
+}
+
+/// The staging DECISION layer: per-epoch features → stages + deep flags.
+///
+/// Extracted from [cardioStager] verbatim (no behavioural change) so the rules
+/// can be scored directly against an external labelled corpus. See
+/// [CardioEpochFeatures] for why the seam is here.
+///
+/// [remScoreCut] / [deepScoreCut] default to the shipped constants and exist so
+/// a calibration harness can sweep them on a DEVELOPMENT split and report the
+/// held-out result. Production callers should not pass them.
+CardioStagerResult classifyCardioEpochs(
+  CardioEpochFeatures f, {
+  int epochSec = _epochSec,
+  SleepUserProfile? userProfile,
+  double remScoreCut = _remScoreCut,
+  double deepScoreCut = _deepScoreCut,
+}) {
+  final profile = userProfile ?? cardioUserProfile;
+  final nEpoch = f.length;
+  if (nEpoch < 3) return _abstain(epochSec);
+  final motion = f.motion;
+  final hr = f.hr;
+  final hrSd = f.hrSd;
+  final rmssd = f.rmssd;
+  final lfhf = f.lfhf;
+  final rk = f.rk;
+  final sdnn = f.sdnn;
 
   // ── night baselines (from the LOW-MOTION epochs — the actual sleep) ────────
   // motMed/motMad stay WHOLE-NIGHT scalars: `motion` is now computed against a
@@ -375,7 +531,6 @@ CardioStagerResult cardioStager(
   final hrAll = <double>[for (final h in hr) if (!h.isNaN) h];
   if (hrAll.isEmpty) return _abstain(epochSec);
   final hrMedGlobal = median(sleepHr) ?? mean(hrAll)!;
-  final hrFloor = percentile(sleepHr, 10) ?? hrMedGlobal;
 
   // ── LOCAL rolling HR baseline for the WAKE/REM autonomic gates ─────────────
   // A whole-night HR median/arousal threshold has the same non-stationarity
@@ -444,20 +599,16 @@ CardioStagerResult cardioStager(
   // These three samples are fixed for the rest of the stage, so take their
   // median+MAD once instead of re-deriving them per epoch inside the classify
   // loop below. Same values, ~2,880 fewer sorts on a full night.
-  final rmssdScale = RobustScale.of(sleepRmssd);
   final lfhfScale = RobustScale.of(sleepLfhf);
   final rkScale = RobustScale.of(sleepRk);
-  final hrSdSample = [for (final s in hrSd) if (s > 0) s];
-  final hrSdMed = median(hrSdSample) ?? double.infinity;
-  // RMSSD reference for the deep "not-elevated-HRV" gate, blended toward profile.
-  final rmssdRef = rmssdMed == null
-      ? profile?.rmssdMed
-      : blendP(rmssdMed, profile?.rmssdMed);
-  // Deep = HR in the lower half of the night's sleeping HR (the cardiac trough),
-  // with the floor/median blended toward the personal profile (P2).
-  final deepFloor = blendP(hrFloor, profile?.hrFloorP5);
-  final deepMed = blendP(hrMedGlobal, profile?.hrSleepMedian);
-  final deepHrCut = deepFloor + 0.5 * (deepMed - deepFloor);
+  // SDNN and within-epoch HR dispersion get the same night-relative treatment
+  // as the other axes, so every term in the stage scores is on one scale.
+  final sleepSdnn = <double>[
+    for (var e = 0; e < nEpoch; e++)
+      if (still(e) && !sdnn[e].isNaN) sdnn[e]
+  ];
+  final sdnnScale = RobustScale.of(sleepSdnn);
+  final hrSdScale = RobustScale.of([for (final v in hrSd) if (v > 0) v]);
 
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
@@ -476,42 +627,87 @@ CardioStagerResult cardioStager(
       stages[e] = SleepStage.wake;
       continue;
     }
-    // Asleep. REM vs NREM via autonomic signature. REM is OR-combined across
-    // three independent RR axes (any one suffices), THEN gated by atonia (no
-    // large movement) AND an HR floor (HR ≥ the local p25 — REM is not the
-    // quiescent cardiac trough). This recovers REM the RMSSD-only rule missed.
-    final rmZ = (rmssdMed != null && !rmssd[e].isNaN && sleepRmssd.length >= 4)
-        ? rmssdScale?.z(rmssd[e])
-        : null;
-    final rmssdDown = rmZ != null && rmZ < -0.4; // RMSSD notably below sleep base
-    // LF/HF elevated (sympathetic shift) vs the night's sleeping LF/HF.
-    final lfhfZ = (sleepLfhf.length >= 4 && !lfhf[e].isNaN)
-        ? lfhfScale?.z(lfhf[e])
-        : null;
-    final lfhfHigh = lfhfZ != null && lfhfZ > _remLfhfZ;
-    // R(k) burst: instantaneous-HR variability elevated vs sleeping R(k).
-    final rkZ = (sleepRk.length >= 4 && !rk[e].isNaN)
-        ? rkScale?.z(rk[e])
-        : null;
-    final rkBurst = rkZ != null && rkZ > _remRkZ;
-    final remAutonomic = rmssdDown || lfhfHigh || rkBurst;
-    final atonia = !bigMove(e); // muscle-atonia proxy — no large movement
-    final hrTowardWake =
-        !hr[e].isNaN && hr[e] >= hrP25Local[e]; // HR up but not arousal
-    if (remAutonomic && atonia && hrTowardWake) {
+    // Asleep. REM vs NREM, and deep-within-NREM, are now scored as WEIGHTED
+    // SUMS of robust-z axes rather than boolean conjunctions.
+    //
+    // WHY THE CHANGE. The old rules were an AND of three booleans each, and
+    // measurement on 99 PSG-labelled wrist nights (DREAMT) showed two of the
+    // three deep gates carry no usable signal — one of them points the wrong
+    // way — while the REM primary is at chance. Per-subject agreement and
+    // Cohen's d, Deep-vs-Light and REM-vs-Light:
+    //
+    //   axis      Deep vs Light            REM vs Light        used before?
+    //   Rk        91% subj, d -0.53        89% subj, d +0.43   throttled to z>4
+    //   hrSd      97% subj, d -0.43                 d +0.27    deep only
+    //   sdnn      74% subj, d -0.41                 d +0.32    NOT COMPUTED
+    //   lfhf      91% subj, d -0.33        72% subj, d +0.12   throttled to z>4
+    //   hr        62% subj, d +0.31 (!)              d +0.18   deep gate, BACKWARDS
+    //   rmssd            d -0.13           54% subj, d -0.02   REM PRIMARY (chance)
+    //
+    // Scored as conjunctions those numbers are fatal: the shipped deep rule
+    // ANDs one good axis, one null axis and one inverted axis, so the three can
+    // only co-fire by coincidence — which is exactly why deep sleep came out as
+    // isolated 30-second specks that the 3-min minimum-bout rule then deleted.
+    // A weighted sum degrades gracefully instead: a missing or equivocal axis
+    // costs its weight rather than vetoing the whole decision.
+    //
+    // WEIGHTS ARE THE MEASURED EFFECT SIZES, not tuned. Under equal variance a
+    // linear discriminant's optimal weights are proportional to d, so using |d|
+    // directly is the principled choice AND leaves nothing fitted to the corpus
+    // beyond its sign. This also matches how the published cardiorespiratory
+    // stagers combine features (Long 2016, Fonseca 2015/2018 all use linear
+    // discriminants; Fonseca 2018 measured a generative HMM at kappa 0.26 vs
+    // 0.39 for a plain per-epoch LD on identical features, so the sophistication
+    // does not belong in the decoder).
+    //
+    // rmssd and mean HR are deliberately ABSENT from both scores. Neither
+    // earns a weight, and hr's deep contribution was actively harmful.
+    final rkZ = (sleepRk.length >= 4 && !rk[e].isNaN) ? rkScale?.z(rk[e]) : null;
+    final sdnnZ =
+        (sleepSdnn.length >= 4 && !sdnn[e].isNaN) ? sdnnScale?.z(sdnn[e]) : null;
+    final lfhfZ =
+        (sleepLfhf.length >= 4 && !lfhf[e].isNaN) ? lfhfScale?.z(lfhf[e]) : null;
+    final hrSdZ = hrSdScale?.z(hrSd[e]);
+
+    // Weighted mean over the axes that are actually MEASURABLE this epoch, so
+    // a night with no usable RR falls back to the hrSd axis alone instead of
+    // silently scoring every epoch as if the missing axes voted "no".
+    double? score(List<(double?, double)> terms) {
+      var num = 0.0, den = 0.0;
+      for (final (z, w) in terms) {
+        if (z == null || z.isNaN) continue;
+        num += z * w;
+        den += w.abs();
+      }
+      return den == 0 ? null : num / den;
+    }
+
+    final remScore = score([
+      (rkZ, _wRemRk),
+      (sdnnZ, _wRemSdnn),
+      (hrSdZ, _wRemHrSd),
+      (lfhfZ, _wRemLfhf),
+    ]);
+    final deepScore = score([
+      (rkZ, -_wDeepRk),
+      (hrSdZ, -_wDeepHrSd),
+      (sdnnZ, -_wDeepSdnn),
+      (lfhfZ, -_wDeepLfhf),
+    ]);
+
+    // Atonia and the HR floor are RETAINED as gates, not folded into the score:
+    // they are not weak evidence for REM, they are preconditions. A large
+    // movement rules REM out outright (muscle atonia), and REM is not the
+    // quiescent cardiac trough, so HR below the local p25 rules it out too.
+    final atonia = !bigMove(e);
+    final hrTowardWake = !hr[e].isNaN && hr[e] >= hrP25Local[e];
+    if (remScore != null && remScore > remScoreCut && atonia && hrTowardWake) {
       stages[e] = SleepStage.rem;
     } else {
       stages[e] = SleepStage.nrem;
-      // Deep (NREM subtype, LOW CONFIDENCE): the cardiac trough — HR in the
-      // lower half of the night's sleeping HR AND not HR-variable (deep sleep is
-      // autonomically quiet). RMSSD, when present, reinforces (high RMSSD) but
-      // isn't required (RR is sparse). Below NREM median, not the lowest third,
-      // so deep lands in a physiologic range instead of ~0.
-      final lowHr = !hr[e].isNaN && hr[e] <= deepHrCut;
-      final notHighRmssd =
-          rmssdRef == null || rmssd[e].isNaN || rmssd[e] >= rmssdRef * 0.9;
-      final stable = hrSd[e] <= hrSdMed * 1.5;
-      deepFlag[e] = lowHr && notHighRmssd && stable;
+      // Deep (NREM subtype, still LOW CONFIDENCE — this is a cardiac-quiescence
+      // overlay, not an EEG slow-wave measurement).
+      deepFlag[e] = deepScore != null && deepScore > deepScoreCut;
     }
   }
 
@@ -635,6 +831,59 @@ double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
     ss += d * d;
   }
   return math.sqrt(ss / (beats.length - 1));
+}
+
+/// SDNN (ms) of cleaned RR beats over the SAME ±2.5-min window as
+/// [_windowRmssd]. Returns NaN when too few clean beats.
+///
+/// Worth its own feature because SDNN and RMSSD behave completely differently
+/// across sleep stages, despite both being "HRV". Measured per-subject on 99
+/// PSG-labelled wrist nights (DREAMT): SDNN separates Deep from Light in 74% of
+/// subjects (Cohen's d −0.41) and REM from Light at d +0.32, while RMSSD is at
+/// chance for both (54% of subjects, d −0.02). Herzig 2017 (PSG+ECG) reports
+/// the same split — SDNN 53.8 / 68.5 / 105.5 ms for N3 / N2 / REM against a
+/// flat RMSSD of 67.3 / 70.7 / 79.7.
+double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
+    List<AccelSample> accel, int s, int t, int epochSec) {
+  final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t);
+  if (beats.length < 5) return double.nan;
+  final m = mean(beats)!;
+  var ss = 0.0;
+  for (final v in beats) {
+    ss += (v - m) * (v - m);
+  }
+  return math.sqrt(ss / (beats.length - 1));
+}
+
+/// Clean RR beats (ms) inside the ±2.5-min window centred on epoch [s,t).
+/// Shared by [_windowRmssd] and [_windowSdnn] so both see exactly the same
+/// beats — a divergence there would make their z-scores incomparable.
+List<double> _cleanBeatsInWindow(List<double> rrMs, List<double> rrTsMs,
+    List<AccelSample> accel, int s, int t) {
+  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return const <double>[];
+  final mid = (s + t) ~/ 2;
+  if (mid >= accel.length) return const <double>[];
+  final centreMs = accel[mid].tsMs;
+  const halfWinMs = 150 * 1000;
+  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
+  final beats = <double>[];
+  double? prev;
+  for (var i = 0; i < rrMs.length; i++) {
+    final ts = rrTsMs[i];
+    if (ts < lo || ts > hi) continue;
+    final v = rrMs[i];
+    if (v < _rrMin || v > _rrMax) {
+      prev = null;
+      continue;
+    }
+    if (prev != null && (v - prev).abs() > _rrMaxStep) {
+      prev = v;
+      continue;
+    }
+    beats.add(v);
+    prev = v;
+  }
+  return beats;
 }
 
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
