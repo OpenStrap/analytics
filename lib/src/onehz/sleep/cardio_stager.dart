@@ -117,17 +117,29 @@ const double _wDeepLfhf = 0.33;
 /// meta-regression, N=5,273, AASM scoring):
 ///
 ///   remCut   median %REM of TST        deepCut   median %Deep of TST
-///     0.4          25.7%                  0.2           19.5%
-///     0.5         ~21%    <- chosen       0.3           16.8%  <- chosen
-///     0.6          16.4%                  0.4           12.5%
-///     0.8          10.3%  (DREAMT opt)
+///     0.4          28.5%                  0.2           17.6%
+///     0.5          23.6%  <- chosen       0.3           14.9%  <- chosen
+///     0.6          18.6%                  0.4           11.9%
+///     0.8          ~10%   (DREAMT opt)
 ///
-/// NOT calibrated to maximise kappa, on purpose. On DREAMT, kappa rises
-/// monotonically as deep is suppressed (deepCut 0.3 -> 16.2% deep, kappa 0.121;
-/// deepCut 1.0 -> 0.2% deep, kappa 0.158). That is arithmetic on a sleep-clinic
-/// cohort where deep is only 4.5% of asleep epochs, not physiology, and
-/// shipping the kappa optimum would recreate the "user sees ~0 deep sleep"
-/// defect this change exists to fix.
+/// NOT calibrated to maximise kappa, on purpose. On the DREAMT dev split kappa
+/// rises monotonically as deep is suppressed:
+///
+///   deepCut   %Deep called   Deep sens   Deep PPV   kappa
+///     0.3         14.9%        50.8%      15.0%     0.125
+///     0.6          4.8%        22.2%      20.4%     0.148
+///     1.0          0.3%         2.3%      31.0%     0.151   <- kappa optimum
+///
+/// That is arithmetic on a sleep-clinic cohort where deep is only 4.5% of
+/// asleep epochs, not physiology, and shipping the kappa optimum would recreate
+/// the "user sees ~0 deep sleep" defect this change exists to fix.
+///
+/// Held-out result at the shipped cutoffs (49 unseen subjects): kappa 0.132,
+/// Deep 56.0% sens / 10.9% PPV, REM 51.9% / 21.5%, against base rates of 4.5%
+/// Deep and 14% REM — so both minority classes are called well above chance
+/// where the previous rules sat at or below it. Still far short of the
+/// 0.60-0.66 literature ceiling; the bulk of what remains is the WAKE rule
+/// (11% sensitivity), untouched by this change.
 ///
 /// HONESTY: proportion-matching is distributional plausibility, NOT accuracy.
 /// It says the hypnogram has a believable shape, not that any given epoch is
@@ -135,6 +147,11 @@ const double _wDeepLfhf = 0.33;
 /// have it.
 const double _remScoreCut = 0.5;
 const double _deepScoreCut = 0.3;
+
+/// The shipped cutoffs, exposed so calibration tooling reports what actually
+/// ships instead of re-declaring its own defaults and silently drifting.
+const double kDefaultRemScoreCut = _remScoreCut;
+const double kDefaultDeepScoreCut = _deepScoreCut;
 
 /// Physiologic RR gate (project rule): keep 300–2000 ms; drop successive jumps
 /// > 200 ms (ectopy / artifact). Used per-window before RMSSD.
@@ -460,7 +477,18 @@ class CardioEpochFeatures {
     required this.sdnn,
   });
 
-  int get length => motion.length;
+  /// Epoch count. All lists are required to be this long; the getter returns
+  /// the SHORTEST so a caller that violates the contract truncates instead of
+  /// indexing out of range. [classifyCardioEpochs] asserts the equality.
+  int get length => [
+        motion.length,
+        hr.length,
+        hrSd.length,
+        rmssd.length,
+        lfhf.length,
+        rk.length,
+        sdnn.length,
+      ].reduce(math.min);
 }
 
 /// The staging DECISION layer: per-epoch features → stages + deep flags.
@@ -480,6 +508,22 @@ CardioStagerResult classifyCardioEpochs(
   double deepScoreCut = _deepScoreCut,
 }) {
   final profile = userProfile ?? cardioUserProfile;
+  // [CardioEpochFeatures] documents that every list is the same length, and the
+  // in-tree caller guarantees it — but the type is public and the validation
+  // harness builds one from parsed external fixture data. A short secondary
+  // list would otherwise RangeError deep inside the classify loop, so assert in
+  // dev and, in release, fall back to the shortest list rather than throwing
+  // (the project's existing idiom: `cardioStager` already clamps to
+  // `min(hr1hz.length, accel.length)`).
+  assert(
+    f.hr.length == f.motion.length &&
+        f.hrSd.length == f.motion.length &&
+        f.rmssd.length == f.motion.length &&
+        f.lfhf.length == f.motion.length &&
+        f.rk.length == f.motion.length &&
+        f.sdnn.length == f.motion.length,
+    'CardioEpochFeatures lists must all be the same length',
+  );
   final nEpoch = f.length;
   if (nEpoch < 3) return _abstain(epochSec);
   final motion = f.motion;
@@ -608,7 +652,22 @@ CardioStagerResult classifyCardioEpochs(
       if (still(e) && !sdnn[e].isNaN) sdnn[e]
   ];
   final sdnnScale = RobustScale.of(sleepSdnn);
-  final hrSdScale = RobustScale.of([for (final v in hrSd) if (v > 0) v]);
+  // hrSd gets the SAME still(e) gating as the other three axes. Pooling wake
+  // epochs into this baseline raises its median and widens its MAD, which
+  // biases every hrSdZ low — and hrSd carries the second-largest deep weight
+  // (0.43), so that alone shifts stage proportions and invalidates the cutoffs.
+  //
+  // The `> 0` filter is not cosmetic: hrSd is 0-initialised and only assigned
+  // when an epoch had >= 2 valid HR samples, so 0 is the "no HR here" sentinel,
+  // NOT a real measurement of zero dispersion. Scoring it would make a
+  // data-gap epoch read as maximally quiet, i.e. as evidence FOR deep sleep.
+  // Measured on real captures: one night with intermittent wear had 226 of
+  // 1120 epochs (20%) with no HR, every one of which scored toward deep.
+  final sleepHrSd = <double>[
+    for (var e = 0; e < nEpoch; e++)
+      if (still(e) && hrSd[e] > 0) hrSd[e]
+  ];
+  final hrSdScale = RobustScale.of(sleepHrSd);
 
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
@@ -667,7 +726,12 @@ CardioStagerResult classifyCardioEpochs(
         (sleepSdnn.length >= 4 && !sdnn[e].isNaN) ? sdnnScale?.z(sdnn[e]) : null;
     final lfhfZ =
         (sleepLfhf.length >= 4 && !lfhf[e].isNaN) ? lfhfScale?.z(lfhf[e]) : null;
-    final hrSdZ = hrSdScale?.z(hrSd[e]);
+    // Same >=4-sample floor and unmeasurable-epoch rejection as the axes above.
+    // hrSd[e] == 0 means "fewer than 2 valid HR samples", never "perfectly
+    // steady" — see the sleepHrSd comment. An absent input must contribute
+    // nothing, not a favourable z.
+    final hrSdZ =
+        (sleepHrSd.length >= 4 && hrSd[e] > 0) ? hrSdScale?.z(hrSd[e]) : null;
 
     // Weighted mean over the axes that are actually MEASURABLE this epoch, so
     // a night with no usable RR falls back to the hrSd axis alone instead of

@@ -28,21 +28,53 @@ void main(List<String> args) {
   final files = dir
       .listSync()
       .whereType<File>()
-      .where((f) => f.path.contains('2026-') && f.path.endsWith('.json'))
+      .where((f) => f.path.endsWith('.json'))
       .toList()
     ..sort((a, b) => a.path.compareTo(b.path));
 
   final nights = <(String, List<double>, List<AccelSample>, List<double>,
-      List<double>)>[];
+      List<double>, List<bool>)>[];
+  var skipped = 0;
   for (final f in files) {
-    final j = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+    // Recognise a night record by SHAPE, not by a hard-coded year in the
+    // filename. The directory also holds unrelated json (cursors, profiles),
+    // and a stale year filter would quietly stop matching in January.
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(f.readAsStringSync());
+    } catch (_) {
+      skipped++;
+      continue;
+    }
+    if (decoded is! Map<String, dynamic> ||
+        decoded['onehz'] is! List ||
+        decoded['rr'] is! List ||
+        decoded['start'] is! int ||
+        decoded['end'] is! int ||
+        decoded['day'] is! String) {
+      skipped++;
+      continue;
+    }
+    final j = decoded;
     final oh = j['onehz'] as List;
-    if (oh.length < 3600) continue;
+    if (oh.length < 3600) {
+      skipped++;
+      continue;
+    }
     final start = j['start'] as int, end = j['end'] as int;
     final span = end - start;
-    final accel =
-        List<AccelSample>.filled(span, AccelSample(start * 1000.0, 0, 0, 1));
+    // Mirror `_stageSessionCardio`: every slot carries ITS OWN timestamp (the
+    // RR windows are centred on accel[mid].tsMs, so a stale timestamp
+    // mis-centres them), accel is carried forward only within a bounded gap,
+    // and anything beyond that is UNUSABLE rather than a fabricated (0,0,1)
+    // "perfectly still" sample. One real night here has 20% of its epochs
+    // without HR, so getting this wrong silently invents stillness.
+    const maxCarrySec = 120;
+    final accel = List<AccelSample>.generate(
+        span, (i) => AccelSample((start + i) * 1000.0, 0, 0, 1),
+        growable: false);
     final hr = List<double>.filled(span, 0);
+    final usable = List<bool>.filled(span, false);
     var last = -1;
     final byTs = <int, List<double>>{};
     for (final r in oh) {
@@ -60,9 +92,11 @@ void main(List<String> args) {
         accel[i] = AccelSample(ts * 1000.0, g[1], g[2], g[3]);
         hr[i] = g[0];
         last = i;
-      } else if (last >= 0 && i - last <= 120) {
+        usable[i] = true;
+      } else if (last >= 0 && i - last <= maxCarrySec) {
         final p = accel[i - 1];
         accel[i] = AccelSample(ts * 1000.0, p.x, p.y, p.z);
+        usable[i] = true;
       }
     }
     final rrMs = <double>[], rrTs = <double>[];
@@ -70,10 +104,16 @@ void main(List<String> args) {
       rrTs.add((r[0] as num).toDouble());
       rrMs.add((r[1] as num).toDouble());
     }
-    nights.add((j['day'] as String, hr, accel, rrMs, rrTs));
+    nights.add((j['day'] as String, hr, accel, rrMs, rrTs, usable));
   }
 
-  stdout.writeln('${nights.length} real device nights');
+  stdout.writeln('${nights.length} real device nights'
+      '${skipped > 0 ? '  ($skipped file(s) skipped: not a night record)' : ''}');
+  if (nights.isEmpty) {
+    stderr.writeln('no night records found in ${dir.path}');
+    exitCode = 1;
+    return;
+  }
   stdout.writeln('target: REM 20-25% of TST, Deep 13-23% of TST');
   stdout.writeln('');
   stdout.writeln('remCut deepCut |  median %REM of TST   median %Deep of TST '
@@ -81,23 +121,41 @@ void main(List<String> args) {
   for (final rc in [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8]) {
     for (final dc in [0.0, 0.2, 0.3, 0.4]) {
       final rems = <double>[], deeps = <double>[], tsts = <double>[];
-      for (final (_, hr, accel, rrMs, rrTs) in nights) {
-        final r = cardioStager(hr, accel,
-            rrMs: rrMs,
-            rrTsMs: rrTs,
-            remScoreCut: rc,
-            deepScoreCut: dc);
+      for (final (_, hr, accel, rrMs, rrTs, usable) in nights) {
+        // Stage each USABLE run separately, exactly as the production path
+        // does, and aggregate — feeding a gap straight through would let
+        // carried-forward stillness masquerade as sleep.
         var rem = 0, nrem = 0, deep = 0;
-        for (var e = 0; e < r.base.stages.length; e++) {
-          switch (r.base.stages[e]) {
-            case SleepStage.rem:
-              rem++;
-            case SleepStage.nrem:
-              nrem++;
-              if (e < r.deepFlag.length && r.deepFlag[e]) deep++;
-            case SleepStage.wake:
-              break;
+        var i = 0;
+        while (i < usable.length) {
+          if (!usable[i]) {
+            i++;
+            continue;
           }
+          var jx = i;
+          while (jx < usable.length && usable[jx]) {
+            jx++;
+          }
+          if (jx - i >= 90) {
+            final r = cardioStager(
+                hr.sublist(i, jx), accel.sublist(i, jx),
+                rrMs: rrMs,
+                rrTsMs: rrTs,
+                remScoreCut: rc,
+                deepScoreCut: dc);
+            for (var e = 0; e < r.base.stages.length; e++) {
+              switch (r.base.stages[e]) {
+                case SleepStage.rem:
+                  rem++;
+                case SleepStage.nrem:
+                  nrem++;
+                  if (e < r.deepFlag.length && r.deepFlag[e]) deep++;
+                case SleepStage.wake:
+                  break;
+              }
+            }
+          }
+          i = jx;
         }
         final tst = rem + nrem;
         if (tst == 0) continue;
