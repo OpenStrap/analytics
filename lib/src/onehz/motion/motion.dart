@@ -22,13 +22,14 @@
 /// 1.4–2.5 Hz), so:
 ///   * [livePedometer] counts REAL steps on the ~100 Hz foreground accel
 ///     (R10 / 0x2B) — adaptive-threshold peak detection (AN-2554 family).
-///   * [dailyStepEstimate] reports ACTIVE MINUTES from the 1 Hz substrate —
-///     the quantity that IS resolvable there — and derives a step RANGE from
-///     the free-living cadence band. Its threshold is a multi-day personal
-///     reference ([personalDynFloor]); with too little history it ABSTAINS
-///     rather than substituting a constant.
-///   * [calibrateCadence] lets the live path narrow that range to the user's
-///     own measured cadence.
+///   * [dailyActiveMinutes] reports MINUTES OF SUSTAINED WRIST MOVEMENT from
+///     the 1 Hz substrate — the only quantity resolvable there — and emits NO
+///     step count: at the wrist, arm work out-accelerates walking, so movement
+///     minutes are activity volume, not locomotion. Its threshold is a
+///     multi-day personal reference ([personalDynFloor]); with too little
+///     history it ABSTAINS rather than substituting a constant.
+///   * [calibrateCadence] measures the user's real walking cadence from the
+///     100 Hz path. Reportable on its own; never used to synthesise steps.
 /// Still genuinely impossible / not faked: dynamic-orientation limb tracking,
 /// frequency-domain activity TYPE classification (walk vs run vs cycle).
 /// At 1 Hz only an AMPLITUDE index + STATIC orientation are recoverable, and
