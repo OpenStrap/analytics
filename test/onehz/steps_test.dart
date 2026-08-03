@@ -624,34 +624,48 @@ void main() {
             MotionMinute(i * 60000.0, 60, 0.055, 0.01, 1.0, dyn[i])
         ];
 
-    List<double> day(double sed, double act, int nSed, int nAct) => [
-          ...List<double>.filled(nSed, sed),
-          ...List<double>.filled(nAct, act),
-        ];
-
     test('a FROZEN floor rises with activity; a recomputed one does not', () {
+      // The day must be GRADED, not bimodal. Real activity does not scale a
+      // fixed-size block: it lifts more of a continuous distribution above the
+      // threshold, which is why the real-data proof moved 23 -> 254. A day made
+      // of one constant-amplitude block would keep the frozen count pinned at
+      // the block length for every k and this test would pass on a constant,
+      // proving nothing.
+      List<double> gradedDay(double k) => [
+            for (var i = 0; i < 300; i++) (0.02 + i * 0.0016) * k,
+          ];
+
       const frozen = 0.30;
-      var lastFrozen = -1;
-      final tracked = <int>[];
+      final frozenCounts = <int>[];
+      final trackedCounts = <int>[];
       for (final k in const [1.0, 1.5, 2.0, 3.0]) {
-        final d = day(0.05 * k, 0.4 * k, 200, 60);
-        final f = dailyActiveMinutes(rowsOf(d), personalDynFloorG: frozen)
+        final d = gradedDay(k);
+        frozenCounts.add(dailyActiveMinutes(rowsOf(d), personalDynFloorG: frozen)
             .value!
-            .activeMinutes;
+            .activeMinutes);
         // What a self-referential floor converges to: this day's own p90.
         final sorted = [...d]..sort();
         final p90 = sorted[(sorted.length * 0.9).floor()];
-        final t = dailyActiveMinutes(rowsOf(d), personalDynFloorG: p90)
+        trackedCounts.add(dailyActiveMinutes(rowsOf(d), personalDynFloorG: p90)
             .value!
-            .activeMinutes;
-        expect(f, greaterThanOrEqualTo(lastFrozen),
-            reason: 'a frozen floor must never REPORT LESS as activity rises');
-        lastFrozen = f;
-        tracked.add(t);
+            .activeMinutes);
       }
-      // The tracked floor is flat across a 3x activity change — the bug.
-      expect(tracked.toSet().length, 1,
-          reason: 'a recomputed floor reports the same number at 1x and 3x');
+
+      // A frozen floor must STRICTLY rise — not merely "not fall".
+      for (var i = 1; i < frozenCounts.length; i++) {
+        expect(frozenCounts[i], greaterThan(frozenCounts[i - 1]),
+            reason: 'frozen floor must report MORE as activity rises: '
+                '$frozenCounts');
+      }
+      expect(frozenCounts.last, greaterThan((frozenCounts.first * 1.5).round()),
+          reason: 'a 3x activity increase must move the number substantially, '
+              'not by a rounding margin: $frozenCounts');
+
+      // ...while a recomputed floor is FLAT across the same 3x change. That is
+      // the bug freezing exists to fix.
+      expect(trackedCounts.toSet().length, 1,
+          reason: 'a recomputed floor reports the same number at 1x and 3x: '
+              '$trackedCounts');
     });
 
     test('shouldRefreezeFloor only thaws on real scale changes', () {

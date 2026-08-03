@@ -1,9 +1,11 @@
-// STEPS — hybrid pedometry for a wrist that gives us TWO different streams.
+// MOTION — a real pedometer on one stream, movement volume on the other.
 //
 // The honest constraint (see motion.dart §"what 1 Hz accel CANNOT do"):
 //   * The always-on 24/7 substrate is 1 Hz accel. Human gait is 1.4–2.5 Hz, far
 //     above the 0.5 Hz Nyquist limit of a 1 Hz stream — so you CANNOT count
-//     individual steps from the stored substrate. Full stop.
+//     individual steps from the stored substrate. Full stop. And even at full
+//     rate a WRIST ranks arm work above walking, so amplitude alone cannot
+//     isolate gait from cooking or driving.
 //   * Real per-step detection is only possible on the ~100 Hz foreground accel
 //     (R10 / 0x2B), which exists only while the app is connected and streaming.
 //
@@ -26,34 +28,39 @@
 //     measured over-reporting ~6× on a real day and has been removed. Steps
 //     come only from a gait-capable source (Tier A, or the phone pedometer).
 //
-//     Three things make the minute detector stable, and all three matter:
+//     Two things make the minute detector stable, and both matter:
 //       1. The feature is [MotionMinute.dynAmp] — per-axis high-passed dynamic
-//          amplitude — NOT ENMO. ENMO depends on a scalar gravity reference
-//          whose per-day estimate moves by about the same amount as the signal
-//          being measured, so an absolute cut-point on ENMO is not stable
-//          across days. dynAmp removes gravity as a vector and is invariant to
-//          per-axis offset. (Vähä-Ypyä 2015 argues for calibration-robust
-//          amplitude measures over ENMO for exactly this reason.)
-//       2. The cut-point is a MULTI-DAY PERSONAL REFERENCE ([personalDynFloor],
-//          a quantile of the user's POOLED trailing dynAmp minutes) — neither
-//          an absolute g constant (calibration-fragile) nor a same-day relative
-//          baseline (which collapses on a quiet day and then passes
-//          everything). One floor, computed over enough history to be stable,
-//          applied to every day.
-//       3. Corroboration + duration: HR must be lifted off rest when HR is
-//          available, and a minute only counts inside a run of consecutive
-//          ambulatory minutes.
+//          amplitude — NOT ENMO. On this substrate ENMO is worse than unstable,
+//          it is EMPTY: the band ships a fused gravity vector whose magnitude
+//          sits at ~1.03 g even during the most vigorous minute of a day, so
+//          ENMO reduces to ~(1.03 − gRef), a pure calibration artifact. dynAmp
+//          removes gravity as a VECTOR and measures how fast the wrist
+//          re-orients. (Vähä-Ypyä 2015 argues for calibration-robust amplitude
+//          measures over ENMO for exactly this reason.)
+//       2. The cut-point is a MULTI-DAY PERSONAL REFERENCE
+//          ([personalDynFloorFromDailySummaries]) that is FROZEN after an
+//          enrollment window — neither an absolute g constant
+//          (calibration-fragile) nor anything recomputed daily. A threshold
+//          recomputed from the signal it thresholds cancels the trend it
+//          exists to report: measured, 37 active minutes at 1×, 1.5×, 2× AND
+//          3× activity, versus 23 → 254 with a frozen floor.
+//
+//     There is deliberately NO upper ceiling and NO HR gate. Both existed and
+//     both were measured against real substrate: the ceiling rejected zero
+//     minutes across every day tested, and the HR gate changed the answer by
+//     zero minutes while sitting at ~6% of heart-rate reserve. See the
+//     comments at their former sites in [dailyActiveMinutes] before
+//     reintroducing either.
 //
 //     With no personal reference the estimator ABSTAINS (absent Metric with a
 //     `need_baseline:` note). It never substitutes a constant — substituting a
 //     constant IS the failure mode this design exists to prevent.
 //
-//   CALIBRATION — [StepCalibration] / [calibrateCadence]: Tier A is also Tier
-//     B's teacher. When live walking data exists we measure THIS user's real
-//     cadence, and that measured cadence NARROWS the reported step band. It is
-//     used only where it is real (cadence, from a 100 Hz count); it is never
-//     extrapolated into a per-minute cadence regression, because 1 Hz cannot
-//     resolve cadence at all (gait 1.4–2.5 Hz; 2.0 Hz aliases exactly to DC).
+//   CALIBRATION — [StepCalibration] / [calibrateCadence]: measures THIS user's
+//     real walking cadence from the 100 Hz stream. That number is reportable on
+//     its own. It is deliberately NOT consumed by Tier B: multiplying movement
+//     minutes by a walking cadence produces a number about nothing, because the
+//     minutes are not specifically ambulation.
 //
 // Pure: dart:math only. No I/O, no clock, no randomness.
 
@@ -683,8 +690,9 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   // perfectly well. An honestly accelerometer-only metric is more defensible
   // than one carrying a decorative HR gate.
 
-  // pass 1 — per-minute gate: movement inside the ambulatory band, and (when
-  // HR is available) HR lifted off rest.
+  // pass 1 — per-minute gate: dynAmp above the personal movement floor. That
+  // is the WHOLE gate. There is no upper band and no HR condition; both were
+  // measured dead and removed (see the two comments above).
   final gateOk = List<bool>.filled(idx.length, false);
   for (var k = 0; k < idx.length; k++) {
     gateOk[k] = dyns[k] > floor;
@@ -721,7 +729,10 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   // capped low because this is a movement-volume index from a wrist sensor: it
   // cannot distinguish walking from arm work, which is a limitation of the
   // measurement site, not of the estimator.
-  final conf = clamp(0.30 * clamp(coverage / 0.6, 0.3, 1.0), 0.1, 0.45);
+  // Upper bound is 0.30, which is what the expression can actually reach —
+  // the inner clamp caps at 1.0, so `0.30 * 1.0` is the ceiling. Writing a
+  // larger outer bound would imply a confidence this metric never claims.
+  final conf = clamp(0.30 * clamp(coverage / 0.6, 0.3, 1.0), 0.1, 0.30);
 
   return Metric<DailyMovementEstimate>(
     value: DailyMovementEstimate(
