@@ -63,7 +63,8 @@ class ReadinessBreakdownItem {
   });
   Map<String, dynamic> toJson() => {
         'label': label,
-        'percentile_of_you': round6(percentileOfYou),
+        'percentile_of_you':
+            percentileOfYou.isFinite ? round6(percentileOfYou) : null,
         'weight': round6(weight),
         'weighted_contribution': round6(weightedContribution),
         'past_mdc': pastMdc,

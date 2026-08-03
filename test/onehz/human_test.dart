@@ -306,9 +306,11 @@ void main() {
       final m = glassBoxReadiness(inputs);
       expect(m.present, isTrue);
       expect(m.value!.inputsUsed, 1);
-      // breakdown still lists temp, marked unused.
+      // breakdown still lists temp, marked unused and JSON-safe.
       final temp = m.value!.breakdown.firstWhere((b) => b.label == 'temp');
       expect(temp.used, isFalse);
+      expect(temp.toJson()['percentile_of_you'], isNull);
+      expect(() => jsonEncode(m.toJson((v) => v.toJson())), returnsNormally);
     });
   });
 
