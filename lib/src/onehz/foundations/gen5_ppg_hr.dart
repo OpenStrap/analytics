@@ -6,11 +6,15 @@ library;
 
 import 'dart:math' as math;
 
+/// Minimum concatenated PPG length for resting-HR ACF (~10 s @ 24 Hz).
+/// Four 1 s bursts cannot resolve 40–55 bpm (needs ≥4 beats in-window).
+const int kGen5PpgHrMinSamples = 240;
+
 /// Derive BPM from gen5 v26 PPG (24 Hz int16 samples).
 /// [samples] may be one or more concatenated 24-sample bursts.
 /// Returns null if too short, low variance, or no clear ACF peak in 25–230 bpm.
 int? deriveHrFromGen5PpgWaveform(List<int> samples, {double sampleHz = 24.0}) {
-  if (samples.length < 24 || sampleHz <= 0) return null;
+  if (samples.length < kGen5PpgHrMinSamples || sampleHz <= 0) return null;
 
   final n = samples.length;
   final xs = List<double>.filled(n, 0);
