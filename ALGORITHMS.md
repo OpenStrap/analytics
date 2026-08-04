@@ -73,6 +73,8 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | Function | File | Method | Citation |
 |---|---|---|---|
 | `vanHeesSleepWindow` | `sleep/van_hees.dart` | z-angle sleep/wake window detection | van Hees et al. |
+| `immobilityMask` | `sleep/van_hees.dart` | the shared per-second z-angle immobility primitive (steps 1–3, no window selection) — used by both the nocturnal spine and naps | van Hees et al. |
+| `detectNaps` | `sleep/nap.dart` | **the only nap source.** z-angle immobility bouts on the complement of the main sleep window, corroborated by an HR dip vs the user's *awake daytime* baseline. Reports TST and TIB separately; makes **no stage claim**. Deliberately NOT `AdvancedSleepStager`, whose `minSleepMin=60` + 90-min daytime guard exist to reject naps | van Hees et al. |
 | `segmentSleep` (`SleepSegmentation`) | `sleep/segment.dart` | **single source of truth** for sleep windowing; delegates staging to `cardioStager` |
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
