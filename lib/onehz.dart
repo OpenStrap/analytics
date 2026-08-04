@@ -20,6 +20,7 @@ export 'src/onehz/foundations/ppg_sqi.dart';
 export 'src/onehz/foundations/baseline.dart';
 export 'src/onehz/foundations/ewma_baselines.dart';
 export 'src/onehz/foundations/fusion.dart';
+export 'src/onehz/foundations/gen5_ppg_hr.dart';
 
 // Tier-1 clinical.
 export 'src/onehz/clinical/hrv_time.dart';
