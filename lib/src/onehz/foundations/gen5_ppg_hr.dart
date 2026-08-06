@@ -49,17 +49,43 @@ int? deriveHrFromGen5PpgWaveform(List<int> samples, {double sampleHz = 24.0}) {
     acf[lag] = s / energy;
   }
 
-  // Best local peak with prominence against immediate neighbors.
+  // Best INTERIOR local peak, with prominence against immediate neighbours.
+  //
+  // The search deliberately starts at minLag + 1 and stops at maxLag - 1. A
+  // periodicity claim needs a real turning point — a lag whose ACF is higher
+  // than the lag on EITHER side — and the boundaries of the search range
+  // cannot supply that evidence, because one of their neighbours lies outside
+  // the range and was never computed.
+  //
+  // Treating a boundary as a peak is not a harmless edge case, it is the whole
+  // fabrication mode. With `left = -infinity` at lag == minLag the `c <= left`
+  // rejection can never fire, and the prominence fallback substitutes `c - 1`,
+  // which makes prominence 1.0 — maximal. So ANY smoothly decaying ACF (a
+  // monotonic decay is exactly what you get from baseline wander, a DC drift,
+  // or a motion artifact — signals with no cardiac content whatsoever) was
+  // accepted at lag == minLag and reported as a confident 206 bpm, the top of
+  // the search range. Measured on this implementation before the change:
+  //
+  //   baseline wander (pure sine drift, no heartbeat) -> 206
+  //   linear ramp (pure DC drift)                     -> 206
+  //   single step                                     -> 206
+  //
+  // 206 bpm from a resting wrist is not a plausible reading, and this function
+  // documents that it never fabricates a BPM. Requiring an interior peak makes
+  // all three abstain, which is the honest answer.
   var bestLag = -1;
   var bestScore = double.negativeInfinity;
   const minAcf = 0.15;
-  for (var lag = minLag; lag <= maxLag; lag++) {
+  // Need at least one lag with a computed neighbour on both sides.
+  if (maxLag - minLag < 2) return null;
+  for (var lag = minLag + 1; lag <= maxLag - 1; lag++) {
     final c = acf[lag];
     if (c < minAcf) continue;
-    final left = lag > minLag ? acf[lag - 1] : double.negativeInfinity;
-    final right = lag < maxLag ? acf[lag + 1] : double.negativeInfinity;
+    final left = acf[lag - 1];
+    final right = acf[lag + 1];
+    // Strict on both sides: a genuine turning point, not a shoulder.
     if (c <= left || c <= right) continue;
-    final prominence = c - math.max(left.isFinite ? left : c - 1, right.isFinite ? right : c - 1);
+    final prominence = c - math.max(left, right);
     if (prominence <= 0) continue;
     // Prefer higher ACF; break ties toward the physiologically mid-range lag.
     final score = c + 0.01 * prominence;
