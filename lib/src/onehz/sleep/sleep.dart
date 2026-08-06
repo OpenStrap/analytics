@@ -5,6 +5,10 @@
 //   - van Hees / GGIR angle-based sleep window  (van_hees.dart) — the spine.
 //   - segmentSleep SINGLE-SOURCE entry point      (segment.dart) — THE source:
 //       window + per-second stages + TST/WASO/eff all from one staging.
+//   - Daytime nap detection                       (nap.dart) — the ONLY nap
+//       source. Separate from the nocturnal detector on purpose: that one
+//       rejects naps by design (minSleepMin=60, plus a 90-min daytime guard),
+//       and those gates are load-bearing for night accuracy.
 //   - True Phillips Sleep Regularity Index       (sri.dart)
 //   - Sleep accounting (onset/offset/WASO/TST/eff/cycles) (accounting.dart)
 //   - 3-class autonomic stager (wake/NREM/REM)    (stager.dart) — honesty-bounded
@@ -16,6 +20,7 @@
 // plausibility.
 
 export 'van_hees.dart';
+export 'nap.dart';
 export 'segment.dart';
 export 'hr_fallback.dart';
 export 'advanced_stager.dart';

@@ -99,46 +99,77 @@ double zAngle(double x, double y, double z) {
   return math.atan2(z, denom) * 180 / math.pi;
 }
 
-/// Detect the nocturnal sleep window from a sequence of 1 Hz accel vectors.
+/// Per-second immobility evidence from the 1 Hz gravity vector — steps 1–3 of
+/// the van Hees rule, with no window SELECTION applied.
 ///
-/// [accel] one gravity vector per second (assumed ~1 Hz, contiguous). [tsMs]
-/// optional matching wall-clock times. Parameters follow GGIR defaults.
-Metric<SleepWindow> vanHeesSleepWindow(
+/// Extracted so the nocturnal window ([vanHeesSleepWindow], which takes the
+/// single longest block) and daytime naps (`sleep/nap.dart`, which enumerates
+/// every block) run the SAME immobility primitive rather than two lookalike
+/// copies. Being an ANGLE, this is orientation-invariant: it does not inherit
+/// the ~13% spread in |accel| across static wrist postures that makes a
+/// magnitude-based stillness test false-positive on a resting arm.
+class ImmobilityMask {
+  /// ASSERTED immobile (see [SleepWindow.immobile]).
+  final List<bool> immobile;
+
+  /// Undecidable — forward window truncated by the record end (see
+  /// [SleepWindow.immobileUnknown]).
+  final List<bool> immobileUnknown;
+
+  /// Smoothed per-second z-angle (deg).
+  final List<double> zAngleDeg;
+
+  /// |Δ z-angle| vs the previous second (index 0 is 0 by definition).
+  final List<double> deltaDeg;
+
+  /// The sustained-inactivity window actually used, in seconds.
+  final int sustainedSec;
+
+  /// The angle-change threshold actually used, in degrees.
+  final double thresholdDeg;
+
+  const ImmobilityMask({
+    required this.immobile,
+    required this.immobileUnknown,
+    required this.zAngleDeg,
+    required this.deltaDeg,
+    required this.sustainedSec,
+    required this.thresholdDeg,
+  });
+}
+
+/// Compute [ImmobilityMask] for a 1 Hz accel series. Safe on any length —
+/// a series shorter than the sustained window yields an all-undecidable mask
+/// rather than an assertion of rest.
+ImmobilityMask immobilityMask(
   List<AccelSample> accel, {
   double angleThresholdDeg = 5,
   int sustainedMin = 5,
-  // Bridge brief intra-sleep interruptions (position changes / awakenings) when
-  // joining sustained-inactivity blocks into one sleep period. The published
-  // van Hees/GGIR HDCZA bridges ~30–60 min; a too-small value (was 1 min)
-  // fragments a real night at every reposition and keeps only the longest sliver.
-  // Validated on real 1 Hz data: 1 min → 28-min sliver; 30 min → full ~6.9 h night.
-  int bridgeGapMin = 30,
   int smoothSec = 5,
 }) {
-  const inputs = ['accel_1hz'];
   final n = accel.length;
-  if (n < sustainedMin * 60) {
-    return const Metric<SleepWindow>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'too few accel samples for a sustained-inactivity block',
+  final win = sustainedMin * 60;
+  if (n == 0) {
+    return ImmobilityMask(
+      immobile: const <bool>[],
+      immobileUnknown: const <bool>[],
+      zAngleDeg: const <double>[],
+      deltaDeg: const <double>[],
+      sustainedSec: win,
+      thresholdDeg: angleThresholdDeg,
     );
   }
 
-  // 1–2. z-angle + 5 s rolling-median smoothing.
+  // 1–2. z-angle + rolling-median smoothing.
   final raw = List<double>.generate(
       n, (i) => zAngle(accel[i].x, accel[i].y, accel[i].z));
   final ang = _rollingMedian(raw, smoothSec);
 
   // 3. per-second immobility: |Δ z-angle| < threshold sustained for ≥ window.
-  //    First mark seconds whose change vs the previous second is small, then
-  //    require the change to STAY small across the sustained window (GGIR uses
-  //    a rolling 5-min check of the absolute angle change).
   final dAng = List<double>.filled(n, 0);
   for (var i = 1; i < n; i++) {
     dAng[i] = (ang[i] - ang[i - 1]).abs();
   }
-  final win = sustainedMin * 60;
   final immobile = List<bool>.filled(n, false);
   final immobileUnknown = List<bool>.filled(n, false);
   // A second is "no movement" if the MAX absolute angle change over the `win`
@@ -171,6 +202,55 @@ Metric<SleepWindow> vanHeesSleepWindow(
     immobile[i] = still && fullWindow;
     immobileUnknown[i] = still && !fullWindow;
   }
+
+  return ImmobilityMask(
+    immobile: immobile,
+    immobileUnknown: immobileUnknown,
+    zAngleDeg: ang,
+    deltaDeg: dAng,
+    sustainedSec: win,
+    thresholdDeg: angleThresholdDeg,
+  );
+}
+
+/// Detect the nocturnal sleep window from a sequence of 1 Hz accel vectors.
+///
+/// [accel] one gravity vector per second (assumed ~1 Hz, contiguous). [tsMs]
+/// optional matching wall-clock times. Parameters follow GGIR defaults.
+Metric<SleepWindow> vanHeesSleepWindow(
+  List<AccelSample> accel, {
+  double angleThresholdDeg = 5,
+  int sustainedMin = 5,
+  // Bridge brief intra-sleep interruptions (position changes / awakenings) when
+  // joining sustained-inactivity blocks into one sleep period. The published
+  // van Hees/GGIR HDCZA bridges ~30–60 min; a too-small value (was 1 min)
+  // fragments a real night at every reposition and keeps only the longest sliver.
+  // Validated on real 1 Hz data: 1 min → 28-min sliver; 30 min → full ~6.9 h night.
+  int bridgeGapMin = 30,
+  int smoothSec = 5,
+}) {
+  const inputs = ['accel_1hz'];
+  final n = accel.length;
+  if (n < sustainedMin * 60) {
+    return const Metric<SleepWindow>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'too few accel samples for a sustained-inactivity block',
+    );
+  }
+
+  // 1–3. z-angle, smoothing and the per-second sustained-inactivity rule —
+  //       the shared primitive, also used by daytime nap detection.
+  final mask = immobilityMask(
+    accel,
+    angleThresholdDeg: angleThresholdDeg,
+    sustainedMin: sustainedMin,
+    smoothSec: smoothSec,
+  );
+  final ang = mask.zAngleDeg;
+  final win = mask.sustainedSec;
+  final immobile = mask.immobile;
+  final immobileUnknown = mask.immobileUnknown;
 
   // 4. longest immobile block, bridging brief gaps. Only ASSERTED immobile
   //    seconds extend a block, so a night still running when the record ends is

@@ -73,6 +73,8 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | Function | File | Method | Citation |
 |---|---|---|---|
 | `vanHeesSleepWindow` | `sleep/van_hees.dart` | z-angle sleep/wake window detection | van Hees et al. |
+| `immobilityMask` | `sleep/van_hees.dart` | the shared per-second z-angle immobility primitive (steps 1–3, no window selection) — used by both the nocturnal spine and naps | van Hees et al. |
+| `detectNaps` | `sleep/nap.dart` | **the only nap source.** z-angle immobility bouts on the complement of the main sleep window, corroborated by an HR dip vs the user's *awake daytime* baseline. Reports TST and TIB separately; makes **no stage claim**. Deliberately NOT `AdvancedSleepStager`, whose `minSleepMin=60` + 90-min daytime guard exist to reject naps | van Hees et al. |
 | `segmentSleep` (`SleepSegmentation`) | `sleep/segment.dart` | **single source of truth** for sleep windowing; delegates staging to `cardioStager` |
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
@@ -126,7 +128,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `roughNight` | `human/event_detection.dart` | neutral fallback descriptor when the signature is ambiguous | — |
 | `percentileOfYou` / `personalRecord` | `human/percentile_of_you.dart` | percentile-vs-your-own-history, miss-tolerant personal-record streaks | — |
 | `glassBoxReadiness` | `human/readiness_glassbox.dart` | **deprecated** — kept only for its percentile-of-you breakdown + narrative and edge back-compat; `readinessComposite` is canonical | — |
-| `vo2maxEstimate` / `physiologicalAge` / `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` / `detectNaps` | `human/coaching.dart` | deterministic coaching layer over the metrics above | Uth-Sørensen-style HR-ratio VO2max estimate (still `ESTIMATE`, never a lab claim) |
+| `vo2maxEstimate` / `physiologicalAge` / `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | Uth-Sørensen-style HR-ratio VO2max estimate (still `ESTIMATE`, never a lab claim) |
 | `journalCorrelations` | `human/coaching.dart` | per-tag mean-difference correlation vs. logged outcomes, on-device, personal | — |
 
 ---
