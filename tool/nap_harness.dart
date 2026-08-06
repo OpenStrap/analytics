@@ -13,19 +13,27 @@
 //     are opposite and both real: missing the 20-45 min power nap (the regime
 //     the nocturnal detector structurally rejected), and calling a still wrist
 //     — desk work, a car passenger seat, a band on a table — a nap.
-//   * DURATION error on matched pairs, in minutes of TST. Detecting that a nap
-//     happened is only half the job: the duration is what reaches sleep need.
+//   * DURATION error on matched pairs, in minutes of TIB — the only duration an
+//     interval label can score (see the second caveat below). Detecting that a
+//     nap happened is only half the job: the duration is what reaches sleep
+//     need, though the TST that actually reaches it is not validated here.
 //   * The PER-SUBJECT distribution, not just the pooled figure. Following
 //     Radha 2019 (PMID 31578345) on the stager: the spread is the whole story
 //     for "works for most, awful for a few".
 //
-// CAVEAT, and it is a real one, larger than the stager harness's. There is no
-// PSG nap corpus: polysomnography is a nocturnal protocol, so these labels are
-// human-annotated from the accelerometer/HR trace and self-report, not a
-// physiological gold standard. What this scores is agreement with an
-// ANNOTATOR, on a small, self-collected corpus. Report it that way. It will
-// not support a population precision claim, and it should never be quoted as
-// one.
+// CAVEAT, and it is a real one, larger than the stager harness's. We have no
+// PSG-labelled nap corpus. PSG can stage a daytime nap perfectly well — the
+// MSLT is exactly that — so this is a statement about what THIS evaluation
+// had access to, not a claim that a gold standard cannot exist. These labels
+// are human-annotated from the accelerometer/HR trace and self-report. What
+// this scores is agreement with an ANNOTATOR, on a small, self-collected
+// corpus. Report it that way. It will not support a population precision
+// claim, and it should never be quoted as one.
+//
+// A second limit, from the same source: a label is a [start, end] INTERVAL, so
+// the only duration it can score is TIB. This corpus cannot validate `tstSec`
+// at all — and TST is the field that feeds the sleep-need credit. Scoring TST
+// against an interval label charges each nap its own awake time as error.
 //
 // Usage:
 //   dart run tool/nap_harness.dart <fixture.json> [flags]
@@ -95,6 +103,12 @@ void main(List<String> args) {
   }
 
   var tp = 0, fp = 0, fn = 0, absent = 0;
+  // Labelled naps on days the detector ABSTAINED on. They never reach tp/fp/fn,
+  // so leaving them uncounted made sensitivity and PPV silently conditional on
+  // the days the detector agreed to judge — and a detector that abstains on its
+  // hard days would score better than one that tries. Reported separately, plus
+  // an end-to-end recall that charges abstentions as misses.
+  var absentLabels = 0;
   final durErrMin = <double>[];
   final perSubject = <String, List<int>>{}; // subject -> [tp, fp, fn]
 
@@ -136,6 +150,7 @@ void main(List<String> args) {
       // wrong call — it is a refusal to judge. Counting it as a false negative
       // would reward a detector that guesses over one that abstains honestly.
       absent++;
+      absentLabels += truth.length;
       if (perDay) {
         stdout.writeln('  $subject: ABSTAINED (${truth.length} labelled) '
             '— ${m.note}');
@@ -161,8 +176,14 @@ void main(List<String> args) {
       if (best >= 0 && bestIou >= iouCut) {
         matched.add(best);
         dtp++;
+        // TIB, not TST. A label is a [start, end] INTERVAL, so its length is
+        // the whole episode — time in bed. Scoring it against `tstSec` charged
+        // every matched nap its own awake time as error: a perfectly measured
+        // 2 h episode at 70% efficiency reported a 36-min miss. That is the
+        // exact TST/TIB conflation this detector exists to end, reappearing in
+        // the tool that validates it.
         final truthSec = truth[best][1] - truth[best][0];
-        durErrMin.add((nap.tstSec - truthSec).abs() / 60.0);
+        durErrMin.add((nap.tibSec - truthSec).abs() / 60.0);
       } else {
         dfp++;
       }
@@ -188,16 +209,30 @@ void main(List<String> args) {
   stdout.writeln('');
   stdout.writeln('NAP DETECTOR — ${days.length} day(s), '
       '${perSubject.length} subject(s), IoU ≥ $iouCut');
-  stdout.writeln('  labelled naps : ${tp + fn}');
+  // Recall over EVERY labelled nap, including those on abstained days. The
+  // sensitivity above is conditional on the days the detector judged; this one
+  // is what a user actually experiences, since an abstention shows them no nap.
+  final allLabels = tp + fn + absentLabels;
+  final e2e = allLabels == 0 ? null : tp / allLabels;
+
+  stdout.writeln('  labelled naps : $allLabels '
+      '(${tp + fn} on judged days, $absentLabels on abstained days)');
   stdout.writeln('  detected      : ${tp + fp}');
-  stdout.writeln('  abstained     : $absent day(s)');
+  stdout.writeln('  abstained     : $absent day(s), '
+      '$absentLabels labelled nap(s) not scored below');
   stdout.writeln('  TP=$tp  FP=$fp  FN=$fn');
-  stdout.writeln('  sensitivity   : ${_pct(sens)}   (missed naps)');
-  stdout.writeln('  PPV           : ${_pct(ppv)}   (false naps)');
+  stdout.writeln('  sensitivity   : ${_pct(sens)}   '
+      '(missed naps, JUDGED days only)');
+  stdout.writeln('  PPV           : ${_pct(ppv)}   '
+      '(false naps, JUDGED days only)');
+  stdout.writeln('  end-to-end    : ${_pct(e2e)}   '
+      '(recall over ALL labels; abstentions count as misses)');
   if (durErrMin.isNotEmpty) {
     final med = _median(durErrMin)!;
     final mx = durErrMin.reduce(math.max);
-    stdout.writeln('  |TST error|   : median ${med.toStringAsFixed(1)} min, '
+    // TIB, because a label is an interval. See the matching branch above —
+    // this corpus cannot score TST at all.
+    stdout.writeln('  |TIB error|   : median ${med.toStringAsFixed(1)} min, '
         'worst ${mx.toStringAsFixed(1)} min  (n=${durErrMin.length} matched)');
   }
 
@@ -217,9 +252,11 @@ void main(List<String> args) {
   stdout.writeln('');
   stdout.writeln('  READ THIS AS: agreement with a human annotator on a small '
       'self-collected corpus.');
-  stdout.writeln('  There is no PSG nap gold standard — PSG is a nocturnal '
-      'protocol. Do not quote');
-  stdout.writeln('  these as population accuracy.');
+  stdout.writeln('  We have no PSG-LABELLED nap corpus (PSG can stage naps — '
+      'the MSLT does; we just');
+  stdout.writeln('  do not have one). Do not quote these as population '
+      'accuracy. Labels are intervals,');
+  stdout.writeln('  so TIB is scored and TST is NOT validated here.');
 }
 
 List<List<int>> _spans(Object? raw) => [

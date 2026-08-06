@@ -184,6 +184,34 @@ void main() {
       expect(m.value, isEmpty);
     });
 
+    test('overlapping off-wrist spans count their union, not their sum', () {
+      // Two spans covering the SAME 12 minutes of a 40-min nap. That is 30% of
+      // the bout contradicted, under the 50% rejection bar, so the nap stands.
+      // Summing the spans independently scores it 60% and throws the nap away —
+      // and drives `corroborated` to 0 for any bout that survives. The band's
+      // own toggle events do not overlap today, so this pins the contract for
+      // every other caller rather than a live symptom.
+      final d = _Day()
+        ..active(90)
+        ..still(40)
+        ..active(90);
+      final napStart = 90 * 60;
+      final dupStart = napStart + 5 * 60, dupEnd = dupStart + 12 * 60;
+
+      final m = detectNaps(
+        d.accel,
+        d.hr,
+        wristOff: [
+          [dupStart, dupEnd],
+          [dupStart, dupEnd],
+        ],
+      );
+
+      expect(m.present, isTrue);
+      expect(m.value, hasLength(1),
+          reason: 'the same 12 minutes listed twice is still 12 minutes');
+    });
+
     test('thin HR coverage abstains for that bout rather than guessing', () {
       final d = _Day()
         ..active(90)

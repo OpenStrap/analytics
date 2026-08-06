@@ -266,6 +266,10 @@ Metric<List<NapWindow>> detectNaps(
 
   final naps = <NapWindow>[];
   var deferred = 0, unverifiable = 0, offWrist = 0, awakeStill = 0;
+  // Every rejection path increments one of these and reports it in `skipped`.
+  // A silent `continue` turns "your 7-hour still block is too long to be a nap"
+  // into a bare "no qualifying nap", which tells the caller nothing about why.
+  var outOfRange = 0, inMainSleep = 0;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -284,11 +288,15 @@ Metric<List<NapWindow>> detectNaps(
     final aStart = absAt(start);
     final aEnd = absAt(end - 1) + 1;
     final tib = aEnd - aStart;
-    if (tib < minNapSec || tib > maxNapSec) continue;
+    if (tib < minNapSec || tib > maxNapSec) {
+      outOfRange++;
+      continue;
+    }
 
     if (mainSleep != null &&
         start < mainSleep.end &&
         end > mainSleep.start) {
+      inMainSleep++;
       continue;
     }
 
@@ -300,16 +308,19 @@ Metric<List<NapWindow>> detectNaps(
       continue;
     }
 
-    final inBout = <double>[];
+    // NOT `inBout` — that name belongs to the whole-day boolean baseline mask
+    // above, and shadowing it here would silently hand the HR list to any later
+    // edit that reaches for the mask inside this loop.
+    final boutHr = <double>[];
     for (var k = start; k < end; k++) {
-      if (hr[k] > 0) inBout.add(hr[k]);
+      if (hr[k] > 0) boutHr.add(hr[k]);
     }
-    final coverage = inBout.length / tib;
+    final coverage = boutHr.length / tib;
     if (coverage < minNapHrCoverage) {
       unverifiable++;
       continue;
     }
-    final medHr = median(inBout)!;
+    final medHr = median(boutHr)!;
     if (medHr > baseline * napRestingHrMult) {
       awakeStill++;
       continue;
@@ -357,6 +368,8 @@ Metric<List<NapWindow>> detectNaps(
 
   final skipped = <String>[
     if (deferred > 0) '$deferred deferred (record ends mid-bout)',
+    if (outOfRange > 0) '$outOfRange outside 15 min–6 h',
+    if (inMainSleep > 0) '$inMainSleep inside the main sleep window',
     if (unverifiable > 0) '$unverifiable unverifiable (HR coverage <50%)',
     if (offWrist > 0) '$offWrist off-wrist/excluded',
     if (awakeStill > 0) '$awakeStill still but no HR dip',
@@ -379,16 +392,39 @@ Metric<List<NapWindow>> detectNaps(
   );
 }
 
-/// Fraction of [start, end) covered by any of [spans] (absolute seconds).
+/// Fraction of [start, end) covered by ANY of [spans] (absolute seconds).
+///
+/// The union, not the sum. Adding each span's clipped length independently
+/// double-counts a second that two spans both cover, which can push the result
+/// past 1.0 and reject a bout that is only half contradicted. The band's own
+/// toggle events do not currently produce overlapping spans, so this is a
+/// contract guarantee for every caller rather than a fix for a live symptom —
+/// but the doc above has always promised a union and the arithmetic did not.
 double _overlapFraction(int start, int end, List<List<int>> spans) {
   final dur = end - start;
   if (dur <= 0 || spans.isEmpty) return 0;
-  var covered = 0;
+  final clipped = <List<int>>[];
   for (final s in spans) {
     if (s.length < 2) continue;
     final lo = s[0] > start ? s[0] : start;
     final hi = s[1] < end ? s[1] : end;
-    if (hi > lo) covered += hi - lo;
+    if (hi > lo) clipped.add([lo, hi]);
   }
+  if (clipped.isEmpty) return 0;
+  clipped.sort((a, b) => a[0].compareTo(b[0]));
+  var covered = 0;
+  var runLo = clipped.first[0], runHi = clipped.first[1];
+  for (var i = 1; i < clipped.length; i++) {
+    final s = clipped[i];
+    if (s[0] <= runHi) {
+      // Overlapping or adjacent — extend the open run instead of counting twice.
+      if (s[1] > runHi) runHi = s[1];
+    } else {
+      covered += runHi - runLo;
+      runLo = s[0];
+      runHi = s[1];
+    }
+  }
+  covered += runHi - runLo;
   return covered / dur;
 }
