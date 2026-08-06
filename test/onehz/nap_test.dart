@@ -147,6 +147,50 @@ void main() {
           reason: 'the rejection reason must be visible, not silent');
     });
 
+    test('a SEDENTARY DAY is not eight naps — sedentary wake stays in the '
+        'awake baseline', () {
+      // THE REGRESSION. The baseline once excluded every detected bout, which
+      // removed all of the day's still time and left the AMBULATORY HR median
+      // in its place. Every motionless block then cleared `medHr > baseline *
+      // napRestingHrMult` on nothing but the ordinary sit/walk HR difference:
+      // this exact fixture returned EIGHT naps totalling 199 minutes, each at
+      // confidence 0.85 — the cap — for a day nobody napped on.
+      //
+      // The test above cannot catch it: it uses bpm 80 for BOTH its active and
+      // still segments, so active and sedentary HR are identical and the
+      // baseline cannot be inflated. The contrast IS the bug, so it has to be
+      // in the fixture.
+      final d = _Day();
+      for (var b = 0; b < 8; b++) {
+        d
+          ..active(6, bpm: 96) // walking
+          ..still(25, bpm: 72); // at the desk — awake, just not moving
+      }
+      d.active(60, bpm: 96);
+
+      final m = detectNaps(d.accel, d.hr);
+
+      expect(m.value, isEmpty,
+          reason: 'sitting still at 72 bpm on a day you walk at 96 is not a '
+              'nap; keeping the still seconds puts the median at 72, and '
+              '0.95 x 72 = 68.4 < 72 rejects every block');
+      expect(m.note, contains('no HR dip'));
+    });
+
+    test('the same day at a 10% HR contrast is also not a nap', () {
+      // The failure did not need a dramatic difference — 84 vs 76 bpm, which is
+      // an unremarkable sit-versus-walk gap, produced all eight at 0.84.
+      final d = _Day();
+      for (var b = 0; b < 8; b++) {
+        d
+          ..active(6, bpm: 84)
+          ..still(25, bpm: 76);
+      }
+      d.active(60, bpm: 84);
+
+      expect(detectNaps(d.accel, d.hr).value, isEmpty);
+    });
+
     test('an off-wrist span is rejected even though it is perfectly still', () {
       final d = _Day()
         ..active(90)
@@ -376,6 +420,33 @@ void main() {
       expect(m.value, hasLength(1),
           reason: 'the awake baseline is ~78 bpm; a 60 bpm nap clears it');
       expect(m.value!.single.tstSec, closeTo(30 * 60, 90));
+    });
+
+    test('a real nap is still detected on a SEDENTARY day', () {
+      // The other side of the same coin, and the reason the fix keeps sedentary
+      // wake in the pool instead of dropping every bout: a day that is mostly
+      // sitting still must still be able to report the one block that was
+      // actually sleep. Baseline lands at desk HR (~72), and 56 clears
+      // 0.95 x 72 = 68.4 comfortably.
+      final d = _Day();
+      for (var b = 0; b < 4; b++) {
+        d
+          ..active(6, bpm: 96)
+          ..still(25, bpm: 72);
+      }
+      d.still(50, bpm: 56); // the genuine nap, a real autonomic dip
+      for (var b = 0; b < 4; b++) {
+        d
+          ..active(6, bpm: 96)
+          ..still(25, bpm: 72);
+      }
+      d.active(60, bpm: 96); // end awake: nothing to defer at the record end
+
+      final m = detectNaps(d.accel, d.hr);
+
+      expect(m.value, hasLength(1),
+          reason: 'the deep-dip block is a nap even though the day around it '
+              'is sedentary');
     });
   });
 

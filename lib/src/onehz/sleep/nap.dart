@@ -227,40 +227,51 @@ Metric<List<NapWindow>> detectNaps(
     }
   }
 
-  // The AWAKE HR baseline: seconds that are neither the main sleep nor ANY
-  // detected sleep bout. Excluding only `mainSleep` was not enough — it left
-  // the candidate bout's own low-HR seconds in the median it is then judged
-  // against, and on this device the nap window deliberately extends hours past
-  // midnight, so the first hours of tonight's sleep were dragging the bar down
-  // too. Both make the gate self-suppressing: the quieter the sleep, the lower
-  // the threshold it has to beat.
-  final inBout = List<bool>.filled(n, false);
-  for (final b in bouts) {
-    for (var k = b[0]; k < b[1]; k++) {
-      inBout[k] = true;
+  // The AWAKE HR baseline pool: every second that is not the main sleep and not
+  // a bout we have already DEFERRED as unfinished.
+  //
+  // SEDENTARY WAKE STAYS IN THIS POOL, and that is the whole point. Excluding
+  // every detected bout — which is what "neither the main sleep nor ANY bout"
+  // did — removes all of the day's still time, so what survives is the
+  // AMBULATORY HR median, not an awake baseline. The gate `medHr > baseline *
+  // napRestingHrMult` is then cleared by any motionless awake stretch whose HR
+  // sits more than 5% below walking HR: desk work, reading, driving, a sofa.
+  // Measured, not argued: a synthetic day of 8 x (6 min walking @ 96 bpm, 25
+  // min motionless @ 72 bpm) reported EIGHT naps totalling 199 minutes, each at
+  // confidence 0.85 — the cap — where nobody had napped. A 10% contrast (76 vs
+  // 84 bpm) did the same. Keeping the still seconds puts the median at 72, and
+  // 0.95 x 72 = 68.4 < 72 rejects all eight. The exclusion WAS the bug.
+  //
+  // Two exclusions are still right, and they are the two the original change
+  // was actually reaching for:
+  //   * the CANDIDATE's own low-HR seconds, or the gate grades a bout against a
+  //     median it is itself dragging down — self-suppressing, and the quieter
+  //     the sleep the lower the bar it has to beat. That is per-candidate, so
+  //     it is done inside the loop below, not here.
+  //   * any UNFINISHED bout. The nap window deliberately runs hours past
+  //     midnight, so the first hours of tonight's sleep sit in this record;
+  //     they are sleep, not sedentary wake, and they belong in no baseline.
+  final deferredSec = List<bool>.filled(n, false);
+  for (var b = 0; b < bouts.length; b++) {
+    if (!unfinished[b]) continue;
+    for (var k = bouts[b][0]; k < bouts[b][1]; k++) {
+      deferredSec[k] = true;
     }
   }
-  final awake = <double>[];
+  // Indices, not values: each candidate has to subtract ITSELF from this pool.
+  final awakeIdx = <int>[];
   for (var k = 0; k < n; k++) {
-    if (hr[k] <= 0 || inBout[k]) continue;
+    if (hr[k] <= 0 || deferredSec[k]) continue;
     if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) continue;
-    awake.add(hr[k]);
+    awakeIdx.add(k);
   }
-  if (awake.length < minAwakeHrSamples) {
+  if (awakeIdx.length < minAwakeHrSamples) {
     return Metric<List<NapWindow>>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: 'not enough awake daytime HR to set a baseline '
-          '(${awake.length}s, need ${minAwakeHrSamples}s) — '
+          '(${awakeIdx.length}s, need ${minAwakeHrSamples}s) — '
           'cannot corroborate stillness as sleep',
-    );
-  }
-  final baseline = median(awake)!;
-  if (baseline <= 0) {
-    return const Metric<List<NapWindow>>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'no usable awake daytime HR baseline',
     );
   }
 
@@ -269,7 +280,7 @@ Metric<List<NapWindow>> detectNaps(
   // Every rejection path increments one of these and reports it in `skipped`.
   // A silent `continue` turns "your 7-hour still block is too long to be a nap"
   // into a bare "no qualifying nap", which tells the caller nothing about why.
-  var outOfRange = 0, inMainSleep = 0;
+  var outOfRange = 0, inMainSleep = 0, noBaseline = 0;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -308,9 +319,6 @@ Metric<List<NapWindow>> detectNaps(
       continue;
     }
 
-    // NOT `inBout` — that name belongs to the whole-day boolean baseline mask
-    // above, and shadowing it here would silently hand the HR list to any later
-    // edit that reaches for the mask inside this loop.
     final boutHr = <double>[];
     for (var k = start; k < end; k++) {
       if (hr[k] > 0) boutHr.add(hr[k]);
@@ -321,6 +329,32 @@ Metric<List<NapWindow>> detectNaps(
       continue;
     }
     final medHr = median(boutHr)!;
+
+    // PER-CANDIDATE baseline: the day's awake pool minus THIS bout. A bout must
+    // not be graded against a median it is itself pulling down — see the pool
+    // construction above for why only the candidate and the deferred bouts come
+    // out, and not every still block in the day.
+    final awakeHr = <double>[];
+    for (final k in awakeIdx) {
+      if (k >= start && k < end) continue;
+      awakeHr.add(hr[k]);
+    }
+    if (awakeHr.length < minAwakeHrSamples) {
+      // The day had enough awake HR, but not once this candidate is removed —
+      // so THIS bout cannot be corroborated, while others still may be. Abstain
+      // for it rather than judging it against a median built from a handful of
+      // seconds. Counted separately from `unverifiable` because it is the one
+      // rejection that makes the DAY's verdict incomplete: see the check after
+      // the loop.
+      noBaseline++;
+      continue;
+    }
+    final baseline = median(awakeHr)!;
+    if (baseline <= 0) {
+      noBaseline++;
+      continue;
+    }
+
     if (medHr > baseline * napRestingHrMult) {
       awakeStill++;
       continue;
@@ -366,8 +400,25 @@ Metric<List<NapWindow>> detectNaps(
     ));
   }
 
+  // A still block we could not RULE OUT is not the same as a day with no nap.
+  // If nothing was emitted and at least one candidate went unjudged for want of
+  // an awake baseline, the day's verdict is unknown — say so, rather than
+  // returning an empty list that every caller reads as "judged, none". This is
+  // the day-level abstain that used to fall out of the whole-day baseline check
+  // before it became per-candidate.
+  if (naps.isEmpty && noBaseline > 0) {
+    return Metric<List<NapWindow>>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'not enough awake daytime HR to set a baseline for '
+          '$noBaseline still block(s) (need ${minAwakeHrSamples}s outside the '
+          'block itself) — cannot corroborate stillness as sleep',
+    );
+  }
+
   final skipped = <String>[
     if (deferred > 0) '$deferred deferred (record ends mid-bout)',
+    if (noBaseline > 0) '$noBaseline without an awake HR baseline',
     if (outOfRange > 0) '$outOfRange outside 15 min–6 h',
     if (inMainSleep > 0) '$inMainSleep inside the main sleep window',
     if (unverifiable > 0) '$unverifiable unverifiable (HR coverage <50%)',
