@@ -56,16 +56,53 @@ import '../util.dart';
 class MotionMinute {
   final double tsMinStartMs; // wall-clock start of the minute (ms)
   final int nSamples; // valid samples that fed this minute
-  final double enmo; // mean ENMO over the minute (g), ≥0
-  final double mad; // mean amplitude deviation over the minute (g), ≥0
+
+  /// ⚠️ MEANINGLESS ON THE WHOOP 1 Hz SUBSTRATE — diagnostics only.
+  ///
+  /// ENMO is `mean(max(0, ‖a‖ − gRef))`, which assumes ‖a‖ carries dynamic
+  /// acceleration. The band's 1 Hz historical record does NOT: it ships a fused
+  /// gravity/orientation vector (see [dynAmp]). Measured over 269,486 real
+  /// samples, ‖a‖ sits at p50 = 1.027 g with only 0.030% above 1.3 g — during
+  /// the single most vigorous minute of a day it was 1.033 g ± 0.006.
+  ///
+  /// So on this substrate ENMO reduces to roughly `1.03 − gRef`: a pure
+  /// calibration artifact carrying ZERO signal. That is precisely why an early
+  /// step estimator built on it reported 42,155 steps at gRef 0.97 and 0 at
+  /// 1.02. Do NOT threshold this, and do NOT feed it to anything expecting
+  /// accelerometry (Brage fusion, MET/cut-point models). It stays only because
+  /// a HIGH-RATE source (the 100 Hz live stream) does carry real accel.
+  final double enmo;
+
+  /// ⚠️ Same caveat as [enmo] on the 1 Hz substrate — see above.
+  final double mad;
   final double meanMag; // mean ‖a‖ over the minute (g) — for diagnostics
 
-  /// Mean magnitude of the GRAVITY-REMOVED (per-axis high-passed) accel vector
-  /// over the minute (g), ≥0. CALIBRATION-INVARIANT: any constant per-axis
-  /// offset — sensor bias, or the projection of gravity in the current posture
-  /// — cancels exactly, and a per-axis gain only rescales it. This is the
-  /// feature to threshold when the cut-point must be stable across days; see
-  /// the file header for the derivation.
+  /// Mean magnitude of the per-axis HIGH-PASSED vector over the minute (g), ≥0.
+  ///
+  /// WHAT IT ACTUALLY MEASURES: on the WHOOP 1 Hz record this is the rate at
+  /// which the wrist is RE-ORIENTING, not how hard it is accelerating. That
+  /// record's accel field is a firmware-fused gravity vector — its magnitude is
+  /// pinned near 1 g even during the most vigorous minute of a day (measured:
+  /// 1.033 g ± 0.006, 0 of 420 samples above 1.2 g). High-passing an
+  /// (approximately) unit vector yields how fast its DIRECTION is changing.
+  ///
+  /// That is still a usable activity-volume index — rotating the wrist a lot is
+  /// real movement — but read it honestly:
+  ///   • walking with hands in pockets, holding a phone, or pushing a cart
+  ///     keeps the forearm still and is nearly INVISIBLE here;
+  ///   • stirring, chopping, tool use and gesturing are MAXIMAL here.
+  /// It is not a locomotion measure and must never be converted to steps.
+  ///
+  /// CALIBRATION-INVARIANT, and this is load-bearing: a constant per-axis offset
+  /// (sensor bias, or the gravity projection of a held posture) appears in both
+  /// the sample and its trailing mean and cancels EXACTLY; a uniform gain error
+  /// rescales signal and threshold alike, so a floor derived from this same
+  /// signal's own distribution cancels it too (verified numerically: +5% gain
+  /// moves the gate decision by 0.0000). Only per-axis ANISOTROPIC gain
+  /// survives, at ~1-3%. This is why autocalibration is unnecessary here — but
+  /// the invariance is a property of the TRAILING-MEAN REFERENCE, not of the
+  /// sensor. Reintroduce any fixed-1 g reference and calibration becomes
+  /// mandatory again, and this type's property tests will NOT catch it.
   final double dynAmp;
 
   const MotionMinute(

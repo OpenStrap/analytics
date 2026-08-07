@@ -1,9 +1,11 @@
-// STEPS — hybrid pedometry for a wrist that gives us TWO different streams.
+// MOTION — a real pedometer on one stream, movement volume on the other.
 //
 // The honest constraint (see motion.dart §"what 1 Hz accel CANNOT do"):
 //   * The always-on 24/7 substrate is 1 Hz accel. Human gait is 1.4–2.5 Hz, far
 //     above the 0.5 Hz Nyquist limit of a 1 Hz stream — so you CANNOT count
-//     individual steps from the stored substrate. Full stop.
+//     individual steps from the stored substrate. Full stop. And even at full
+//     rate a WRIST ranks arm work above walking, so amplitude alone cannot
+//     isolate gait from cooking or driving.
 //   * Real per-step detection is only possible on the ~100 Hz foreground accel
 //     (R10 / 0x2B), which exists only while the app is connected and streaming.
 //
@@ -17,40 +19,48 @@
 //     waving/typing/handling and reads 0 at rest. Directly testable: walk N
 //     steps with the app open and compare.
 //
-//   TIER B — [dailyStepEstimate]: a 24/7 estimate from the 1 Hz substrate. We
-//     cannot count steps, so the PRIMARY quantity we report is the one that IS
-//     resolvable at 1 Hz: ACTIVE (ambulatory) MINUTES. Steps are then reported
-//     as a RANGE, minutes × the free-living cadence band (Tudor-Locke 2011,
-//     ~100–130 steps/min), never as a single fabricated-precision number.
+//   TIER B — [dailyActiveMinutes]: a 24/7 MOVEMENT-VOLUME index from the 1 Hz
+//     substrate. It reports MINUTES OF SUSTAINED WRIST MOVEMENT and NOTHING
+//     ELSE. It emits no step count and no cadence, because at 1 Hz gait is
+//     unidentifiable (aliasing) AND wrist amplitude ranks arm work above
+//     walking, so a movement threshold cannot isolate ambulation in principle.
+//     A previous version multiplied these minutes by a cadence band; it was
+//     measured over-reporting ~6× on a real day and has been removed. Steps
+//     come only from a gait-capable source (Tier A, or the phone pedometer).
 //
-//     Three things make the minute detector stable, and all three matter:
+//     Two things make the minute detector stable, and both matter:
 //       1. The feature is [MotionMinute.dynAmp] — per-axis high-passed dynamic
-//          amplitude — NOT ENMO. ENMO depends on a scalar gravity reference
-//          whose per-day estimate moves by about the same amount as the signal
-//          being measured, so an absolute cut-point on ENMO is not stable
-//          across days. dynAmp removes gravity as a vector and is invariant to
-//          per-axis offset. (Vähä-Ypyä 2015 argues for calibration-robust
-//          amplitude measures over ENMO for exactly this reason.)
-//       2. The cut-point is a MULTI-DAY PERSONAL REFERENCE ([personalDynFloor],
-//          a quantile of the user's POOLED trailing dynAmp minutes) — neither
-//          an absolute g constant (calibration-fragile) nor a same-day relative
-//          baseline (which collapses on a quiet day and then passes
-//          everything). One floor, computed over enough history to be stable,
-//          applied to every day.
-//       3. Corroboration + duration: HR must be lifted off rest when HR is
-//          available, and a minute only counts inside a run of consecutive
-//          ambulatory minutes.
+//          amplitude — NOT ENMO. On this substrate ENMO is worse than unstable,
+//          it is EMPTY: the band ships a fused gravity vector whose magnitude
+//          sits at ~1.03 g even during the most vigorous minute of a day, so
+//          ENMO reduces to ~(1.03 − gRef), a pure calibration artifact. dynAmp
+//          removes gravity as a VECTOR and measures how fast the wrist
+//          re-orients. (Vähä-Ypyä 2015 argues for calibration-robust amplitude
+//          measures over ENMO for exactly this reason.)
+//       2. The cut-point is a MULTI-DAY PERSONAL REFERENCE
+//          ([personalDynFloorFromDailySummaries]) that is FROZEN after an
+//          enrollment window — neither an absolute g constant
+//          (calibration-fragile) nor anything recomputed daily. A threshold
+//          recomputed from the signal it thresholds cancels the trend it
+//          exists to report: measured, 37 active minutes at 1×, 1.5×, 2× AND
+//          3× activity, versus 23 → 254 with a frozen floor.
+//
+//     There is deliberately NO upper ceiling and NO HR gate. Both existed and
+//     both were measured against real substrate: the ceiling rejected zero
+//     minutes across every day tested, and the HR gate changed the answer by
+//     zero minutes while sitting at ~6% of heart-rate reserve. See the
+//     comments at their former sites in [dailyActiveMinutes] before
+//     reintroducing either.
 //
 //     With no personal reference the estimator ABSTAINS (absent Metric with a
 //     `need_baseline:` note). It never substitutes a constant — substituting a
 //     constant IS the failure mode this design exists to prevent.
 //
-//   CALIBRATION — [StepCalibration] / [calibrateCadence]: Tier A is also Tier
-//     B's teacher. When live walking data exists we measure THIS user's real
-//     cadence, and that measured cadence NARROWS the reported step band. It is
-//     used only where it is real (cadence, from a 100 Hz count); it is never
-//     extrapolated into a per-minute cadence regression, because 1 Hz cannot
-//     resolve cadence at all (gait 1.4–2.5 Hz; 2.0 Hz aliases exactly to DC).
+//   CALIBRATION — [StepCalibration] / [calibrateCadence]: measures THIS user's
+//     real walking cadence from the 100 Hz stream. That number is reportable on
+//     its own. It is deliberately NOT consumed by Tier B: multiplying movement
+//     minutes by a walking cadence produces a number about nothing, because the
+//     minutes are not specifically ambulation.
 //
 // Pure: dart:math only. No I/O, no clock, no randomness.
 
@@ -256,9 +266,9 @@ PedometerResult livePedometer(
 
 /// A personal cadence model learned from live (100 Hz) walking.
 ///
-/// [cadenceSpm] is the user's measured walking cadence — the one quantity Tier A
-/// genuinely measures and the only one Tier B consumes (to narrow its reported
-/// step band; see [dailyStepEstimate]). [refEnmo] is the concurrent 1 Hz ENMO
+/// [cadenceSpm] is the user's measured walking cadence — a genuine Tier A
+/// measurement, reportable on its own. It is deliberately NOT consumed by the
+/// 1 Hz path ([dailyActiveMinutes]). [refEnmo] is the concurrent 1 Hz ENMO
 /// level (g), retained as a diagnostic of what the norm-based index read during
 /// known walking; it is NOT part of any threshold. [n] counts the live windows
 /// folded in (more = more trusted).
@@ -348,23 +358,14 @@ StepCalibration? calibrateCadence(
 //
 // And when there is not enough history to estimate that floor, we ABSTAIN.
 
-/// Free-living walking cadence band (steps/min), Tudor-Locke 2011 (and the
-/// cadence-band literature that follows it): purposeful adult ambulation in
-/// free living sits around 100 steps/min, with normal walking spanning roughly
-/// 100–130. We report the BAND, not a point, because 1 Hz accel cannot resolve
-/// cadence at all — see [dailyStepEstimate].
-const double freeLivingCadenceLowSpm = 100.0;
-const double freeLivingCadenceHighSpm = 130.0;
-
-/// Physiological clamp for any personally-measured cadence used to narrow the
-/// band. Outside this, the "measurement" is not walking.
+/// Physiological clamp for a personally-measured (Tier A, 100 Hz) cadence.
+/// Outside this, the "measurement" is not walking.
+///
+/// NOTE: cadence is used ONLY to describe a real 100 Hz walking bout. It is
+/// never applied to 1 Hz minutes to synthesise a step count — see
+/// [dailyActiveMinutes] for why that conversion was removed.
 const double cadenceClampLowSpm = 60.0;
 const double cadenceClampHighSpm = 180.0;
-
-/// Half-width (fraction) of the band placed around a personally MEASURED
-/// cadence. Tier A measures cadence over a bout; ±10% covers the ordinary
-/// within-person spread between strolling and purposeful walking.
-const double personalCadenceBandFrac = 0.10;
 
 /// Quantile of the POOLED trailing dynAmp minutes used as the ambulatory floor.
 ///
@@ -436,6 +437,32 @@ double? personalDynFloor(
 /// unusable in the first place. Pooling the raw minutes would let one very long
 /// day dominate; the median weights every day equally.
 ///
+/// ⚠️ FREEZE THE RESULT. Call this ONCE, persist it, and keep using the stored
+/// value — do NOT recompute it every day. See [enrollmentDaysForFrozenFloor].
+///
+/// This threshold is derived from the same signal it thresholds, so if it is
+/// recomputed continuously it TRACKS the user and cancels the trend it exists
+/// to report. Measured on real substrate by scaling one day's `dynAmp` and
+/// recomputing both ways:
+///
+/// ```
+///   activity x     FROZEN floor     recomputed floor
+///        1.00               23                   37
+///        1.50               66                   37
+///        2.00              128                   37
+///        3.00              254                   37
+/// ```
+///
+/// A recomputed floor reports the SAME number whether the user tripled their
+/// activity or did nothing. A frozen one tracks it. The continuously-updating
+/// form is a metric that cannot see change.
+///
+/// (A sleep-quiet anchor was tested as the alternative and REFUTED on the same
+/// data: coefficient of variation 138.6% across days versus 9.3% for this
+/// estimator, and on one night it landed above the entire day's range, which
+/// would report zero movement. The median-of-daily-p90s is the right ESTIMATOR;
+/// the bug was only ever that it was never frozen.)
+///
 /// Returns `null` below [minDays] of history, or when the result is degenerate.
 double? personalDynFloorFromDailySummaries(
   List<double> dailyHighQuantiles, {
@@ -450,6 +477,35 @@ double? personalDynFloorFromDailySummaries(
   if (m == null || !m.isFinite || m <= 0) return null;
   return m;
 }
+
+/// Days of history to accumulate before FREEZING the movement floor.
+///
+/// [personalDynFloorMinDays] (5) is the minimum at which the median is
+/// meaningful at all; this is the point at which it is stable enough to commit
+/// to. Measured CV of the daily p90 across real days is ~9%, so a median over
+/// this many days is well inside the estimator's own noise.
+const int enrollmentDaysForFrozenFloor = 14;
+
+/// Should the persisted floor be re-estimated?
+///
+/// Deliberately restrictive. The whole value of freezing is lost if it thaws on
+/// its own, so this returns true only for events that genuinely change the
+/// signal's scale — never merely because time passed or activity changed.
+///
+/// [daysSinceFrozen] guards against indefinite staleness; [wearGapDays] catches
+/// a device that was off-wrist long enough that the body/device relationship may
+/// have changed; [deviceChanged] and [wristChanged] are explicit user events.
+bool shouldRefreezeFloor({
+  required int daysSinceFrozen,
+  int wearGapDays = 0,
+  bool deviceChanged = false,
+  bool wristChanged = false,
+  int maxAgeDays = 365,
+}) =>
+    deviceChanged ||
+    wristChanged ||
+    wearGapDays >= 30 ||
+    daysSinceFrozen >= maxAgeDays;
 
 /// The per-day value a caller should persist to feed
 /// [personalDynFloorFromDailySummaries] — this day's own high quantile of
@@ -472,72 +528,77 @@ double? dailyDynSummary(
   return q;
 }
 
-/// Daily ACTIVITY estimate from the 1 Hz substrate.
+/// Daily MOVEMENT estimate from the 1 Hz substrate.
 ///
-/// [activeMinutes] is the PRIMARY, honest quantity: minutes spent ambulatory.
-/// It is what a 1 Hz accel stream can actually support, and it is the unit
-/// public activity guidance is written in (minutes of moderate activity).
+/// [activeMinutes] — minutes containing sustained wrist movement — is the ONLY
+/// quantity this returns, because it is the only one a 1 Hz wrist accel stream
+/// supports. There is deliberately no step count and no cadence here; see
+/// [dailyActiveMinutes] for why converting these minutes to steps was removed.
 ///
-/// Steps are reported as the RANGE [stepsLow]–[stepsHigh] = activeMinutes ×
-/// the cadence band. [steps] is the midpoint, provided only so callers that
-/// must render one scalar can; it carries no more information than the range
-/// and should be shown with the range wherever there is room.
-class DailyStepEstimate {
-  final int activeMinutes; // primary quantity
-  final int stepsLow; // activeMinutes × cadenceLowSpm
-  final int stepsHigh; // activeMinutes × cadenceHighSpm
-  final int steps; // midpoint of the range (back-compat scalar)
-  final double cadenceLowSpm;
-  final double cadenceHighSpm;
+/// Read it as "minutes the wrist was moving", NOT as "minutes spent walking":
+/// at the wrist, ordinary arm work (cooking, dishes, driving, tool use) produces
+/// MORE acceleration than walking does, so a high value does not imply
+/// ambulation. It is an activity-volume index, not a locomotion measure.
+class DailyMovementEstimate {
+  final int activeMinutes; // minutes with sustained wrist movement
   final double dynFloorG; // personal floor actually applied (g)
   final double coverage; // fraction of the day with valid motion data
-  final bool calibrated; // a personally MEASURED cadence narrowed the band
+  final int boutCount; // number of qualifying bouts
 
-  const DailyStepEstimate({
+  const DailyMovementEstimate({
     required this.activeMinutes,
-    required this.stepsLow,
-    required this.stepsHigh,
-    required this.steps,
-    required this.cadenceLowSpm,
-    required this.cadenceHighSpm,
     required this.dynFloorG,
     required this.coverage,
-    required this.calibrated,
+    required this.boutCount,
   });
 
   Map<String, dynamic> toJson() => {
         'active_min': activeMinutes,
-        'steps_low': stepsLow,
-        'steps_high': stepsHigh,
-        'steps': steps,
-        'cadence_low_spm': round6(cadenceLowSpm),
-        'cadence_high_spm': round6(cadenceHighSpm),
-        'cadence_source': calibrated ? 'personal_measured' : 'population_band',
+        'bout_count': boutCount,
         'dyn_floor_g': round6(dynFloorG),
         'coverage': round6(coverage),
-        'calibrated': calibrated,
       };
 }
 
-/// 1 Hz ACTIVE-MINUTES estimate, with steps as a derived RANGE.
+/// 1 Hz MOVEMENT-MINUTES estimate. Returns NO step count, by design.
 ///
-/// NYQUIST, stated plainly: gait is 1.4–2.5 Hz and 2.0 Hz — 120 steps/min, the
-/// most common adult cadence — aliases exactly to DC on a 1 Hz stream. Steps
-/// are therefore NOT resolvable here and neither is cadence. What IS resolvable
-/// is whether a minute contained sustained whole-body movement. So this
-/// function detects AMBULATORY MINUTES and converts them to a step RANGE using
-/// a cadence band (Tudor-Locke 2011), never a per-minute cadence estimate.
+/// WHY THERE IS NO STEP COUNT HERE (this replaced a step estimator that was
+/// measured to over-report by ~6× on a real day, and the reason is structural,
+/// not a calibration error):
 ///
-/// A covered minute is ambulatory when ALL of these hold:
-///   • its [MotionMinute.dynAmp] is above [personalDynFloorG] and at or below
-///     `personalDynFloorG × [vigorousCeilingRatio]` (above the ceiling is
-///     vigorous/non-ambulatory arm motion, counted as activity elsewhere);
-///   • when HR is supplied, its HR is at least `restingHr + [hrMarginBpm]`
-///     ([restingHr] if given, else the day's 10th-percentile HR);
-///   • it belongs to a run of at least [minBoutMin] CONSECUTIVE ambulatory
+///   1. NYQUIST. Gait is 1.4–2.3 Hz (Straczkiewicz 2023, npj Digit Med,
+///      doi:10.1038/s41746-022-00745-z). At 1 Hz sampling every gait
+///      fundamental is sub-Nyquist and the alias map is many-to-one: 80, 100,
+///      140 and 160 spm all alias to 0.333 Hz. Cadence is not merely noisy, it
+///      is NOT IDENTIFIABLE. No published step detector exists below 10 Hz.
+///
+///   2. AMPLITUDE IS INVERTED AT THE WRIST. Walking produces LESS wrist
+///      acceleration than ordinary arm work — walking ≈ 66 mg ENMO vs stirring
+///      ≈ 104 mg and chopping ≈ 139 mg. So a movement threshold cannot isolate
+///      walking: walking sits mid-pack in a normal day's distribution. Wrist
+///      devices are documented to emit 22–27 false steps/min during dishes,
+///      reaching and cycling (O'Connell 2017, PLoS ONE,
+///      doi:10.1371/journal.pone.0169616) while detecting slow walking with
+///      sensitivity 0.05 — the two errors have OPPOSITE sign, so no gain
+///      constant can fix both.
+///
+/// A real step count must come from a source that can see gait: the Tier A
+/// 100 Hz pedometer ([pedometer]/[livePedometer]) or the phone's own pedometer.
+/// Absent those, the honest output is no number at all.
+///
+/// What IS resolvable at 1 Hz is whether a minute contained sustained movement,
+/// which is what this returns. A covered minute counts when BOTH of these hold:
+///   • its [MotionMinute.dynAmp] is above [personalDynFloorG];
+///   • it belongs to a run of at least [minBoutMin] CONSECUTIVE qualifying
 ///     minutes, where consecutive means adjacent in ORIGINAL minute index — a
 ///     coverage gap breaks the run and cannot stitch two short stretches into
-///     one qualifying bout.
+///     one qualifying bout. This is a DENOISER, not a health threshold: the
+///     2018 US Physical Activity Guidelines removed the 10-minute minimum-bout
+///     rule, so do not defend this number physiologically.
+///
+/// There is deliberately no upper ceiling and no HR gate. Both were measured
+/// against real substrate and found to be dead or harmful — see the comments
+/// at their former sites before reintroducing either.
 ///
 /// [personalDynFloorG] is REQUIRED and MAY BE NULL. Null means "not enough
 /// history to know this user's movement scale", and the honest answer to that
@@ -546,28 +607,22 @@ class DailyStepEstimate {
 /// note can report progress. There is deliberately NO constant fallback: a
 /// constant absolute floor is precisely the failure this design removes.
 ///
-/// [calib] (a personally MEASURED Tier A cadence) narrows the reported band to
-/// ±[personalCadenceBandFrac] around that cadence; otherwise the population
-/// band is used. Tier is always ESTIMATE.
+/// Tier is always ESTIMATE.
 ///
-/// IMPORTANT (no double-count): the caller must pass ONLY minutes NOT covered by
-/// the live 100 Hz pedometer — 100 Hz steps are real and always preferred for the
-/// time they cover. This function never sees those minutes.
-Metric<DailyStepEstimate> dailyStepEstimate(
+/// This function is intentionally independent of the 100 Hz pedometer: it
+/// measures movement volume, not steps, so there is nothing to double-count.
+/// Callers may still exclude 100 Hz-covered minutes if they want the two
+/// quantities to describe disjoint spans.
+Metric<DailyMovementEstimate> dailyActiveMinutes(
   List<MotionMinute> motion, {
   required double? personalDynFloorG,
-  List<double>? hrPerMin,
-  double? restingHr,
-  StepCalibration? calib,
-  double hrMarginBpm = 8.0,
   double minSamplesPerMinute = 30,
   int minBoutMin = 3,
-  double vigorousCeilingRatio = defaultVigorousCeilingRatio,
   int pooledMinutesAvailable = 0,
 }) {
-  const inputs = ['dyn_amp_per_min', 'hr_per_min', 'personal_dyn_floor'];
+  const inputs = ['dyn_amp_per_min', 'personal_dyn_floor'];
   if (motion.isEmpty) {
-    return const Metric<DailyStepEstimate>.absent(
+    return const Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: 'no motion minutes',
@@ -578,7 +633,7 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   // constant floor; a constant floor is the bug this rewrite exists to fix.
   final floor = personalDynFloorG;
   if (floor == null || !floor.isFinite || floor <= 0) {
-    return Metric<DailyStepEstimate>.absent(
+    return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: needBaselineNote(
@@ -587,7 +642,14 @@ Metric<DailyStepEstimate> dailyStepEstimate(
       ),
     );
   }
-  final ceiling = floor * math.max(vigorousCeilingRatio, 1.0);
+  // NO CEILING. A `floor x 3` upper bound used to reject "vigorous non-gait"
+  // motion. It was MEASURED against 4 days of real substrate and rejected
+  // ZERO minutes on every one of them, with 0.42-0.55 g of headroom to the
+  // day's maximum. It cannot fire on artifacts either: a 3-second knock
+  // averages to ~0.23 g over its minute, which does not even reach the FLOOR.
+  // So the only thing it could ever exclude is a genuinely hard session — a
+  // volume metric that discards its highest-volume minutes is broken by
+  // definition. Removed rather than retuned.
 
   // Covered minutes only — sparse minutes can't be judged.
   final idx = <int>[];
@@ -601,7 +663,7 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   final covered = idx.length;
   final coverage = covered / motion.length;
   if (covered < dailyStepMinCoveredMinutes) {
-    return Metric<DailyStepEstimate>.absent(
+    return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: 'too few covered minutes to estimate activity '
@@ -609,45 +671,31 @@ Metric<DailyStepEstimate> dailyStepEstimate(
     );
   }
 
-  // Cadence band. A personally MEASURED cadence (Tier A, 100 Hz, real counts)
-  // narrows the band; otherwise we use the free-living population band. We do
-  // NOT model per-minute cadence — 1 Hz cannot resolve it.
-  final measured = calib != null &&
-          calib.n >= 3 &&
-          calib.cadenceSpm >= cadenceClampLowSpm &&
-          calib.cadenceSpm <= cadenceClampHighSpm
-      ? calib.cadenceSpm
-      : null;
-  final calibrated = measured != null;
-  final cadLow = calibrated
-      ? clamp(measured * (1 - personalCadenceBandFrac), cadenceClampLowSpm,
-          cadenceClampHighSpm)
-      : freeLivingCadenceLowSpm;
-  final cadHigh = calibrated
-      ? clamp(measured * (1 + personalCadenceBandFrac), cadenceClampLowSpm,
-          cadenceClampHighSpm)
-      : freeLivingCadenceHighSpm;
+  // NO CADENCE BAND. Converting these minutes to steps via any cadence — even a
+  // personally measured one — is the fabrication this function was rewritten to
+  // remove. See the doc comment: cadence is not identifiable at 1 Hz, and the
+  // minutes being counted are not specifically ambulation.
 
-  // HR corroboration: HR must be lifted off rest for a minute to count.
-  final useHr = hrPerMin != null && hrPerMin.length == motion.length;
-  double restHr = restingHr ?? 0;
-  if (useHr && restingHr == null) {
-    final hrs = [for (final h in hrPerMin) if (h > 0) h];
-    if (hrs.length >= 10) restHr = percentile(hrs, 10)!;
-  }
-  final hrGate = restHr + hrMarginBpm;
+  // NO HR GATE. A `restingHr + 8 bpm` corroboration gate used to sit here. It
+  // was MEASURED across 4 days of real substrate and changed the answer by
+  // exactly ZERO minutes on every day: at a resting HR of ~62 the gate lands
+  // at ~6% of heart-rate reserve, below every ACSM band -- physiologically
+  // "not lying down" -- and 73-100% of covered minutes already cleared it.
+  //
+  // It was worse than merely useless. It implied a physiological corroboration
+  // it never performed, it is satisfied all day in a hot climate (passive heat
+  // raises HR 10-25 bpm at zero metabolic cost), and it failed in the WRONG
+  // DIRECTION: PPG-derived HR is least reliable during exactly the motion
+  // being gated, so a dropout deleted minutes the accelerometer measured
+  // perfectly well. An honestly accelerometer-only metric is more defensible
+  // than one carrying a decorative HR gate.
 
-  // pass 1 — per-minute gate: movement inside the ambulatory band, and (when
-  // HR is available) HR lifted off rest.
+  // pass 1 — per-minute gate: dynAmp above the personal movement floor. That
+  // is the WHOLE gate. There is no upper band and no HR condition; both were
+  // measured dead and removed (see the two comments above).
   final gateOk = List<bool>.filled(idx.length, false);
   for (var k = 0; k < idx.length; k++) {
-    final d = dyns[k];
-    if (d <= floor || d > ceiling) continue; // sedentary, or vigorous non-gait
-    if (useHr && restHr > 0) {
-      final hr = hrPerMin[idx[k]];
-      if (hr > 0 && hr < hrGate) continue; // HR says still at rest
-    }
-    gateOk[k] = true;
+    gateOk[k] = dyns[k] > floor;
   }
 
   // pass 2 — bout gate: only credit minutes inside a run of >= minBoutMin
@@ -657,6 +705,7 @@ Metric<DailyStepEstimate> dailyStepEstimate(
   // covered-minutes array, so a coverage gap can't stitch two separate
   // stretches into one fake long bout.
   var activeMin = 0;
+  var boutCount = 0;
   var k = 0;
   while (k < idx.length) {
     if (!gateOk[k]) {
@@ -669,45 +718,35 @@ Metric<DailyStepEstimate> dailyStepEstimate(
         idx[end + 1] == idx[end] + 1) {
       end++;
     }
-    if (end - k + 1 >= minBoutMin) activeMin += end - k + 1;
+    if (end - k + 1 >= minBoutMin) {
+      activeMin += end - k + 1;
+      boutCount++;
+    }
     k = end + 1;
   }
 
-  final stepsLow = (activeMin * cadLow).round();
-  final stepsHigh = (activeMin * cadHigh).round();
-  final stepsMid = ((stepsLow + stepsHigh) / 2).round();
+  // Confidence reflects how much of the day we could actually judge. It is
+  // capped low because this is a movement-volume index from a wrist sensor: it
+  // cannot distinguish walking from arm work, which is a limitation of the
+  // measurement site, not of the estimator.
+  // Upper bound is 0.30, which is what the expression can actually reach —
+  // the inner clamp caps at 1.0, so `0.30 * 1.0` is the ceiling. Writing a
+  // larger outer bound would imply a confidence this metric never claims.
+  final conf = clamp(0.30 * clamp(coverage / 0.6, 0.3, 1.0), 0.1, 0.30);
 
-  // Confidence reflects (a) how much of the day we could actually judge and
-  // (b) whether the cadence band is this user's or the population's. It never
-  // reflects the step number itself — that number is a band by construction.
-  final conf = clamp(
-    (calibrated ? 0.45 : 0.30) * clamp(coverage / 0.6, 0.3, 1.0),
-    0.1,
-    0.7,
-  );
-
-  return Metric<DailyStepEstimate>(
-    value: DailyStepEstimate(
+  return Metric<DailyMovementEstimate>(
+    value: DailyMovementEstimate(
       activeMinutes: activeMin,
-      stepsLow: stepsLow,
-      stepsHigh: stepsHigh,
-      steps: stepsMid,
-      cadenceLowSpm: cadLow,
-      cadenceHighSpm: cadHigh,
       dynFloorG: floor,
       coverage: coverage,
-      calibrated: calibrated,
+      boutCount: boutCount,
     ),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: calibrated
-        ? 'ESTIMATE: active minutes from gravity-removed 1 Hz amplitude vs your '
-            'personal movement floor; steps = minutes × your measured cadence '
-            '(${cadLow.round()}–${cadHigh.round()} spm) — 1 Hz cannot count steps'
-        : 'ESTIMATE: active minutes from gravity-removed 1 Hz amplitude vs your '
-            'personal movement floor; steps = minutes × the free-living cadence '
-            'band (${cadLow.round()}–${cadHigh.round()} spm). Walk with the app '
-            'open to measure your own cadence and narrow the range',
+    note: 'ESTIMATE: minutes of sustained wrist movement, measured against your '
+        'personal movement floor. This is activity volume, NOT walking — at the '
+        'wrist, arm work (cooking, dishes, driving) registers as strongly as '
+        'walking does. It is deliberately not converted to a step count',
   );
 }
