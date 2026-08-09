@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../types.dart';
+import '../util.dart' show mean, theilSen;
 
 
 class SleepNeed {
@@ -456,5 +457,236 @@ List<JournalTagCorrelation> journalCorrelations({
     out.add(JournalTagCorrelation(tag, effects));
   }
   out.sort((a, b) => a.tag.compareTo(b.tag));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Numeric journal fields
+//
+// [journalCorrelations] above answers "were the tagged days different?", which
+// is the only question a tag set can answer. A field that carries a NUMBER —
+// three coffees, 700 ml of water, mood 4/5, 90 minutes of screens — carries a
+// dose, and collapsing it to present/absent throws that away: it cannot tell
+// one coffee from five, which is usually the whole question.
+//
+// The statistic is Spearman's rank correlation (Spearman 1904), not Pearson.
+// Self-reported dose is ordinal at best and routinely spiky (a single
+// six-coffee day), and ranks are invariant to both — a monotone relationship is
+// what "more of this goes with worse recovery" actually claims, and it is all
+// these fields can support.
+// ---------------------------------------------------------------------------
+
+/// One day's numeric journal fields, keyed by field name.
+///
+/// A field absent from [values] means NOT RECORDED for that day, and is
+/// excluded pairwise. It must never be read as a zero: "I logged no caffeine
+/// today" and "I did not fill the caffeine field in" are different claims, and
+/// treating the second as the first invents a data point at one end of the
+/// dose range, which is exactly where a correlation is most sensitive.
+class JournalNumericDay {
+  final String date;
+  final Map<String, double> values;
+  const JournalNumericDay(this.date, this.values);
+}
+
+/// The relationship between one numeric journal field and one outcome series.
+class JournalNumericEffect {
+  final String outcome;
+
+  /// Spearman's rho over the pairwise-complete days. Null when it could not be
+  /// computed at all (too few days, or no spread on one side).
+  final double? rho;
+
+  /// Change in the outcome per one unit of the field, by Theil–Sen (median of
+  /// pairwise slopes, ~29% breakdown). This is the interpretable half — "about
+  /// 4 ms of RMSSD per extra coffee" — while [rho] carries whether the
+  /// relationship holds at all. Null under the same conditions as [rho], and
+  /// deliberately reported in the outcome's own units, unstandardized.
+  final double? slopePerUnit;
+
+  /// 95% confidence interval on [rho] via the Fisher z transform
+  /// (z = atanh(rho), SE = 1/sqrt(n−3)). Null below 4 pairs, where the
+  /// transform's standard error is undefined.
+  final double? rhoLow;
+  final double? rhoHigh;
+
+  /// Days where both the field and the outcome were present.
+  final int n;
+
+  /// Not enough paired days, or the field never varied — no verdict either
+  /// way. Distinct from a computed-but-weak relationship.
+  final bool insufficient;
+
+  /// Strong enough AND separated from zero to be worth showing: |rho| clears
+  /// the floor and the confidence interval excludes 0. A rho alone is not
+  /// evidence — over ten days, |rho| ≈ 0.5 arises constantly from noise.
+  final bool meaningful;
+
+  const JournalNumericEffect({
+    required this.outcome,
+    required this.rho,
+    required this.slopePerUnit,
+    required this.rhoLow,
+    required this.rhoHigh,
+    required this.n,
+    required this.insufficient,
+    required this.meaningful,
+  });
+}
+
+class JournalNumericCorrelation {
+  final String field;
+  final List<JournalNumericEffect> effects;
+  const JournalNumericCorrelation(this.field, this.effects);
+}
+
+/// Average ranks, 1-based, ties sharing their mean rank.
+///
+/// Tie handling is not a detail here: journal fields are full of ties (mood is
+/// 1–5, most people log the same 2 coffees most days), and ranking ties
+/// arbitrarily would invent an ordering the user never reported.
+List<double> _averageRanks(List<double> xs) {
+  final idx = List<int>.generate(xs.length, (i) => i)
+    ..sort((a, b) => xs[a].compareTo(xs[b]));
+  final ranks = List<double>.filled(xs.length, 0);
+  var i = 0;
+  while (i < idx.length) {
+    var j = i;
+    while (j + 1 < idx.length && xs[idx[j + 1]] == xs[idx[i]]) {
+      j++;
+    }
+    // Ranks are 1-based, so positions i..j map to ranks i+1..j+1.
+    final shared = (i + 1 + j + 1) / 2.0;
+    for (var k = i; k <= j; k++) {
+      ranks[idx[k]] = shared;
+    }
+    i = j + 1;
+  }
+  return ranks;
+}
+
+/// Pearson correlation. Null when either side has no spread.
+double? _pearson(List<double> a, List<double> b) {
+  if (a.length != b.length || a.length < 2) return null;
+  final ma = mean(a)!;
+  final mb = mean(b)!;
+  var num = 0.0, da = 0.0, db = 0.0;
+  for (var i = 0; i < a.length; i++) {
+    final xa = a[i] - ma;
+    final xb = b[i] - mb;
+    num += xa * xb;
+    da += xa * xa;
+    db += xb * xb;
+  }
+  if (da == 0 || db == 0) return null;
+  return num / math.sqrt(da * db);
+}
+
+/// Spearman's rho — Pearson on average ranks, so ties are handled correctly.
+double? spearmanRho(List<double> a, List<double> b) =>
+    _pearson(_averageRanks(a), _averageRanks(b));
+
+/// Per-field relationship between numeric journal entries and each outcome.
+///
+/// [outcomes] values must be POSITIONALLY ALIGNED to [dates], exactly as in
+/// [journalCorrelations]; a series of a different length is reported as
+/// insufficient rather than silently truncated.
+///
+/// [minN] is the floor on paired days. It is higher than the tag path's
+/// requirement because a correlation over a handful of points is close to
+/// meaningless — with 5 days, |rho| > 0.8 happens by chance often enough to
+/// fill a screen with confident nonsense.
+List<JournalNumericCorrelation> journalNumericCorrelations({
+  required List<JournalNumericDay> journal,
+  required List<String> dates,
+  required Map<String, List<double?>> outcomes,
+  int minN = 8,
+  double minAbsRho = 0.35,
+}) {
+  final byDate = <String, Map<String, double>>{
+    for (final d in journal) d.date: d.values,
+  };
+  final fields = <String>{for (final d in journal) ...d.values.keys}.toList()
+    ..sort();
+
+  JournalNumericEffect none(String outcome, int n) => JournalNumericEffect(
+    outcome: outcome,
+    rho: null,
+    slopePerUnit: null,
+    rhoLow: null,
+    rhoHigh: null,
+    n: n,
+    insufficient: true,
+    meaningful: false,
+  );
+
+  final out = <JournalNumericCorrelation>[];
+  for (final field in fields) {
+    final effects = <JournalNumericEffect>[];
+    for (final entry in outcomes.entries) {
+      final series = entry.value;
+      if (series.length != dates.length) {
+        effects.add(none(entry.key, 0));
+        continue;
+      }
+
+      // Pairwise-complete: a day counts only when the field was recorded AND
+      // the outcome exists for it.
+      final xs = <double>[];
+      final ys = <double>[];
+      for (var i = 0; i < dates.length; i++) {
+        final v = byDate[dates[i]]?[field];
+        final y = series[i];
+        if (v == null || y == null) continue;
+        xs.add(v);
+        ys.add(y);
+      }
+
+      final n = xs.length;
+      final rho = n >= minN ? spearmanRho(xs, ys) : null;
+      if (rho == null) {
+        effects.add(none(entry.key, n));
+        continue;
+      }
+
+      // Fisher z CI. atanh diverges at |rho| = 1, which a monotone field hits
+      // easily — every "more coffee, worse HRV" day in order gives exactly -1.
+      // Abstaining there would throw away the strongest evidence there is, and
+      // clamping to 1 - 1e-9 would claim near-infinite confidence from twelve
+      // days. So the saturated value is pulled in by 1/(2n): the interval
+      // still excludes zero, but it widens as the sample shrinks, which is the
+      // honest reading of a perfect correlation over very few days.
+      double? lo, hi;
+      if (n > 3) {
+        final ceiling = 1.0 - 1.0 / (2.0 * n);
+        final r = rho.clamp(-ceiling, ceiling);
+        final zr = 0.5 * math.log((1 + r) / (1 - r));
+        final se = 1.0 / math.sqrt(n - 3);
+        double tanh(double v) {
+          final e = math.exp(2 * v);
+          return (e - 1) / (e + 1);
+        }
+
+        lo = tanh(zr - 1.96 * se);
+        hi = tanh(zr + 1.96 * se);
+      }
+
+      final separated = lo != null && hi != null && (lo > 0) == (hi > 0);
+      effects.add(
+        JournalNumericEffect(
+          outcome: entry.key,
+          rho: rho,
+          slopePerUnit: theilSen(ys, xs),
+          rhoLow: lo,
+          rhoHigh: hi,
+          n: n,
+          insufficient: false,
+          meaningful: rho.abs() >= minAbsRho && separated,
+        ),
+      );
+    }
+    out.add(JournalNumericCorrelation(field, effects));
+  }
+  out.sort((a, b) => a.field.compareTo(b.field));
   return out;
 }
