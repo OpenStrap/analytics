@@ -9,18 +9,33 @@
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
-List<String> _dates(int n) => [
-  for (var i = 1; i <= n; i++) '2026-01-${i.toString().padLeft(2, '0')}',
-];
+/// [n] consecutive real calendar dates from 2026-01-01. Real ones, because a
+/// naive day counter runs past 2026-01-31 and starts emitting dates that do
+/// not exist — harmless while the code treats a date as an opaque key, and a
+/// baffling failure the day it stops.
+List<String> _dates(int n) {
+  final start = DateTime(2026, 1, 1);
+  return [
+    for (var i = 0; i < n; i++)
+      () {
+        final d = start.add(Duration(days: i));
+        return '${d.year}-${d.month.toString().padLeft(2, '0')}'
+            '-${d.day.toString().padLeft(2, '0')}';
+      }(),
+  ];
+}
 
 /// One field over [values], aligned to `_dates(values.length)`.
-List<JournalNumericDay> _days(String field, List<double?> values) => [
-  for (var i = 0; i < values.length; i++)
-    JournalNumericDay(
-      _dates(values.length)[i],
-      values[i] == null ? const {} : {field: values[i]!},
-    ),
-];
+List<JournalNumericDay> _days(String field, List<double?> values) {
+  final dates = _dates(values.length);
+  return [
+    for (var i = 0; i < values.length; i++)
+      JournalNumericDay(
+        dates[i],
+        values[i] == null ? const {} : {field: values[i]!},
+      ),
+  ];
+}
 
 JournalNumericEffect _effect(
   List<JournalNumericCorrelation> out,
@@ -259,6 +274,100 @@ void main() {
         reason: 'eight days must not claim the confidence of forty',
       );
       expect(small.rhoHigh!, lessThan(0), reason: 'still excludes zero');
+    });
+
+    test('the strength floor and the interval gate are separate', () {
+      // Both have to pass. Raising the floor above a computed rho must turn
+      // meaningful off WITHOUT claiming the relationship was uncomputable —
+      // "too weak to mention" and "not enough evidence" are different answers
+      // and the caller may want to phrase them differently.
+      final dates = _dates(30);
+      final journal = [
+        for (var i = 0; i < 30; i++)
+          JournalNumericDay(dates[i], {'water': (i % 7).toDouble()}),
+      ];
+      final outcomes = {
+        'readiness': <double?>[
+          for (var i = 0; i < 30; i++) 50.0 + (i % 7) * 1.5 + (i % 3),
+        ],
+      };
+
+      final permissive = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: outcomes,
+      ).single.effects.single;
+      expect(permissive.insufficient, isFalse);
+      expect(permissive.meaningful, isTrue);
+
+      final strict = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: outcomes,
+        minAbsRho: permissive.rho!.abs() + 0.05,
+      ).single.effects.single;
+      expect(strict.rho, permissive.rho, reason: 'the statistic is unchanged');
+      expect(strict.insufficient, isFalse, reason: 'it was computable');
+      expect(strict.meaningful, isFalse, reason: 'just below the floor');
+    });
+
+    test('minN gates the statistic, the interval keeps its own n > 3 rule', () {
+      final dates = _dates(5);
+      final journal = [
+        for (var i = 0; i < 5; i++)
+          JournalNumericDay(dates[i], {'water': i.toDouble()}),
+      ];
+      final outcomes = {
+        'readiness': <double?>[for (var i = 0; i < 5; i++) 50.0 + i],
+      };
+
+      // Default floor of 8 refuses five days outright.
+      expect(
+        journalNumericCorrelations(
+          journal: journal,
+          dates: dates,
+          outcomes: outcomes,
+        ).single.effects.single.rho,
+        isNull,
+      );
+
+      // Lowered below the pair count, rho is computed and — because 5 > 3 —
+      // still carries an interval.
+      final e = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: outcomes,
+        minN: 5,
+      ).single.effects.single;
+      expect(e.rho, closeTo(1.0, 1e-9));
+      expect(e.n, 5);
+      expect(e.rhoLow, isNotNull);
+      expect(e.rhoHigh, isNotNull);
+
+      // Four pairs is where the interval gets absurdly wide but still exists
+      // — and being unable to exclude zero is exactly the right answer there.
+      expect(e.rhoLow!, lessThan(0), reason: 'five days cannot clear zero');
+      expect(e.meaningful, isFalse);
+
+      // At three the standard error is undefined outright, so there is no
+      // interval at all and therefore no verdict.
+      final three = _dates(3);
+      final e3 = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < 3; i++)
+            JournalNumericDay(three[i], {'water': i.toDouble()}),
+        ],
+        dates: three,
+        outcomes: {'readiness': [for (var i = 0; i < 3; i++) 50.0 + i]},
+        minN: 3,
+      ).single.effects.single;
+      expect(e3.rho, closeTo(1.0, 1e-9));
+      expect(e3.rhoLow, isNull, reason: 'n > 3 is required for the SE');
+      expect(
+        e3.meaningful,
+        isFalse,
+        reason: 'no interval means no evidence it clears zero',
+      );
     });
 
     test('empty input is empty output, not a crash', () {

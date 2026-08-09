@@ -504,9 +504,9 @@ class JournalNumericEffect {
   /// deliberately reported in the outcome's own units, unstandardized.
   final double? slopePerUnit;
 
-  /// 95% confidence interval on [rho] via the Fisher z transform
-  /// (z = atanh(rho), SE = 1/sqrt(n−3)). Null below 4 pairs, where the
-  /// transform's standard error is undefined.
+  /// 95% confidence interval on [rho]: Fisher z transform with the Bonett &
+  /// Wright (2000) rank standard error, sqrt((1 + rho²/2)/(n−3)). Null below 4
+  /// pairs, where that standard error is undefined.
   final double? rhoLow;
   final double? rhoHigh;
 
@@ -661,7 +661,13 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
         final ceiling = 1.0 - 1.0 / (2.0 * n);
         final r = rho.clamp(-ceiling, ceiling);
         final zr = 0.5 * math.log((1 + r) / (1 - r));
-        final se = 1.0 / math.sqrt(n - 3);
+        // Bonett & Wright (2000) standard error, NOT Fisher's 1/sqrt(n−3).
+        // That one is derived for Pearson's r under bivariate normality; ranks
+        // are neither, and it runs narrow for rho. Since `meaningful` is gated
+        // on this interval excluding zero, the narrower SE would let weaker
+        // relationships through — the error points the wrong way for a
+        // function whose job is to refuse.
+        final se = math.sqrt((1.0 + r * r / 2.0) / (n - 3));
         double tanh(double v) {
           final e = math.exp(2 * v);
           return (e - 1) / (e + 1);
