@@ -39,6 +39,22 @@ class CalorieCoeffs {
   final double workoutWeight;
   final double workoutAge;
   final double workoutAlpha;
+
+  // Keytel's SECOND published active model, which adds a VO2max term. It is
+  // the more accurate of the pair: fitness is what decides how much energy a
+  // given heart rate represents, because a higher VO2max means a greater
+  // stroke volume, so the same beat moves more oxygen. The age/mass/sex-only
+  // model above has to bake in the derivation cohort's mean fitness instead,
+  // which is why it reads high for untrained people and low for athletes.
+  //
+  // Used only when the caller supplies a VO2max; every entry point keeps the
+  // original model as its fallback so an absent fitness anchor changes nothing.
+  final double fitAlpha;
+  final double fitAge;
+  final double fitWeight;
+  final double fitVo2max;
+  final double fitHR;
+
   const CalorieCoeffs({
     required this.restingAlpha,
     required this.restingWeight,
@@ -48,11 +64,18 @@ class CalorieCoeffs {
     required this.workoutWeight,
     required this.workoutAge,
     required this.workoutAlpha,
+    required this.fitAlpha,
+    required this.fitAge,
+    required this.fitWeight,
+    required this.fitVo2max,
+    required this.fitHR,
   });
 }
 
 /// HR-based calorie estimation (Keytel 2005 active + revised Harris–Benedict BMR).
 class Calories {
+  // fitAlpha folds Keytel's shared -59.3954 intercept together with the
+  // male-only -36.3781 term, so each block carries one flat intercept.
   static const CalorieCoeffs male = CalorieCoeffs(
     restingAlpha: 88.362,
     restingWeight: 13.397,
@@ -62,6 +85,11 @@ class Calories {
     workoutWeight: 0.1988,
     workoutAge: 0.2017,
     workoutAlpha: -55.0969,
+    fitAlpha: -95.7735, // -59.3954 - 36.3781
+    fitAge: 0.271,
+    fitWeight: 0.394,
+    fitVo2max: 0.404,
+    fitHR: 0.634,
   );
   static const CalorieCoeffs female = CalorieCoeffs(
     restingAlpha: 447.593,
@@ -72,6 +100,11 @@ class Calories {
     workoutWeight: -0.1263,
     workoutAge: 0.0740,
     workoutAlpha: -20.4022,
+    fitAlpha: -59.3954,
+    fitAge: 0.274,
+    fitWeight: 0.103,
+    fitVo2max: 0.380,
+    fitHR: 0.450,
   );
   static const CalorieCoeffs nonbinary = CalorieCoeffs(
     restingAlpha: 267.9775,
@@ -82,6 +115,11 @@ class Calories {
     workoutWeight: 0.03625,
     workoutAge: 0.13785,
     workoutAlpha: -37.74955,
+    fitAlpha: -77.58445,
+    fitAge: 0.2725,
+    fitWeight: 0.2485,
+    fitVo2max: 0.392,
+    fitHR: 0.542,
   );
 
   /// Bout active gate: a sample burns the Keytel active rate above
@@ -116,12 +154,29 @@ class Calories {
   }
 
   /// Active EE rate (kcal/s) — Keytel 2005 kJ/min ÷ workoutDivisor.
+  ///
+  /// With a [vo2max], uses Keytel's fitness-adjusted model (see
+  /// [CalorieCoeffs.fitAlpha]); without one, the age/mass/sex model, unchanged.
+  /// A non-positive [vo2max] is treated as absent rather than fed to the
+  /// regression — VO2max is a strictly positive quantity, and 0 is this
+  /// package's "not measured" shape, not a real reading.
   static double activeKcalPerS(
-      CalorieCoeffs c, double hr, double hrmax, double weightKg, double age) {
-    final eeKjMin = c.workoutHR * math.min(hr, hrmax) +
-        c.workoutWeight * weightKg +
-        c.workoutAge * age +
-        c.workoutAlpha;
+      CalorieCoeffs c, double hr, double hrmax, double weightKg, double age,
+      {double? vo2max}) {
+    final cappedHr = math.min(hr, hrmax);
+    final double eeKjMin;
+    if (vo2max != null && vo2max.isFinite && vo2max > 0) {
+      eeKjMin = c.fitAlpha +
+          c.fitAge * age +
+          c.fitWeight * weightKg +
+          c.fitVo2max * vo2max +
+          c.fitHR * cappedHr;
+    } else {
+      eeKjMin = c.workoutHR * cappedHr +
+          c.workoutWeight * weightKg +
+          c.workoutAge * age +
+          c.workoutAlpha;
+    }
     return math.max(0.0, eeKjMin) / workoutDivisor;
   }
 
@@ -172,6 +227,7 @@ class Calories {
     double? hrmax,
     double activeFraction = 0.50,
     int dayMinutes = 1440,
+    double? vo2max,
   }) {
     // the 220-age hrmax fallback used to just silently apply with nothing
     // telling the caller it wasnt a real anchor. usedDefaultHrmax lets the
@@ -196,7 +252,8 @@ class Calories {
     for (final hr in hrPerMin) {
       if (hr < flexHr) continue; // below flex point → basal only
       final activePerMin =
-          activeKcalPerS(coeffs, hr, effHRmax, weightKg, age) * 60.0;
+          activeKcalPerS(coeffs, hr, effHRmax, weightKg, age, vo2max: vo2max) *
+              60.0;
       final surplus = activePerMin - basalPerMin;
       if (surplus > 0) active += surplus;
     }
@@ -224,6 +281,7 @@ class Calories {
     double? hrmax,
     double? restingHr,
     double mergeGapCapS = 150.0,
+    double? vo2max,
   }) {
     final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
     final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
@@ -262,7 +320,8 @@ class Calories {
         totalKcal += restingRate * dur;
       } else {
         totalKcal +=
-            activeKcalPerS(coeffs, b, effHRmax, weightKg, age) * dur;
+            activeKcalPerS(coeffs, b, effHRmax, weightKg, age, vo2max: vo2max) *
+                dur;
       }
     }
     return (
