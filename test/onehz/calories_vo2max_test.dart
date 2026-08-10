@@ -63,6 +63,34 @@ void main() {
       expect(_bout(_male), closeTo(130.02, 0.05));
     });
 
+    test('an unusable VO2max falls back rather than entering the regression',
+        () {
+      // The guard rejects on three separate conditions and every one of them
+      // has to land on the SAME fallback. VO2max is a strictly positive
+      // quantity, so 0 and negatives are "not measured" rather than readings,
+      // and a non-finite value would otherwise propagate straight through the
+      // linear term and poison the result as NaN/Infinity kcal.
+      //
+      // Exact equality, not closeTo: a correct fallback runs the identical code
+      // path, so anything other than a bit-identical answer means the guard let
+      // the value through.
+      final baseline = _bout(_male);
+      for (final vo2max in <double>[
+        0,
+        -1,
+        -62.5,
+        double.nan,
+        double.infinity,
+        double.negativeInfinity,
+      ]) {
+        expect(
+          _bout(_male, vo2max: vo2max),
+          baseline,
+          reason: 'vo2max $vo2max must fall back to the age/mass/sex model',
+        );
+      }
+    });
+
     test('a male bout with a VO2max uses the fitness-adjusted coefficients', () {
       // -95.7735 + 0.271*34 + 0.394*72 + 0.404*50 + 0.634*140 = 50.7685 kJ/min
       // 50.7685 / 251.04 * 600 s                              = 121.34 kcal
@@ -155,6 +183,29 @@ void main() {
       );
       expect(a.total, b.total);
       expect(a.active, b.active);
+    });
+
+    test('an unusable VO2max leaves the daily figures unchanged too', () {
+      // Same guard, second entry point. A NaN reaching the active term here
+      // would poison a persisted daily total, not just one bout.
+      final base = Calories.dailyEnergy(day, profile: _male, hrmax: _hrMax);
+      for (final vo2max in <double>[
+        0,
+        -1,
+        double.nan,
+        double.infinity,
+        double.negativeInfinity,
+      ]) {
+        final e = Calories.dailyEnergy(
+          day,
+          profile: _male,
+          hrmax: _hrMax,
+          vo2max: vo2max,
+        );
+        expect(e.total, base.total, reason: 'vo2max $vo2max');
+        expect(e.active, base.active, reason: 'vo2max $vo2max');
+        expect(e.total.isFinite, isTrue);
+      }
     });
   });
 }
