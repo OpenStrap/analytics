@@ -293,6 +293,12 @@ class WorkoutDetector {
     double? maxHR,
     double? age,
     WorkoutUserProfile? profile,
+    // Keytel's fitness-adjusted active model reads this. It has to reach here
+    // as well as the manual-logging path: a detected bout and a hand-logged one
+    // over the SAME heart-rate trace are the same workout, and pricing one on
+    // each of the two published models puts them ~30% apart in the same app on
+    // the same day. Null ⇒ the age/mass/sex model, as before.
+    double? vo2max,
     List<SavedWorkoutSpan> savedSpans = const [],
     SportClassifier classify = defaultSportClassifier,
   }) {
@@ -415,6 +421,7 @@ class WorkoutDetector {
           hrmax: effMaxHR,
           restingHr: restHR,
           mergeGapCapS: mergeGapS,
+          vo2max: vo2max,
         );
         kcal = cal.kcal;
         kj = cal.kj;

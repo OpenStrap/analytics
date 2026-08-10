@@ -117,12 +117,119 @@ void main() {
     });
 
     test('nonbinary stays the mean of the two published blocks', () {
-      // Matches how this package already resolves the age/mass/sex model, and
-      // the model is linear in its coefficients, so the mean block and the mean
-      // of the two results are the same number.
+      // Matches how this package already resolves the age/mass/sex model.
+      //
+      // The equality holds because the model is linear in its coefficients AND
+      // both sexes' raw kJ/min are positive here, so no clamp fires. It is NOT
+      // a general identity: `max(0.0, eeKjMin)` is applied after the mean block
+      // is evaluated, so on a profile extreme enough to drive exactly one sex
+      // negative the mean block and the mean of the two results diverge. See
+      // the clamp-asymmetry case below.
       expect(
         _bout(_nonbinary, vo2max: 50),
         closeTo((_bout(_male, vo2max: 50) + _bout(_female, vo2max: 50)) / 2, 0.01),
+      );
+    });
+
+    test('the nonbinary mean is NOT an identity once a clamp fires', () {
+      // Pinned so nobody restates the linearity claim as unconditional. The
+      // zero floor is applied to each block's own kJ/min, so a profile that
+      // drives one sex negative and not the other breaks the equality: the mean
+      // block lands under the floor and reads 0 while the mean of the two
+      // results does not. Reachable only at a genuinely extreme profile, which
+      // is why it is pinned rather than fixed — the alternative is averaging
+      // two clamped results, which is not what "the mean coefficient block"
+      // means.
+      const old = WorkoutUserProfile(
+        weightKg: 35,
+        heightCm: 150,
+        age: 80,
+        sex: 'male',
+      );
+      const oldF = WorkoutUserProfile(
+        weightKg: 35,
+        heightCm: 150,
+        age: 80,
+        sex: 'female',
+      );
+      const oldN = WorkoutUserProfile(
+        weightKg: 35,
+        heightCm: 150,
+        age: 80,
+        sex: 'nonbinary',
+      );
+      final day = <double>[for (var i = 0; i < 600; i++) 76.0];
+      double active(WorkoutUserProfile p) =>
+          Calories.dailyEnergy(day, profile: p, hrmax: 152.0, vo2max: 15)
+              .active;
+
+      expect(active(old), 0.0, reason: 'male block clamps to the floor');
+      expect(active(oldF), greaterThan(0.0));
+      expect(active(oldN), 0.0, reason: 'the MEAN block also clamps');
+      expect(
+        active(oldN),
+        isNot(closeTo((active(old) + active(oldF)) / 2, 1.0)),
+      );
+    });
+
+    test('a physiologically impossible VO2max falls back, never scales', () {
+      // The guard used to test only the sign and finiteness, so the fitness
+      // term was a bare multiplication with no upper bound: 1e6 through this
+      // bout returned ~965,000 kcal. The value arriving here is not measured —
+      // it is usually a resting-HR ratio estimate, so it inherits every
+      // artifact in the resting HR it divides by, and unit confusion (L/min for
+      // mL/kg/min) fails the same way at the bottom.
+      final baseline = _bout(_male);
+      for (final vo2max in <double>[
+        1e6,
+        1000,
+        95.01,
+        9.99,
+        1e-12,
+      ]) {
+        expect(
+          _bout(_male, vo2max: vo2max),
+          baseline,
+          reason: 'vo2max $vo2max is not a human and must not price a bout',
+        );
+      }
+      // The bounds themselves are inclusive and DO price the bout.
+      expect(_bout(_male, vo2max: Calories.minVo2max), isNot(baseline));
+      expect(_bout(_male, vo2max: Calories.maxVo2max), isNot(baseline));
+    });
+
+    test('the result says which of the two models priced it', () {
+      // Same contract as usedDefaultHrmax/usedDefaultAnchors: a silently
+      // rejected fitness anchor is indistinguishable from one that was never
+      // supplied unless the result says so.
+      double? none;
+      expect(
+        Calories.estimateBoutCalories(_ts, _bpm,
+                profile: _male,
+                hrmax: _hrMax,
+                restingHr: _restingHr,
+                vo2max: none)
+            .usedFitnessModel,
+        isFalse,
+      );
+      expect(
+        Calories.estimateBoutCalories(_ts, _bpm,
+                profile: _male,
+                hrmax: _hrMax,
+                restingHr: _restingHr,
+                vo2max: 1e6)
+            .usedFitnessModel,
+        isFalse,
+        reason: 'rejected as implausible — the caller has to be able to tell',
+      );
+      expect(
+        Calories.estimateBoutCalories(_ts, _bpm,
+                profile: _male,
+                hrmax: _hrMax,
+                restingHr: _restingHr,
+                vo2max: 50)
+            .usedFitnessModel,
+        isTrue,
       );
     });
 

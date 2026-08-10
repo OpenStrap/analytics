@@ -126,6 +126,35 @@ class Calories {
   /// resting + this fraction of HRR, else the resting BMR rate.
   static const double activeHRRFraction = 0.30;
 
+  /// Plausibility bounds on a supplied VO2max, in mL/kg/min.
+  ///
+  /// The fitness term is a bare multiplication, so nothing in the regression
+  /// stops an absurd input from producing an absurd answer: 1e6 through a
+  /// 10-minute bout yields ~965,000 kcal. The value that reaches here is not
+  /// measured — the usual source is a resting-HR ratio estimate, which inherits
+  /// every artifact in the resting HR it divides by. A single bad night at
+  /// 30 bpm against a 200 bpm HRmax reads as ~102, and unit confusion (L/min
+  /// rather than mL/kg/min) fails the same way in the other direction.
+  ///
+  /// [minVo2max] is below the lowest value seen in severely deconditioned
+  /// adults and [maxVo2max] above the highest recorded in elite endurance
+  /// athletes, so anything outside is a data error rather than a person.
+  /// Such a value is REJECTED, not clamped: it carries no information about
+  /// this user's fitness, and the age/mass/sex model is the honest answer when
+  /// the fitness anchor is unusable. Values inside the range but outside
+  /// Keytel's derivation cohort (~25-65) are still used — that is ordinary
+  /// extrapolation of a published linear model, not a broken input.
+  static const double minVo2max = 10.0;
+  static const double maxVo2max = 95.0;
+
+  /// Whether [vo2max] is usable as the fitness term. Absent, non-finite, or
+  /// outside [minVo2max]..[maxVo2max] ⇒ the age/mass/sex model runs instead.
+  static bool usableVo2max(double? vo2max) =>
+      vo2max != null &&
+      vo2max.isFinite &&
+      vo2max >= minVo2max &&
+      vo2max <= maxVo2max;
+
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
 
@@ -155,21 +184,21 @@ class Calories {
 
   /// Active EE rate (kcal/s) — Keytel 2005 kJ/min ÷ workoutDivisor.
   ///
-  /// With a [vo2max], uses Keytel's fitness-adjusted model (see
+  /// With a usable [vo2max], uses Keytel's fitness-adjusted model (see
   /// [CalorieCoeffs.fitAlpha]); without one, the age/mass/sex model, unchanged.
-  /// A non-positive [vo2max] is treated as absent rather than fed to the
-  /// regression — VO2max is a strictly positive quantity, and 0 is this
+  /// "Usable" is [usableVo2max]: absent, non-finite, or physiologically
+  /// impossible values fall back rather than entering the regression. 0 is this
   /// package's "not measured" shape, not a real reading.
   static double activeKcalPerS(
       CalorieCoeffs c, double hr, double hrmax, double weightKg, double age,
       {double? vo2max}) {
     final cappedHr = math.min(hr, hrmax);
     final double eeKjMin;
-    if (vo2max != null && vo2max.isFinite && vo2max > 0) {
+    if (usableVo2max(vo2max)) {
       eeKjMin = c.fitAlpha +
           c.fitAge * age +
           c.fitWeight * weightKg +
-          c.fitVo2max * vo2max +
+          c.fitVo2max * vo2max! +
           c.fitHR * cappedHr;
     } else {
       eeKjMin = c.workoutHR * cappedHr +
@@ -220,8 +249,13 @@ class Calories {
   /// matching the edge pipeline): minutes below it burn BMR only, so a quiet day
   /// reads ≈ basal and Keytel's low-HR over-estimate can't inflate "active".
   /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
-  static ({double total, double active, double basal, bool usedDefaultHrmax})
-      dailyEnergy(
+  static ({
+    double total,
+    double active,
+    double basal,
+    bool usedDefaultHrmax,
+    bool usedFitnessModel,
+  }) dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     double? hrmax,
@@ -263,6 +297,11 @@ class Calories {
       active: active,
       basal: basal,
       usedDefaultHrmax: hrmax == null,
+      // Which of Keytel's two published models priced the active term. Same
+      // reason usedDefaultHrmax exists: a caller comparing two days, or a user
+      // asking why a number moved, cannot otherwise tell that the fitness
+      // anchor was supplied and then silently rejected as implausible.
+      usedFitnessModel: usableVo2max(vo2max),
     );
   }
 
@@ -274,7 +313,12 @@ class Calories {
   /// length). [hrmax]/[restingHr] anchors (null → 220 / 60 fallback, flagged
   /// via [usedDefaultAnchors] on the result so a fabricated-anchor calorie
   /// number can be caveated instead of shown as if it were real).
-  static ({double kcal, double kj, bool usedDefaultAnchors}) estimateBoutCalories(
+  static ({
+    double kcal,
+    double kj,
+    bool usedDefaultAnchors,
+    bool usedFitnessModel,
+  }) estimateBoutCalories(
     List<int> hrTsSec,
     List<double> hrBpm, {
     required WorkoutUserProfile profile,
@@ -328,6 +372,7 @@ class Calories {
       kcal: totalKcal,
       kj: totalKcal * 4.184,
       usedDefaultAnchors: usedDefaultAnchors,
+      usedFitnessModel: usableVo2max(vo2max),
     );
   }
 }
