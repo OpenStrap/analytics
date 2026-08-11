@@ -54,14 +54,6 @@ class ExerciseSession {
   /// computed at all.
   final bool caloriesUsedDefaultAnchors;
 
-  /// Which of Keytel's two published active models priced [caloriesKcal]: true
-  /// for the fitness-adjusted one, false for age/mass/sex. Carried for the same
-  /// reason as [caloriesUsedDefaultAnchors] — two bouts scored on different
-  /// models are not comparable, and a VO2max that was supplied and then
-  /// rejected as implausible is otherwise indistinguishable from one that was
-  /// never supplied. False when no calories were computed at all.
-  final bool caloriesUsedFitnessModel;
-
   /// Sport label from the classifier seam ("detected" by default).
   final String sport;
 
@@ -79,7 +71,6 @@ class ExerciseSession {
     required this.caloriesKcal,
     required this.caloriesKJ,
     this.caloriesUsedDefaultAnchors = false,
-    this.caloriesUsedFitnessModel = false,
     this.sport = defaultSportLabel,
   });
 
@@ -97,7 +88,6 @@ class ExerciseSession {
         'calories_kcal': caloriesKcal == null ? null : round6(caloriesKcal!),
         'calories_kj': caloriesKJ == null ? null : round6(caloriesKJ!),
         'calories_used_default_anchors': caloriesUsedDefaultAnchors,
-        'calories_used_fitness_model': caloriesUsedFitnessModel,
         'sport': sport,
       };
 }
@@ -303,12 +293,6 @@ class WorkoutDetector {
     double? maxHR,
     double? age,
     WorkoutUserProfile? profile,
-    // Keytel's fitness-adjusted active model reads this. It has to reach here
-    // as well as the manual-logging path: a detected bout and a hand-logged one
-    // over the SAME heart-rate trace are the same workout, and pricing one on
-    // each of the two published models puts them ~30% apart in the same app on
-    // the same day. Null ⇒ the age/mass/sex model, as before.
-    double? vo2max,
     List<SavedWorkoutSpan> savedSpans = const [],
     SportClassifier classify = defaultSportClassifier,
   }) {
@@ -422,7 +406,6 @@ class WorkoutDetector {
       // `hrmax ?? 220` / `restingHr ?? 60` fallback can be caveated, and it used
       // to be computed and dropped on the floor here.
       var calUsedDefaultAnchors = false;
-      var calUsedFitnessModel = false;
       if (profile != null) {
         final winBpmInt = [for (final b in winBpm) b];
         final cal = Calories.estimateBoutCalories(
@@ -432,18 +415,20 @@ class WorkoutDetector {
           hrmax: effMaxHR,
           restingHr: restHR,
           // The published cap, not this class's split threshold. They are the
-          // same number today and the cap cannot bind inside a detected bout
-          // anyway (a gap that long would have ended it), but restating one as
-          // the other means moving the cap silently rescores auto-detected
-          // bouts against a value the live gauge and manual_session no longer
-          // use.
+          // same number today, but they are not the same quantity, and the cap
+          // really can bind inside a detected bout: [bridgeGapS] is twice
+          // [mergeGapS], so _bridgeRuns stitches an HR-free dropout of up to
+          // 300 s into one bout. A bout straddling a ~252 s dropout measures
+          // 324.62 kcal capped against 349.44 uncapped — 7.1%. Restating one
+          // constant as the other would mean a later move of the cap silently
+          // rescored auto-detected bouts against a value the live gauge and
+          // manual_session no longer use, which is the whole reason both sides
+          // read the same constant.
           mergeGapCapS: Calories.defaultMergeGapCapS,
-          vo2max: vo2max,
         );
         kcal = cal.kcal;
         kj = cal.kj;
         calUsedDefaultAnchors = cal.usedDefaultAnchors;
-        calUsedFitnessModel = cal.usedFitnessModel;
       }
 
       final avg = winBpm.reduce((a, b) => a + b) / winBpm.length;
@@ -502,7 +487,6 @@ class WorkoutDetector {
         caloriesKcal: kcal,
         caloriesKJ: kj,
         caloriesUsedDefaultAnchors: calUsedDefaultAnchors,
-        caloriesUsedFitnessModel: calUsedFitnessModel,
         sport: sport,
       ));
     }
