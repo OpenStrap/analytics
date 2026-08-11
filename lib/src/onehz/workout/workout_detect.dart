@@ -431,7 +431,13 @@ class WorkoutDetector {
           profile: profile,
           hrmax: effMaxHR,
           restingHr: restHR,
-          mergeGapCapS: mergeGapS,
+          // The published cap, not this class's split threshold. They are the
+          // same number today and the cap cannot bind inside a detected bout
+          // anyway (a gap that long would have ended it), but restating one as
+          // the other means moving the cap silently rescores auto-detected
+          // bouts against a value the live gauge and manual_session no longer
+          // use.
+          mergeGapCapS: Calories.defaultMergeGapCapS,
           vo2max: vo2max,
         );
         kcal = cal.kcal;

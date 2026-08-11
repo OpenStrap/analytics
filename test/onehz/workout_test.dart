@@ -309,6 +309,58 @@ void main() {
       expect(out, isEmpty);
     });
 
+    test('the detected bout carries which calorie model priced it', () {
+      // Both flags used to be computed inside detect() and dropped before the
+      // ExerciseSession was built, so a bout came back with no way to tell
+      // whether its calories were personal or built on a 220/60 stand-in, and
+      // later no way to tell which of Keytel's two models produced them. Two
+      // bouts scored on different models are not comparable.
+      final d = buildDay();
+      const profile = WorkoutUserProfile(
+        weightKg: 72,
+        heightCm: 178,
+        age: 34,
+        sex: 'male',
+      );
+
+      final plain = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        maxHR: 190,
+        restingHR: 60,
+        profile: profile,
+      );
+      final fit = WorkoutDetector.detect(
+        hrTs: d.hrTs,
+        hrBpm: d.hrBpm,
+        gravTs: d.gTs,
+        gx: d.gx,
+        gy: d.gy,
+        gz: d.gz,
+        maxHR: 190,
+        restingHR: 60,
+        profile: profile,
+        vo2max: 50,
+      );
+
+      expect(plain, isNotEmpty);
+      expect(fit, isNotEmpty);
+      expect(plain.first.caloriesUsedFitnessModel, isFalse);
+      expect(fit.first.caloriesUsedFitnessModel, isTrue);
+      expect(plain.first.toJson()['calories_used_fitness_model'], isFalse);
+      expect(fit.first.toJson()['calories_used_fitness_model'], isTrue);
+      // The anchors here are real, so the other flag must stay false — it is
+      // the same plumbing and was equally untested.
+      expect(fit.first.caloriesUsedDefaultAnchors, isFalse);
+      // And the term has to actually move the number, or the flag is decoration.
+      expect(fit.first.caloriesKcal, isNotNull);
+      expect(fit.first.caloriesKcal, isNot(closeTo(plain.first.caloriesKcal!, 0.5)));
+    });
+
     test('injected sport classifier types the detected bout', () {
       final d = buildDay();
       String classify(WorkoutBout b, MotionFeatures? f) {

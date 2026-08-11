@@ -252,6 +252,34 @@ void main() {
       expect(bout.usedFitnessModel, isFalse);
     });
 
+    test('a clamped minute above the gate is not a fitness-priced day', () {
+      // A minute can clear the flex gate and still contribute nothing. At a low
+      // VO2max the regression comes out NEGATIVE, `max(0.0, eeKjMin)` clamps it
+      // to zero, and zero loses to the basal minute — so `active` stays 0.0
+      // while the fit branch was entered. Reporting the fitness model there is
+      // the same over-claim as reporting it for a day that never left basal.
+      //
+      // Female, 20 y, 45 kg, HRmax 194 -> flex 97 bpm. At VO2max 10 (the floor
+      // the guard admits) and HR 97:
+      //   -59.3954 + 0.274*20 + 0.103*45 + 0.380*10 + 0.450*97 = -1.83 kJ/min
+      const small = WorkoutUserProfile(
+        weightKg: 45,
+        heightCm: 160,
+        age: 20,
+        sex: 'female',
+      );
+      final atGate = <double>[for (var i = 0; i < 120; i++) 97.0];
+      final e = Calories.dailyEnergy(
+        atGate,
+        profile: small,
+        hrmax: 194.0,
+        vo2max: Calories.minVo2max,
+      );
+
+      expect(e.active, 0.0, reason: 'the clamped rate loses to the basal minute');
+      expect(e.usedFitnessModel, isFalse);
+    });
+
     test('a day spent entirely under the flex point reports no fitness model',
         () {
       final quiet = <double>[for (var i = 0; i < 1440; i++) 55.0];

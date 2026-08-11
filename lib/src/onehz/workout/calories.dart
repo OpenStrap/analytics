@@ -298,15 +298,23 @@ class Calories {
     // merely whether a usable anchor was handed in. A day spent entirely below
     // the flex point is all Mifflin, and reporting the fitness model for it
     // would credit a fitness term that never ran.
+    //
+    // Set where the energy LANDS, not where the branch is taken. A minute can
+    // clear the flex gate and still contribute nothing: at a low VO2max the
+    // regression can come out negative, clamp to zero, and lose to the basal
+    // minute. Setting the flag on entry reported a fitness-priced day whose
+    // active total was 0.0 — the same over-report one level down.
     var pricedByFitness = false;
     for (final hr in hrPerMin) {
       if (hr < flexHr) continue; // below flex point → basal only
-      if (fitUsable) pricedByFitness = true;
       final activePerMin =
           activeKcalPerS(coeffs, hr, effHRmax, weightKg, age, vo2max: vo2max) *
               60.0;
       final surplus = activePerMin - basalPerMin;
-      if (surplus > 0) active += surplus;
+      if (surplus > 0) {
+        active += surplus;
+        if (fitUsable) pricedByFitness = true;
+      }
     }
     final basal = basalPerMin * dayMinutes;
     return (
