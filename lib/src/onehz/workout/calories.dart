@@ -158,6 +158,16 @@ class Calories {
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
 
+  /// How long one HR sample may stand in for when the next one is late.
+  ///
+  /// Named rather than left as a default-parameter literal because it is not
+  /// only this package's business: a caller scoring a bout live, sample by
+  /// sample, has to give up at the same point as the re-score of the same
+  /// stream, or the two disagree by whatever a dropout ran over. A default
+  /// argument cannot be referenced from outside, so the two copies of `150.0`
+  /// drifted apart by construction.
+  static const double defaultMergeGapCapS = 150.0;
+
   static CalorieCoeffs resolveCoeffs(String sex) {
     switch (sex.toLowerCase()) {
       case 'male':
@@ -283,8 +293,15 @@ class Calories {
     final basalPerMin = bmrDay / 1440.0;
 
     var active = 0.0;
+    final fitUsable = usableVo2max(vo2max);
+    // Whether the fitness-adjusted regression actually PRICED anything, not
+    // merely whether a usable anchor was handed in. A day spent entirely below
+    // the flex point is all Mifflin, and reporting the fitness model for it
+    // would credit a fitness term that never ran.
+    var pricedByFitness = false;
     for (final hr in hrPerMin) {
       if (hr < flexHr) continue; // below flex point → basal only
+      if (fitUsable) pricedByFitness = true;
       final activePerMin =
           activeKcalPerS(coeffs, hr, effHRmax, weightKg, age, vo2max: vo2max) *
               60.0;
@@ -301,7 +318,7 @@ class Calories {
       // reason usedDefaultHrmax exists: a caller comparing two days, or a user
       // asking why a number moved, cannot otherwise tell that the fitness
       // anchor was supplied and then silently rejected as implausible.
-      usedFitnessModel: usableVo2max(vo2max),
+      usedFitnessModel: pricedByFitness,
     );
   }
 
@@ -324,7 +341,7 @@ class Calories {
     required WorkoutUserProfile profile,
     double? hrmax,
     double? restingHr,
-    double mergeGapCapS = 150.0,
+    double mergeGapCapS = defaultMergeGapCapS,
     double? vo2max,
   }) {
     final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
@@ -350,6 +367,11 @@ class Calories {
     final ts = [for (final i in idx) hrTsSec[i]];
     final bpm = [for (final i in idx) hrBpm[i]];
 
+    final fitUsable = usableVo2max(vo2max);
+    // See dailyEnergy: the flag reports that the fitness regression PRICED a
+    // sample, not that an anchor was available. A bout spent entirely under the
+    // gate is all Harris-Benedict and has no fitness term in it.
+    var pricedByFitness = false;
     var totalKcal = 0.0;
     for (var i = 0; i < ts.length; i++) {
       final b = bpm[i];
@@ -363,6 +385,7 @@ class Calories {
       if (b < activeThreshold) {
         totalKcal += restingRate * dur;
       } else {
+        if (fitUsable) pricedByFitness = true;
         totalKcal +=
             activeKcalPerS(coeffs, b, effHRmax, weightKg, age, vo2max: vo2max) *
                 dur;
@@ -372,7 +395,7 @@ class Calories {
       kcal: totalKcal,
       kj: totalKcal * 4.184,
       usedDefaultAnchors: usedDefaultAnchors,
-      usedFitnessModel: usableVo2max(vo2max),
+      usedFitnessModel: pricedByFitness,
     );
   }
 }

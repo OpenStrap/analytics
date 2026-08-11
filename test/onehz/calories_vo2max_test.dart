@@ -233,6 +233,34 @@ void main() {
       );
     });
 
+    test('a bout spent entirely under the gate did not use the fitness model',
+        () {
+      // The flag reports that the fitness regression PRICED something, not that
+      // an anchor was available. Everything below the gate is Harris-Benedict,
+      // which has no fitness term in it, so claiming the fitness model for a
+      // resting bout credits a calculation that never ran.
+      final easy = [for (var t = 0; t < 300; t++) 65.0];
+      final bout = Calories.estimateBoutCalories(
+        [for (var t = 0; t < 300; t++) t],
+        easy,
+        profile: _male,
+        hrmax: _hrMax,
+        restingHr: _restingHr,
+        vo2max: 50,
+      );
+      expect(bout.kcal, greaterThan(0), reason: 'it was still costed');
+      expect(bout.usedFitnessModel, isFalse);
+    });
+
+    test('a day spent entirely under the flex point reports no fitness model',
+        () {
+      final quiet = <double>[for (var i = 0; i < 1440; i++) 55.0];
+      final e =
+          Calories.dailyEnergy(quiet, profile: _male, hrmax: _hrMax, vo2max: 50);
+      expect(e.active, 0.0);
+      expect(e.usedFitnessModel, isFalse);
+    });
+
     test('resting samples still take the BMR floor, VO2max or not', () {
       // VO2max belongs to the ACTIVE term only. Below the gate the bout bills
       // Harris-Benedict, which has no fitness term at all.

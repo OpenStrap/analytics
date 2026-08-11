@@ -54,6 +54,14 @@ class ExerciseSession {
   /// computed at all.
   final bool caloriesUsedDefaultAnchors;
 
+  /// Which of Keytel's two published active models priced [caloriesKcal]: true
+  /// for the fitness-adjusted one, false for age/mass/sex. Carried for the same
+  /// reason as [caloriesUsedDefaultAnchors] — two bouts scored on different
+  /// models are not comparable, and a VO2max that was supplied and then
+  /// rejected as implausible is otherwise indistinguishable from one that was
+  /// never supplied. False when no calories were computed at all.
+  final bool caloriesUsedFitnessModel;
+
   /// Sport label from the classifier seam ("detected" by default).
   final String sport;
 
@@ -71,6 +79,7 @@ class ExerciseSession {
     required this.caloriesKcal,
     required this.caloriesKJ,
     this.caloriesUsedDefaultAnchors = false,
+    this.caloriesUsedFitnessModel = false,
     this.sport = defaultSportLabel,
   });
 
@@ -88,6 +97,7 @@ class ExerciseSession {
         'calories_kcal': caloriesKcal == null ? null : round6(caloriesKcal!),
         'calories_kj': caloriesKJ == null ? null : round6(caloriesKJ!),
         'calories_used_default_anchors': caloriesUsedDefaultAnchors,
+        'calories_used_fitness_model': caloriesUsedFitnessModel,
         'sport': sport,
       };
 }
@@ -412,6 +422,7 @@ class WorkoutDetector {
       // `hrmax ?? 220` / `restingHr ?? 60` fallback can be caveated, and it used
       // to be computed and dropped on the floor here.
       var calUsedDefaultAnchors = false;
+      var calUsedFitnessModel = false;
       if (profile != null) {
         final winBpmInt = [for (final b in winBpm) b];
         final cal = Calories.estimateBoutCalories(
@@ -426,6 +437,7 @@ class WorkoutDetector {
         kcal = cal.kcal;
         kj = cal.kj;
         calUsedDefaultAnchors = cal.usedDefaultAnchors;
+        calUsedFitnessModel = cal.usedFitnessModel;
       }
 
       final avg = winBpm.reduce((a, b) => a + b) / winBpm.length;
@@ -484,6 +496,7 @@ class WorkoutDetector {
         caloriesKcal: kcal,
         caloriesKJ: kj,
         caloriesUsedDefaultAnchors: calUsedDefaultAnchors,
+        caloriesUsedFitnessModel: calUsedFitnessModel,
         sport: sport,
       ));
     }
