@@ -91,6 +91,16 @@ class Calories {
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
 
+  /// How long one HR sample may stand in for when the next one is late.
+  ///
+  /// Named rather than left as a default-parameter literal because it is not
+  /// only this package's business: a caller scoring a bout live, sample by
+  /// sample, has to give up at the same point as the re-score of the same
+  /// stream, or the two disagree by whatever a dropout ran over. A default
+  /// argument cannot be referenced from outside, so the two copies of `150.0`
+  /// drifted apart by construction.
+  static const double defaultMergeGapCapS = 150.0;
+
   static CalorieCoeffs resolveCoeffs(String sex) {
     switch (sex.toLowerCase()) {
       case 'male':
@@ -210,8 +220,9 @@ class Calories {
   }
 
   /// Estimate (kcal, kJ) for a workout bout. Each sample is weighted by the
-  /// ELAPSED time to the next sample (capped at [mergeGapCapS] = mergeGapS, 150 s),
-  /// so a sparse stream is counted over real seconds.
+  /// ELAPSED time to the next sample (capped at [mergeGapCapS], which defaults
+  /// to [defaultMergeGapCapS] = 150 s), so a sparse stream is counted over real
+  /// seconds.
   ///
   /// [hrTsSec]/[hrBpm] are the bout's HR samples (timestamps in SECONDS, same
   /// length). [hrmax]/[restingHr] anchors (null → 220 / 60 fallback, flagged
@@ -223,7 +234,7 @@ class Calories {
     required WorkoutUserProfile profile,
     double? hrmax,
     double? restingHr,
-    double mergeGapCapS = 150.0,
+    double mergeGapCapS = defaultMergeGapCapS,
   }) {
     final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
     final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;

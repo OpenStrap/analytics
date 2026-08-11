@@ -414,7 +414,17 @@ class WorkoutDetector {
           profile: profile,
           hrmax: effMaxHR,
           restingHr: restHR,
-          mergeGapCapS: mergeGapS,
+          // The published cap, not this class's split threshold. They are the
+          // same number today, but they are not the same quantity, and the cap
+          // really can bind inside a detected bout: [bridgeGapS] is twice
+          // [mergeGapS], so _bridgeRuns stitches an HR-free dropout of up to
+          // 300 s into one bout. A bout straddling a ~252 s dropout measures
+          // 324.62 kcal capped against 349.44 uncapped — 7.1%. Restating one
+          // constant as the other would mean a later move of the cap silently
+          // rescored auto-detected bouts against a value the live gauge and
+          // manual_session no longer use, which is the whole reason both sides
+          // read the same constant.
+          mergeGapCapS: Calories.defaultMergeGapCapS,
         );
         kcal = cal.kcal;
         kj = cal.kj;
