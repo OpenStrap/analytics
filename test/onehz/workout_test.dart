@@ -352,6 +352,74 @@ void main() {
     });
   });
 
+  test('a bridged dropout is billed at the published cap, through detect()', () {
+    // The reason detect() reads Calories.defaultMergeGapCapS rather than its own
+    // mergeGapS: bridgeGapS is TWICE mergeGapS, so _bridgeRuns stitches an
+    // HR-free dropout of up to 300 s into a single bout, and the cap really does
+    // bind inside one. Everything else about the cap is tested against
+    // estimateBoutCalories directly, which cannot observe that the detector
+    // passes the right constant.
+    const gapS = 252; // > the 150 s cap, < the 300 s bridge window
+    final hrTs = <int>[];
+    final hrBpm = <double>[];
+    for (var t = 0; t < 600; t++) {
+      hrTs.add(t);
+      hrBpm.add(150);
+    }
+    for (var t = 600 + gapS; t < 1200 + gapS; t++) {
+      hrTs.add(t);
+      hrBpm.add(150);
+    }
+    // Motion has to stay above the gate across the gap or the runs never merge.
+    final gTs = <int>[];
+    final gx = <double>[], gy = <double>[], gz = <double>[];
+    for (var t = 0; t < 1200 + gapS; t++) {
+      gTs.add(t);
+      gx.add(t.isEven ? 0.0 : 0.6);
+      gy.add(0);
+      gz.add(1);
+    }
+
+    const profile =
+        WorkoutUserProfile(weightKg: 75, heightCm: 178, age: 30, sex: 'male');
+    final out = WorkoutDetector.detect(
+      hrTs: hrTs,
+      hrBpm: hrBpm,
+      gravTs: gTs,
+      gx: gx,
+      gy: gy,
+      gz: gz,
+      maxHR: 190,
+      restingHR: 60,
+      profile: profile,
+    );
+
+    expect(out, hasLength(1), reason: 'the dropout must be bridged, not split');
+    final session = out.first;
+
+    // Score the same samples both ways. The detector must match the capped one.
+    double score(double cap) => Calories.estimateBoutCalories(
+          hrTs,
+          hrBpm,
+          profile: profile,
+          hrmax: 190,
+          restingHr: 60,
+          mergeGapCapS: cap,
+        ).kcal;
+
+    final capped = score(Calories.defaultMergeGapCapS);
+    final uncapped = score(gapS.toDouble() + 1);
+
+    // Not exact: detect() prices its own bout window, which the run boundaries
+    // trim by a sample or two against the raw stream scored here — worth a few
+    // tenths of a kcal. The capped and uncapped figures are ~24 kcal apart, so
+    // a 2 kcal tolerance still tells them apart by an order of magnitude.
+    expect(uncapped - capped, greaterThan(20.0),
+        reason: 'if these converge the assertions below prove nothing');
+    expect((session.caloriesKcal! - capped).abs(), lessThan(2.0));
+    expect((session.caloriesKcal! - uncapped).abs(), greaterThan(20.0));
+  });
+
   group('Calories (Keytel + Harris–Benedict)', () {
     test('male/female coefficients differ; active > resting', () {
       // 10 min @ 150 bpm, 1 Hz.
