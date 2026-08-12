@@ -188,27 +188,71 @@ void main() {
           'push');
     });
 
-    test('maintain band base window is [10,15]', () {
+    test('maintain band base window is [9,14]', () {
       final m =
           strainTarget(recovery0to100: 70, ctl: null, atl: null, tsb: null);
-      expect(m.value!.targetMin, closeTo(10, 1e-9));
-      expect(m.value!.targetMax, closeTo(15, 1e-9));
+      expect(m.value!.targetMin, closeTo(9, 1e-9));
+      expect(m.value!.targetMax, closeTo(14, 1e-9));
       expect(m.tier, Tier.estimate);
       expect(m.confidence, closeTo(0.6, 1e-9));
     });
 
-    test('high fatigue (atl−ctl>10) lowers the window', () {
-      // maintain base [10,15]; fatigue = 30−10 = 20 (>10) → lo−1, hi−2 → [9,13].
-      final m = strainTarget(recovery0to100: 70, ctl: 10, atl: 30, tsb: null);
-      expect(m.value!.targetMin, closeTo(9, 1e-9));
-      expect(m.value!.targetMax, closeTo(13, 1e-9));
+    test('REGRESSION: a recover target is reachable, not below the floor', () {
+      // The bands were sized for a scale the app never produced: "recover 4–8"
+      // sat BELOW what an inactive worn day scored (~13 on the old map), so a
+      // low-recovery day asked for a number the user had already passed before
+      // getting out of bed. A recover ceiling must sit above a rest day (2–4)
+      // and below a typical active day (8–11).
+      final m = strainTarget(recovery0to100: 20, ctl: null, atl: null, tsb: null);
+      expect(m.value!.band, 'recover');
+      expect(m.value!.targetMin, closeTo(0, 1e-9));
+      expect(m.value!.targetMax, greaterThan(4.0));
+      expect(m.value!.targetMax, lessThan(8.0));
     });
 
-    test('positive freshness (tsb>5) raises the ceiling', () {
-      // maintain base [10,15]; low fatigue so tsb branch applies → hi+1 → [10,16].
-      final m = strainTarget(recovery0to100: 70, ctl: 20, atl: 20, tsb: 8);
-      expect(m.value!.targetMin, closeTo(10, 1e-9));
-      expect(m.value!.targetMax, closeTo(16, 1e-9));
+    test('a push target stays inside what a real day can reach', () {
+      // 21 is a maximal day. A push ceiling above ~19 is not a target, it is a
+      // dare — the old band topped out at 18 on a scale whose real ceiling was
+      // ~16 for a marathon.
+      final m = strainTarget(recovery0to100: 90, ctl: null, atl: null, tsb: null);
+      expect(m.value!.band, 'push');
+      expect(m.value!.targetMin, closeTo(13, 1e-9));
+      expect(m.value!.targetMax, lessThanOrEqualTo(19.0));
+    });
+
+    test('fatigue is judged on the ATL:CTL RATIO, not a raw TRIMP difference', () {
+      // ctl/atl arrive as raw daily TRIMP (hundreds), but the thresholds were
+      // sized as if they were 0–21 strain points: `atl − ctl > 10` fired on
+      // ordinary week-to-week noise. 320 vs 300 is a 6.7 % lift — not fatigue —
+      // yet the old absolute test (diff 20 > 10) shrank the window for it.
+      final noise = strainTarget(recovery0to100: 70, ctl: 300, atl: 320, tsb: null);
+      expect(noise.value!.targetMin, closeTo(9, 1e-9));
+      expect(noise.value!.targetMax, closeTo(14, 1e-9));
+
+      // A genuine 30 % acute lift over chronic still lowers the window.
+      final real = strainTarget(recovery0to100: 70, ctl: 100, atl: 130, tsb: null);
+      expect(real.value!.targetMin, closeTo(8, 1e-9));
+      expect(real.value!.targetMax, closeTo(12, 1e-9));
+    });
+
+    test('freshness is judged on TSB relative to CTL, not a raw TRIMP value', () {
+      // tsb 6 against a chronic load of 300 is 2 % — noise, not freshness.
+      final noise = strainTarget(recovery0to100: 70, ctl: 300, atl: 294, tsb: 6);
+      expect(noise.value!.targetMax, closeTo(14, 1e-9));
+
+      // tsb 20 against a chronic load of 100 is a real 20 % taper.
+      final real = strainTarget(recovery0to100: 70, ctl: 100, atl: 80, tsb: 20);
+      expect(real.value!.targetMax, closeTo(15, 1e-9));
+    });
+
+    test('no load history leaves the recovery window untouched', () {
+      final m = strainTarget(recovery0to100: 70, ctl: null, atl: null, tsb: null);
+      expect(m.value!.targetMin, closeTo(9, 1e-9));
+      expect(m.value!.targetMax, closeTo(14, 1e-9));
+      // A zero chronic load must not divide by zero into an adjustment.
+      final zero = strainTarget(recovery0to100: 70, ctl: 0, atl: 0, tsb: 0);
+      expect(zero.value!.targetMin, closeTo(9, 1e-9));
+      expect(zero.value!.targetMax, closeTo(14, 1e-9));
     });
 
     test('targets stay within [0,21] and hi > lo', () {

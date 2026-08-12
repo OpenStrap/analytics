@@ -129,31 +129,44 @@ Metric<StrainTarget> strainTarget({
     );
   }
   final rec = recovery0to100.clamp(0.0, 100.0);
+  // Bands sit on the SAME distribution `strainScore` now produces: an inactive
+  // day ≈0, a rest day with a walk 2–4, a typical active day 8–11, a hard
+  // session 14–17, a maximal day 19–21. They used to be sized for a scale the
+  // app never produced — "recover 4–8" was below what an inactive worn day
+  // scored, and "push 14–18" needed more than a marathon to reach.
   double lo;
   double hi;
   String band;
   if (rec < 40) {
-    lo = 4;
-    hi = 8;
+    lo = 0;
+    hi = 5;
     band = 'recover';
   } else if (rec < 60) {
-    lo = 7;
-    hi = 11;
+    lo = 5;
+    hi = 10;
     band = 'ease';
   } else if (rec < 80) {
-    lo = 10;
-    hi = 15;
+    lo = 9;
+    hi = 14;
     band = 'maintain';
   } else {
-    lo = 14;
+    lo = 13;
     hi = 18;
     band = 'push';
   }
-  final fatigue = (atl != null && ctl != null) ? (atl - ctl) : null;
-  if (fatigue != null && fatigue > 10) {
+  // ctl/atl/tsb arrive as raw daily TRIMP (hundreds), NOT strain points, so
+  // these comparisons have to be scale-free. The thresholds used to be absolute
+  // (`atl − ctl > 10`, `tsb > 5`) — magnitudes sized for the 0–21 scale — which
+  // on TRIMP-scale inputs fired on ordinary week-to-week noise: a 320-vs-300
+  // acute:chronic pair is a 6.7 % lift, not fatigue, yet it shrank the window.
+  // Expressed against CTL, the same thresholds mean what they were meant to.
+  final hasLoad = ctl != null && ctl > 0;
+  final fatigueRatio = (hasLoad && atl != null) ? atl / ctl : null;
+  final freshnessRatio = (hasLoad && tsb != null) ? tsb / ctl : null;
+  if (fatigueRatio != null && fatigueRatio > 1.10) {
     lo -= 1;
     hi -= 2;
-  } else if (tsb != null && tsb > 5) {
+  } else if (freshnessRatio != null && freshnessRatio > 0.10) {
     hi += 1;
   }
   lo = lo.clamp(0.0, 21.0);
