@@ -65,42 +65,89 @@ Metric<double> banisterTrimp(
   );
 }
 
-/// Log-squash a raw TRIMP into a 0–21 headline "strain" score.
+/// Fraction of heart-rate reserve that simply BEING AWAKE costs.
 ///
-/// Raw Banister TRIMP grows roughly linearly with duration·intensity and lands
-/// in the hundreds for a normal active day (~335), which is meaningless as a
-/// headline number. A logarithmic squash compresses it into a bounded WHOOP-like
-/// 0–21 scale where each extra point is progressively harder to earn:
+/// Whole-day Banister TRIMP counts every waking minute above resting, so ~16 h
+/// of ordinary living accrues ~180 TRIMP before any exercise happens. That is
+/// the cost of being alive, not training load, and billing it as load is what
+/// put an INACTIVE full-wear day at ~13/21 on the old scale. Quiet waking
+/// (sitting, standing, moving about the house) sits ≈20 % of HRR above resting,
+/// so that much is treated as the day's overhead rather than as effort.
+const double quietWakingHrr = 0.20;
+
+/// Net TRIMP — earned ABOVE the quiet-waking baseline — that defines a maximal
+/// day and maps to the top of the scale.
 ///
-///     strain(trimp) = min(21, ln(trimp + 1) / ln(1.5))
+/// The old map put 21 at a raw TRIMP of ~4987, i.e. ≈35 h at 80 % HRR: the top
+/// third of the scale was unreachable by any human day, so the headline number
+/// never used the range it advertised.
+const double maximalNetTrimp = 400.0;
+
+/// Curvature of the 0–21 map; higher gives more resolution at the low end.
 ///
-/// Check-points: 0 → 0; 335 → ln(336)/ln(1.5) ≈ 14.34 (cap not hit).
-double strainScore(double trimp) {
-  if (trimp <= 0) return 0.0;
-  final s = math.log(trimp + 1) / math.log(1.5);
-  return math.min(21.0, s);
+/// Calibrated together with [maximalNetTrimp] so that, for a representative
+/// profile (RHR 60, HRmax 187, 16 h awake), a day scores:
+///   inactive → ~0 · rest + a walk → 2–4 · 45 min moderate run → 8–11 ·
+///   90 min hard session → 14–17 · 5 h at 160 bpm → 21.
+const double strainCurvature = 15.0;
+
+/// The TRIMP that [wakeMinutes] of ordinary waking accrues on its own.
+///
+/// Scales with the wake window ACTUALLY observed, so a partial-wear day is not
+/// charged a full day's overhead (a 2 h inactive wear window would otherwise
+/// come out negative and clamp, while a 16 h one read as real effort).
+double baselineTrimp(double wakeMinutes, {bool female = false}) =>
+    wakeMinutes *
+    quietWakingHrr *
+    StrainScorer.banisterY(quietWakingHrr, female: female);
+
+/// Log-map the TRIMP EARNED ABOVE baseline into a 0–21 headline "strain" score.
+///
+///     net    = trimp − baselineTrimp(wakeMinutes)
+///     u      = min(1, net / maximalNetTrimp)
+///     strain = 21 · ln(1 + u·(C−1)) / ln(C),  C = [strainCurvature]
+///
+/// [wakeMinutes] is the observed waking wear window that produced [trimp] — it
+/// sets the baseline, so it is required rather than assumed.
+double strainScore(
+  double trimp, {
+  required double wakeMinutes,
+  bool female = false,
+}) {
+  final net = trimp - baselineTrimp(wakeMinutes, female: female);
+  if (net <= 0) return 0.0;
+  final u = math.min(1.0, net / maximalNetTrimp);
+  final s =
+      21.0 * math.log(1 + u * (strainCurvature - 1)) / math.log(strainCurvature);
+  return math.min(21.0, math.max(0.0, s));
 }
 
-/// Headline 0–21 strain as a Metric, alongside the raw TRIMP (HIGH/EST tier).
+/// Headline 0–21 strain as a Metric, alongside the raw TRIMP (EST tier).
 ///
-/// [trimp] the raw Banister TRIMP for the day/session. Returns absent when no
-/// TRIMP is available (never fabricate a strain from nothing).
-Metric<double> strainScoreMetric(double? trimp) {
-  const inputs = ['trimp'];
-  if (trimp == null || trimp < 0) {
+/// [trimp] the raw Banister TRIMP for the day/session, [wakeMinutes] the wake
+/// window it was accumulated over. Absent when either is missing: the baseline
+/// subtraction is meaningless without a wake window, and guessing one silently
+/// mis-scores every partial-wear day.
+Metric<double> strainScoreMetric(
+  double? trimp, {
+  required double? wakeMinutes,
+  bool female = false,
+}) {
+  const inputs = ['trimp', 'wake_minutes'];
+  if (trimp == null || trimp < 0 || wakeMinutes == null || wakeMinutes <= 0) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'no TRIMP available for a strain score',
+      note: 'strain needs a TRIMP and the wake window it was measured over',
     );
   }
   return Metric<double>(
-    value: strainScore(trimp),
+    value: strainScore(trimp, wakeMinutes: wakeMinutes, female: female),
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'headline 0–21 strain = log-squash of raw TRIMP '
-        '(min(21, ln(trimp+1)/ln(1.5))); wrist-HR estimate',
+    note: 'headline 0–21 strain = log map of TRIMP earned above the '
+        'quiet-waking baseline; wrist-HR estimate',
   );
 }
 

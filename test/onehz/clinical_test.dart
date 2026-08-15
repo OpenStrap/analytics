@@ -580,21 +580,35 @@ void main() {
     });
   });
 
-  group('strain score (0-21 log-squash of TRIMP)', () {
-    test('pins TRIMP -> strain check-points', () {
-      expect(strainScore(0), closeTo(0.0, 1e-9));
-      expect(strainScore(335), closeTo(14.347, 1e-2));
-      // monotone + capped at 21.
-      expect(strainScore(1e9), closeTo(21.0, 1e-9));
-      expect(strainScore(100) < strainScore(335), isTrue);
+  // The CALIBRATION of this scale (what a rest / active / hard / maximal day
+  // scores) lives in strain_calibration_test.dart, asserted on real days rather
+  // than on the formula restated. This group keeps only the mechanical
+  // properties of the map itself.
+  group('strain score (0-21 map of TRIMP above the waking baseline)', () {
+    test('subtracts the quiet-waking baseline for the observed wake window', () {
+      // 960 waking minutes accrue ~180 TRIMP just by being awake. Charging that
+      // as effort is what put an inactive day at 12.8/21.
+      expect(baselineTrimp(960), closeTo(180.4, 0.5));
+      expect(strainScore(180.0, wakeMinutes: 960), 0.0);
+      // Half the wear window, half the allowance.
+      expect(baselineTrimp(480), closeTo(baselineTrimp(960) / 2, 1e-9));
     });
 
-    test('strainScoreMetric is HIGH/EST and absent on null', () {
-      final m = strainScoreMetric(335);
+    test('is monotone, floored at 0 and capped at 21', () {
+      expect(strainScore(0, wakeMinutes: 960), closeTo(0.0, 1e-9));
+      expect(strainScore(1e9, wakeMinutes: 960), closeTo(21.0, 1e-9));
+      expect(
+        strainScore(300, wakeMinutes: 960) < strainScore(400, wakeMinutes: 960),
+        isTrue,
+      );
+    });
+
+    test('strainScoreMetric is EST tier and absent without either input', () {
+      final m = strainScoreMetric(392.9, wakeMinutes: 960);
       expect(m.present, isTrue);
-      expect(m.value, closeTo(14.347, 1e-2));
       expect(m.tier, 'ESTIMATE');
-      expect(strainScoreMetric(null).present, isFalse);
+      expect(strainScoreMetric(null, wakeMinutes: 960).present, isFalse);
+      expect(strainScoreMetric(335, wakeMinutes: null).present, isFalse);
     });
   });
 
