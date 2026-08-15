@@ -155,7 +155,7 @@ Metric<Readiness> readinessComposite(
   // composite z (glass-box: contributions are definitional within the formula).
   final normDrivers = <Driver>[
     for (final d in drivers)
-      Driver(d.label, round6(d.contribution / weightSum), detail: d.detail)
+      Driver(d.label, roundTo(d.contribution / weightSum, 6), detail: d.detail)
   ];
   // Rank by |contribution| (the deterministic-narrative driver ordering).
   normDrivers.sort((a, b) => b.contribution.abs().compareTo(a.contribution.abs()));

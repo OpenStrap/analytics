@@ -72,15 +72,21 @@ List<IllnessDay> illnessCusum(
 }) {
   final n = rhr.length;
   final out = <IllnessDay>[];
+  // CALENDAR days, not rows. The caller passes only the days that produced a
+  // derived row, so a positional window silently stretched a "28-day baseline"
+  // over months after a wear gap, and a positional persistDays let an elevated
+  // Monday and an elevated night three weeks later read as "sustained".
+  final day = calendarDays(dates);
   var cusum = 0.0;
   var yellowRun = 0;
   var normalRun = 0;
+  var lastScoredDay = -1 << 20;
   for (var i = 0; i < n; i++) {
     final r = rhr[i];
     // Robust baseline from the trailing window (valid nights only).
-    final lo = math.max(0, i - baselineDays);
     final window = <double>[];
-    for (var j = lo; j < i; j++) {
+    for (var j = i - 1; j >= 0; j--) {
+      if (day[i] - day[j] > baselineDays) break;
       final v = rhr[j];
       if (v != null) window.add(v);
     }
@@ -114,6 +120,14 @@ List<IllnessDay> illnessCusum(
           need: degenerateBaselineNote));
       continue;
     }
+    // A break in the calendar breaks every "N nights running" counter — the
+    // runs below mean CONSECUTIVE NIGHTS, not consecutive rows.
+    if (day[i] - lastScoredDay > 1) {
+      yellowRun = 0;
+      normalRun = 0;
+    }
+    lastScoredDay = day[i];
+
     final z = (r - med) / scale;
     // One-sided upper CUSUM on elevation (RHR up = potential illness).
     cusum = math.max(0, cusum + (z - k));

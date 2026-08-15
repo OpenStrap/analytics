@@ -68,7 +68,10 @@ void main() {
       for (var d = 0; d < 7; d++) {
         regular.addAll(day());
       }
-      final mReg = sleepRegularityIndex(regular, epochsPerDay: epd);
+      // sleepRegularityIndex was a SECOND, gap-blind Phillips SRI (A-21) and
+      // has been deleted; phillipsSri is the live one and takes a validity mask
+      // so holes cannot fabricate concordance.
+      final mReg = phillipsSri(regular, epd);
       expect(mReg.present, isTrue);
       expect(mReg.value!.sri, closeTo(100.0, 0.001),
           reason: 'identical days => perfect 24h concordance');
@@ -79,7 +82,7 @@ void main() {
         final shifted = d.isEven ? day() : day().map((b) => !b).toList();
         irregular.addAll(shifted);
       }
-      final mIrr = sleepRegularityIndex(irregular, epochsPerDay: epd);
+      final mIrr = phillipsSri(irregular, epd);
       expect(mIrr.value!.sri, lessThan(mReg.value!.sri));
       expect(mIrr.value!.sri, lessThan(40));
     });
@@ -430,6 +433,49 @@ void main() {
         totalDaysObserved: 21,
       );
       expect(m.value!.typeLabel, contains('evening'));
+    });
+  });
+
+  group('serialised envelopes are always jsonEncode-able', () {
+    test('an under-baselined glass-box input is ABSENT, never NaN', () {
+      // T-11 / A-00 — the worst finding in the R1 sweep. An input with fewer
+      // than `minHistory` days was still pushed into `breakdown` carrying
+      // `percentileOfYou: double.nan`; `round6` passed NaN straight through and
+      // edge's `jsonEncode(buildCrossDayBundle(...))` THREW, so a catch
+      // discarded the ENTIRE cross-day bundle — illness, anomaly, CTL/ATL/TSB,
+      // chronotype, sleep coach, VO2max, every percentile — for every user from
+      // day 3 to day 8, and permanently for anyone with a sparse input.
+      final inputs = [
+        GlassBoxInput(
+            label: 'hrv',
+            value: 60,
+            history: List<double>.generate(20, (i) => 50.0 + i),
+            weight: 0.40),
+        GlassBoxInput(
+            label: 'temp',
+            value: 0.5,
+            history: const [0.1, 0.2], // only 2 days
+            weight: 0.12,
+            lowerIsBetter: true),
+      ];
+      final m = glassBoxReadiness(inputs);
+      final json = m.toJson((v) => v.toJson());
+      expect(() => jsonEncode(json), returnsNormally);
+
+      final breakdown = (json['value'] as Map)['breakdown'] as List;
+      final temp = breakdown.firstWhere((b) => (b as Map)['label'] == 'temp')
+          as Map<String, dynamic>;
+      expect(temp['percentile_of_you'], isNull);
+      expect(temp['used'], isFalse);
+      // Machine-readable reason, the package convention.
+      expect(temp['note'], 'need_baseline:have=2,need=7');
+    });
+
+    test('round6 encodes a non-finite as null, not NaN', () {
+      expect(round6(double.nan), isNull);
+      expect(round6(double.infinity), isNull);
+      expect(round6(1.23456789), 1.234568);
+      expect(() => jsonEncode({'x': round6(double.nan)}), returnsNormally);
     });
   });
 }

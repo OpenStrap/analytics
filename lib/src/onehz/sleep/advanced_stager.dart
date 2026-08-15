@@ -120,7 +120,10 @@ class HypnogramMetrics {
   final int tibS;
   final int tstS;
   final int sptS;
-  final int solS;
+  /// Sleep-onset latency (s). NULL when NOTHING staged as sleep — reporting
+  /// the whole time in bed as "time to fall asleep" alongside TST 0 is a
+  /// fabricated measurement, not an abstention.
+  final int? solS;
   final double remLatencyS; // NaN if no REM
   final int wasoS;
   final double efficiency; // [0,1]
@@ -1852,7 +1855,8 @@ class AdvancedSleepStager {
       if (s.stage == 'rem') remS += d;
       if (s.stage == 'light') lightS += d;
     }
-    int onset, sptEnd, sol;
+    int onset, sptEnd;
+    int? sol;
     if (sleepSegs.isNotEmpty) {
       onset = sleepSegs.first.start;
       sptEnd = sleepSegs.last.end;
@@ -1860,7 +1864,7 @@ class AdvancedSleepStager {
     } else {
       onset = session.end;
       sptEnd = session.end;
-      sol = tib;
+      sol = null; // never observed sleep — no latency to report
     }
     final remSegs = sleepSegs.where((s) => s.stage == 'rem').toList();
     final remLatency =

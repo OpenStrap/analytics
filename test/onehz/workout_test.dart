@@ -674,4 +674,33 @@ void main() {
       expect(caveated.toJson()['calories_used_default_anchors'], isTrue);
     });
   });
+
+  group('autoDetectWorkouts — a data GAP is not continuity', () {
+    test('two efforts either side of an off-wrist hole stay two workouts', () {
+      // T-13. Only a low-HR DIP used to close a span. Edge filters `hr > 0`
+      // before calling, so an off-skin stretch produces no samples at all — the
+      // loop never saw the hole and the span simply resumed. Two 13-minute
+      // efforts 40 minutes apart came out as ONE 64.98-minute workout whose
+      // mean HR (a mean over present samples) still read normal.
+      final ts = <int>[];
+      final bpm = <int>[];
+      void effort(int t0) {
+        for (var s = 0; s < 13 * 60; s++) {
+          ts.add(t0 + s);
+          bpm.add(140);
+        }
+      }
+
+      effort(0);
+      effort(52 * 60); // 40-minute hole: NO samples
+      final out =
+          autoDetectWorkouts(hrTs: ts, hrBpm: bpm, restingBpm: 55, maxBpm: 190)
+                  .value ??
+              const <DetectedWorkout>[];
+      expect(out.length, 2, reason: 'pre-fix: 1 workout of 64.98 min');
+      for (final w in out) {
+        expect((w.endSec - w.startSec) / 60.0, closeTo(12.98, 0.1));
+      }
+    });
+  });
 }

@@ -40,17 +40,15 @@ void main() {
       final s = segmentSleep(accel, hr,
           forcedWindow: (onsetSec: onset, offsetSec: onset + 8 * 3600));
 
-      // The window itself is the user's word, so it is honored...
-      expect(s.present, isTrue);
-      expect(s.inBedSec, 8 * 3600);
-      // ...but NOTHING inside it may be claimed as sleep.
-      expect(s.tstSec, 0, reason: 'no data ⇒ no sleep (pre-fix: 28800)');
-      expect(s.lightSec, 0, reason: 'pre-fix: the whole window read "light"');
-      expect(s.deepSec, 0);
-      expect(s.remSec, 0);
-      expect(s.wakeSec, 8 * 3600);
-      expect(s.efficiencyPct, 0.0, reason: 'pre-fix: 100.0');
-      expect(s.stages.every((x) => x == SleepStage.wake), isTrue);
+      // RE-PINNED 2026-08: this used to be `present` with tstSec 0 and
+      // efficiencyPct 0.0 — which reads to the user as "0 h 0 m slept, 0 %
+      // efficiency", a measurement of a night we never observed. A window in
+      // which not one second stages as sleep is an ABSTENTION.
+      expect(s.present, isFalse,
+          reason: 'was: present with tst 0 / efficiency 0 %; pre-that: 28800 s');
+      expect(s.tstSec, isNull);
+      expect(s.efficiencyPct, isNull);
+      expect(s.stages, isEmpty);
     });
   });
 
@@ -96,11 +94,11 @@ void main() {
       seg(2 * 3600, active: true);
 
       final s = segmentSleep(accel, hr, tzOffsetSec: 0);
-      expect(s.tstSec, 0, reason: 'pre-fix: 28438 s of sleep from zero HR');
-      expect(s.efficiencyPct, 0.0, reason: 'pre-fix: 100.0');
-      expect(s.remSec, 0);
-      expect(s.deepSec, 0);
-      expect(s.lightSec, 0);
+      // RE-PINNED 2026-08: absent, not "present with zero sleep" — see above.
+      expect(s.present, isFalse,
+          reason: 'pre-fix: 28438 s of sleep from zero HR');
+      expect(s.tstSec, isNull);
+      expect(s.efficiencyPct, isNull);
     });
   });
 
@@ -198,15 +196,19 @@ void main() {
     }
 
     test('cardio_stager: only the bout with REAL flanking sleep is bridged', () {
-      // 15 min sleep, then 5 × (10 min wake + 1 min sleep). The cardio rule
-      // table bridges ≤10 min of wake given ≥15 min of flanking sleep, so bout
-      // #1 legitimately bridges. Bouts #2-#5 are flanked by ONE minute of sleep
-      // and must survive — pre-fix each bridged bout was counted as context for
-      // the next, so all five collapsed and WASO went to 0.
-      final sm = fragmented(leadMin: 15, wakeMin: 10, reps: 5);
+      // 15 min sleep, then 5 × (4 min wake + 1 min sleep). The rule table is
+      // now Webster's published one — ≥15 min of flanking sleep bridges ≤4 min
+      // of wake — so bout #1 legitimately bridges. Bouts #2-#5 are flanked by
+      // ONE minute of sleep and must survive: pre-fix each bridged bout was
+      // counted as context for the next, so all five collapsed and WASO hit 0.
+      //
+      // RE-PINNED with the rule table: this used to use 10-min bouts, which the
+      // old non-published [15 → 10] row bridged. Under Webster a 10-min bout is
+      // never bridgeable at all, so the case stopped exercising the cascade.
+      final sm = fragmented(leadMin: 15, wakeMin: 4, reps: 5);
       websterRescoreCardio(sm, 30);
-      expect(wakeInBody(sm), 4 * 20,
-          reason: 'four 10-min bouts survive; pre-fix: 0 (full cascade)');
+      expect(wakeInBody(sm), 4 * 8,
+          reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
     });
 
     test('stager: only the bout with REAL flanking sleep is bridged', () {
@@ -478,30 +480,15 @@ void main() {
   // (9) CPC: the Thomas 2005 HFC/LFC ratio is a MEASUREMENT or it is nothing —
   //     never a sentinel, never a NaN dressed up as a number.
   // ═══════════════════════════════════════════════════════════════════════════
-  group('honesty — cardiopulmonary coupling ratio', () {
-    test('a spectrum with zero coupling power abstains '
-        '(pre-fix: present, hfc=0 lfc=0 cpc_ratio=0.0)', () {
-      // Every beat carries the SAME timestamp (a stuck clock / corrupt offload)
-      // and the NN deviations cancel exactly, so the Lomb-Scargle power is 0.0
-      // at every frequency and both bands integrate to exactly zero. HFC/LFC is
-      // then 0/0 — undefined. Pre-fix it shipped as cpc_ratio 0.0, i.e. "the
-      // least stable sleep measurable".
-      final nn = List<double>.filled(64, 1000.0);
-      nn[62] = 900.0;
-      nn[63] = 1100.0;
-      final ts = List<double>.filled(64, 0.0);
-
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isFalse, reason: 'pre-fix: present with cpc_ratio 0.0');
-      expect(m.value, isNull);
-      expect(m.confidence, 0);
-      expect(m.note, contains('undefined'));
-    });
-
-    test('a NaN anywhere in the NN series abstains '
-        '(pre-fix: present at confidence 0.85 with NaN band powers)', () {
-      // A full hour of beats → the length-driven confidence pins at its 0.85
-      // cap, which is exactly what made the pre-fix output so convincing.
+  group('honesty — cardiopulmonary coupling is WITHDRAWN', () {
+    test('always absent, with the reason attached', () {
+      // It never measured coupling. Thomas 2005 needs a respiration channel
+      // INDEPENDENT of the beat times; the "surrogate" here was the NN series
+      // linearly detrended, so sqrt(P_rr . P_resp) collapsed to P_rr and
+      // cpc_ratio equalled the plain RR periodogram HF/LF ratio — measured
+      // 84.493910 vs 84.493190 on this shape, a ratio of 1.0000085. A healthy
+      // record used to "still report a real ratio"; that was the bug, not the
+      // control case.
       final nn = <double>[];
       final ts = <double>[];
       var t = 0.0;
@@ -511,36 +498,35 @@ void main() {
         nn.add(rr);
         ts.add(t);
       }
-      nn[1000] = double.nan; // one poisoned beat
-
       final m = cardiopulmonaryCoupling(nn, ts);
-      // `variance <= 0` does not catch NaN, so the whole spectrum came out NaN
-      // and was published as hfc/lfc/vlfc = NaN with cpc_ratio 0.0.
-      expect(m.present, isFalse,
-          reason: 'pre-fix: present, conf 0.85, hfc/lfc/vlfc = NaN');
+      expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(m.confidence, 0);
-      expect(m.note, contains('non-finite'));
+      expect(m.note, contains('respiration channel'));
     });
 
-    test('a healthy RSA record still reports a real ratio', () {
-      // Guard against over-abstention: the control case must survive.
+    test('the ratio it used to publish was the RR periodogram HF/LF', () {
+      // The assertion that would have failed from the first commit (T-02).
       final nn = <double>[];
-      final ts = <double>[];
+      final tSec = <double>[];
       var t = 0.0;
-      for (var i = 0; i < 300; i++) {
+      for (var i = 0; i < 3600; i++) {
         final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
         t += rr;
         nn.add(rr);
-        ts.add(t);
+        tSec.add(t / 1000.0);
       }
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isTrue);
-      final c = m.value!;
-      expect(c.cpcRatio.isFinite, isTrue);
-      expect(c.cpcRatio, greaterThan(0));
-      expect(c.cpcRatio, isNot(999.0));
-      expect(c.lfc, greaterThan(0));
+      final freqs = freqGrid(0.001, 0.45, 200);
+      final ls = lombScargle(tSec, nn, freqs)!;
+      // The old "coupling spectrum" was sqrt(P_rr . P_resp) with resp = the
+      // detrended NN — reconstruct it and show it is P_rr to 5 significant
+      // figures, which is why the metric had to go.
+      final rrRatio = ls.bandPower(0.1, 0.4) / ls.bandPower(0.01, 0.1);
+      final coupling = LombScargle([
+        for (final pt in ls.spectrum) LsPoint(pt.freqHz, math.sqrt(pt.psd * pt.psd))
+      ]);
+      final oldCpc = coupling.bandPower(0.1, 0.4) / coupling.bandPower(0.01, 0.1);
+      expect(oldCpc / rrRatio, closeTo(1.0, 1e-4));
     });
   });
 }

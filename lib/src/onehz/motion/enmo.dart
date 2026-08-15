@@ -188,6 +188,7 @@ EnmoResult enmoSeries(
   double? gRef,
   int minSamplesPerMinute = 30,
   double gravityWindowS = defaultGravityWindowS,
+  int? expectedMinutes,
 }) {
   final valid = samples.where((s) => s.valid).toList()
     ..sort((a, b) => a.tsMs.compareTo(b.tsMs));
@@ -268,7 +269,15 @@ EnmoResult enmoSeries(
       dynAmp,
     ));
   }
-  final coverage = minutes.isEmpty ? 0.0 : covered / minutes.length;
+  // COVERAGE DENOMINATOR. `minutes` holds only the minutes that had at least
+  // one sample, so `covered / minutes.length` reported 1.0 for a day worn 4 h
+  // out of 24. Divide by the elapsed minute SPAN instead, which at least counts
+  // interior holes; pass [expectedMinutes] (e.g. 1440 for a calendar day) to
+  // count the unworn ends too.
+  final spanMinutes =
+      minutes.isEmpty ? 0 : keys.last - keys.first + 1;
+  final denom = expectedMinutes ?? spanMinutes;
+  final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
   return EnmoResult(ref, minutes, coverage);
 }
 
@@ -277,10 +286,13 @@ EnmoResult enmoSeries(
 /// minute: sedentary / light / moderate / vigorous, by quartile of the user's
 /// own moving (ENMO>0) distribution. Sedentary is anything at/near zero ENMO.
 class IntensityBands {
-  /// percentile cut-points (g) on the user's moving distribution
-  final double lightCut;
-  final double moderateCut;
-  final double vigorousCut;
+  /// percentile cut-points (g) on the user's moving distribution.
+  /// NULL when there were too few moving minutes to set personal cut-points —
+  /// the labels are still valid (sedentary/light), the cut-points are simply
+  /// not yet knowable. Never NaN.
+  final double? lightCut;
+  final double? moderateCut;
+  final double? vigorousCut;
   final List<String> labels; // per input minute
   final Map<String, int> minutesInBand;
   const IntensityBands(
@@ -320,8 +332,7 @@ Metric<IntensityBands> relativeIntensityBands(
       counts[l] = counts[l]! + 1;
     }
     return Metric<IntensityBands>(
-      value: IntensityBands(
-          double.nan, double.nan, double.nan, labels, counts),
+      value: IntensityBands(null, null, null, labels, counts),
       confidence: 0.25,
       tier: Tier.relative,
       inputs_used: inputs,

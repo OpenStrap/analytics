@@ -634,30 +634,23 @@ void main() {
   });
 
   // ---------------------------------------------------------------------- CPC
-  group('Cardiopulmonary Coupling', () {
-    test('NN with injected ~0.25 Hz respiration → HF coupling band', () {
-      // Synthesize an NN tachogram at mean 1000 ms with a strong RSA at 0.25 Hz
-      // (15 breaths/min). Beat-to-beat at ~1 beat/s. The coupling spectrum's
-      // dominant frequency should fall in the HFC band (0.1–0.4 Hz).
+  group('Cardiopulmonary Coupling (WITHDRAWN)', () {
+    test('abstains — no respiration channel independent of the beat times', () {
+      // Was: "NN with injected ~0.25 Hz respiration → HF coupling band". That
+      // passed because the respiration surrogate WAS the NN series, so of
+      // course the "coupling" peak sat at the RSA frequency. See cpc.dart.
       final nn = <double>[];
       final times = <double>[];
       var t = 0.0;
-      const fResp = 0.25; // Hz
       for (var i = 0; i < 1800; i++) {
-        // RR modulated by respiration (RSA): ±40 ms at 0.25 Hz.
-        final rr = 1000 + 40 * math.sin(2 * math.pi * fResp * (t / 1000.0));
+        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
         t += rr;
         nn.add(rr);
         times.add(t);
       }
       final m = cardiopulmonaryCoupling(nn, times);
-      expect(m.present, isTrue);
-      final c = m.value!;
-      // Dominant coupling frequency near the injected respiration.
-      expect(c.dominantHz, closeTo(fResp, 0.05),
-          reason: 'coupling peak should sit at the respiratory frequency');
-      // HFC should dominate (stable-NREM-like) vs LFC.
-      expect(c.hfc, greaterThan(c.lfc));
+      expect(m.present, isFalse);
+      expect(m.note, contains('respiration channel'));
     });
   });
 

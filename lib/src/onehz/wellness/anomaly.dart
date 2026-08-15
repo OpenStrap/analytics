@@ -93,16 +93,19 @@ List<AnomalyDay> multivariateAnomaly(
 }) {
   final n = feats.length;
   final out = <AnomalyDay>[];
+  // CALENDAR days, not rows — see [calendarDays].
+  final day = calendarDays(dates);
   var run = 0;
+  var lastScoredDay = -1 << 20;
   for (var i = 0; i < n; i++) {
     // Orient: HRV negated so a drop is positive ("worse" direction).
     final cur = _orient(feats[i]);
-    final lo = i - baselineDays < 0 ? 0 : i - baselineDays;
     // Build per-feature baseline columns (valid only) from the trailing window.
     final cols = List.generate(4, (_) => <double>[]);
     // Aligned rows (all 4 features present) for covariance off-diagonals.
     final rows = <List<double>>[];
-    for (var j = lo; j < i; j++) {
+    for (var j = i - 1; j >= 0; j--) {
+      if (day[i] - day[j] > baselineDays) break;
       final o = _orient(feats[j]);
       for (var f = 0; f < 4; f++) {
         if (o[f] != null) cols[f].add(o[f]!);
@@ -186,10 +189,14 @@ List<AnomalyDay> multivariateAnomaly(
     // Per-feature contribution to d² (diagonal share), for the "why".
     final drivers = <Driver>[];
     for (var a = 0; a < keep.length; a++) {
-      drivers.add(Driver(_featLabels[keep[a]], round6(zc[a]),
+      drivers.add(Driver(_featLabels[keep[a]], roundTo(zc[a], 6),
           detail: 'standardized deviation'));
     }
     drivers.sort((x, y) => y.contribution.abs().compareTo(x.contribution.abs()));
+
+    // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows.
+    if (day[i] - lastScoredDay > 1) run = 0;
+    lastScoredDay = day[i];
 
     final gate = chiSqGate ?? _chiSq999(keep.length);
     final candidate = d2 > gate;

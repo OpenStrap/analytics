@@ -6,9 +6,16 @@
 //   ULF < 0.003 Hz | VLF 0.003–0.04 | LF 0.04–0.15 | HF 0.15–0.40 | total
 // Normalized units: nu_lf = LF/(LF+HF)·100, nu_hf = HF/(LF+HF)·100.
 //
+// Band powers are WELCH-AVERAGED (Welch 1967): the record is split into
+// segments short enough that a modest frequency grid resolves them, each
+// segment's Lomb-Scargle PSD is integrated over the band on its own
+// resolution-matched grid, and the per-segment powers are averaged. See
+// [_welchBandPower] for why a single whole-night grid cannot work.
+//
 // HONESTY: HF is the band most corrupted by 1 Hz timing quantization and by
 // artifacts — we GATE HF (and LF/HF, nu) on the artifact fraction and report
-// reduced confidence. ULF needs a 24-h record; null on short reads.
+// reduced confidence. Every band is null unless the record is long enough to
+// RESOLVE it (ULF genuinely needs 24 h) — never a leakage-filled 0.0.
 
 import '../types.dart';
 import '../util.dart';
@@ -57,7 +64,7 @@ Metric<HrvFreq> hrvFreq(
   List<double> nnTimesMs, {
   required double artifactFraction,
   double hfArtifactGate = 0.15,
-  int gridPoints = 600,
+  double oversample = 4.0,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
   if (nnMs.length < 16 || nnTimesMs.length != nnMs.length) {
@@ -79,28 +86,27 @@ Metric<HrvFreq> hrvFreq(
     );
   }
 
-  // Frequency grid: from ~1/span up to the HF ceiling (0.4 Hz).
-  final loHz = (1.0 / spanSec).clamp(0.0005, 0.04);
-  final ls = lombScargle(tSec, nnMs, freqGrid(loHz, 0.4, gridPoints));
-  if (ls == null) {
+  // Each band gets its own segment length and its own resolution-matched grid.
+  // A band whose lowest frequency the record is too short to resolve returns
+  // null — absent, not a leakage-filled 0.0 (ULF used to be emitted as exactly
+  // 0.0 for any session over 333 s, which is not a 24-h record by any reading).
+  final ulf = _welchBandPower(tSec, nnMs, 0.0003, 0.003, oversample: oversample);
+  final vlf = _welchBandPower(tSec, nnMs, 0.003, 0.04, oversample: oversample);
+  final lf = _welchBandPower(tSec, nnMs, 0.04, 0.15, oversample: oversample);
+  final hfRaw = _welchBandPower(tSec, nnMs, 0.15, 0.40, oversample: oversample);
+  if (lf == null && hfRaw == null) {
     return const Metric<HrvFreq>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'spectrum undefined',
+      note: 'record too short to resolve any HRV band',
     );
   }
-
-  // Only report ULF/VLF if the record is long enough to resolve them.
-  final ulf = spanSec >= 1.0 / 0.003 ? ls.bandPower(0, 0.003) : null;
-  final vlf = spanSec >= 1.0 / 0.04 ? ls.bandPower(0.003, 0.04) : null;
-  final lf = ls.bandPower(0.04, 0.15);
-  final hfRaw = ls.bandPower(0.15, 0.40);
 
   final hfGated = artifactFraction > hfArtifactGate;
   final hf = hfGated ? null : hfRaw;
 
   double? lfhf, nuLf, nuHf;
-  if (hf != null && (lf + hf) > 0) {
+  if (lf != null && hf != null && (lf + hf) > 0) {
     lfhf = hf == 0 ? null : lf / hf;
     nuLf = 100.0 * lf / (lf + hf);
     nuHf = 100.0 * hf / (lf + hf);
@@ -111,8 +117,11 @@ Metric<HrvFreq> hrvFreq(
   // exactly the quantity the gate withheld (the gated and ungated totals came
   // out bit-identical), and dropping HF from the sum would republish a
   // different quantity under the same name. Either way it would be dishonest —
-  // so total is WITHHELD alongside HF.
-  final total = hfGated ? null : (ulf ?? 0) + (vlf ?? 0) + lf + hfRaw;
+  // so total is WITHHELD alongside HF. It is also withheld when a band the
+  // record could not resolve is missing from the sum.
+  final total = (hfGated || lf == null || hfRaw == null)
+      ? null
+      : (ulf ?? 0) + (vlf ?? 0) + lf + hfRaw;
 
   // Confidence: penalize artifacts heavily; low-band-only reads still HIGH-ish.
   final conf = clamp((1 - artifactFraction) * (hfGated ? 0.6 : 0.9), 0.2, 0.9);
@@ -136,4 +145,71 @@ Metric<HrvFreq> hrvFreq(
             '> gate — LF/VLF reported, HF/LF-HF/nu/total withheld'
         : 'PRV spectrum; HF band quantization-limited at 1 Hz',
   );
+}
+
+/// Welch-averaged Lomb-Scargle power in [loHz, hiHz), or null when the record
+/// is too short to RESOLVE that band.
+///
+/// Why not one grid over the whole night: an 8 h record's periodogram has peaks
+/// ~1/28800 Hz wide, so a rectangular sum over a grid coarser than that is a
+/// lucky sample of the peaks, not an integral. The shipped 600-point grid put
+/// `lf_hf` at 0.095 on a synthetic whose converged value is 2.243 — a factor of
+/// 20+, on the one spectral number that is charted, stored and fed to the coach.
+/// The resolution-matched grid for a whole night is ~50k points and measured
+/// 18 s per night on this hardware; 600 points measured 1.2 s. Neither is
+/// acceptable: one is wrong, the other unshippable.
+///
+/// So, Welch 1967: split the record into segments SHORT enough that a modest
+/// grid resolves them, integrate each segment's PSD over the band on its own
+/// resolution-matched grid, and average. Segment length is [cyclesPerSegment]
+/// periods of the band's LOWEST frequency, so the band is resolved by
+/// construction; grid spacing is the segment's resolution (1/segment) divided
+/// by [oversample]. Cost is O(beats x gridPoints) per band and independent of
+/// how many segments the record splits into — measured ~1.4 s for a full night,
+/// i.e. no worse than the wrong version it replaces, with the periodogram's
+/// large variance averaged down as a bonus.
+///
+/// Averaging per-segment powers means the estimate excludes variance slower
+/// than one segment — correct by definition for a band whose lowest frequency
+/// sets the segment length, and the reason each band is segmented separately.
+double? _welchBandPower(
+  List<double> tSec,
+  List<double> y,
+  double loHz,
+  double hiHz, {
+  double cyclesPerSegment = 10.0,
+  double oversample = 4.0,
+  int minPointsPerSegment = 16,
+}) {
+  if (loHz <= 0 || hiHz <= loHz || tSec.length < minPointsPerSegment) return null;
+  final span = tSec.last - tSec.first;
+  final segSec = cyclesPerSegment / loHz;
+  if (span < segSec) return null; // band not resolvable in this record
+
+  final df = 1.0 / segSec / oversample;
+  final nGrid = ((hiHz - loHz) / df).ceil() + 1;
+  final grid = freqGrid(loHz, hiHz, nGrid);
+
+  var sum = 0.0;
+  var k = 0;
+  final step = segSec / 2; // 50 % overlap, the Welch default
+  for (var start = tSec.first; start + segSec <= tSec.last; start += step) {
+    final end = start + segSec;
+    final ts = <double>[];
+    final ys = <double>[];
+    for (var i = 0; i < tSec.length; i++) {
+      if (tSec[i] < start) continue;
+      if (tSec[i] >= end) break;
+      ts.add(tSec[i]);
+      ys.add(y[i]);
+    }
+    if (ts.length < minPointsPerSegment) continue;
+    final ls = lombScargle(ts, ys, grid);
+    if (ls == null) continue;
+    final p = ls.bandPower(loHz, hiHz);
+    if (!p.isFinite) continue;
+    sum += p;
+    k++;
+  }
+  return k == 0 ? null : sum / k;
 }

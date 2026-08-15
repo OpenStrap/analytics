@@ -82,8 +82,10 @@ RrCorrectionResult correctRr(
     final times = <double>[];
     var t = 0.0;
     for (var i = 0; i < n; i++) {
+      // The clock advances for EVERY interval, kept or not — RR intervals tile
+      // the timeline, so dropping a beat must not delete the time it occupied.
+      t += rrMs[i];
       if (classes[i] == BeatClass.normal) {
-        t += rrMs[i];
         nn.add(rrMs[i]);
         times.add(t);
       }
@@ -193,10 +195,22 @@ RrCorrectionResult correctRr(
         times.add(t);
         corrected++;
       } else {
-        dropped++; // no anchors -> honest drop
+        t += rrMs[i]; // no anchors -> honest drop, but the time still elapsed
+        dropped++;
       }
     } else {
-      dropped += runLen; // multi-beat run: NEVER interpolate
+      // Multi-beat run: NEVER interpolate — but DO advance the clock by the
+      // run's real elapsed time. Not doing so spliced the two sides of every
+      // dropped run together, so `nnTimesMs` was compacted: 299.0 s of real
+      // record emitted as a 294.0 s span. Everything keyed off that clock
+      // (cvhr_per_hour's analyzedHours, the Lomb-Scargle time axis, spanSec)
+      // was then inflated on exactly the noisy nights that needed the
+      // correction most. RR intervals tile the timeline whether or not the
+      // beat annotation is trustworthy, so their sum IS the elapsed time.
+      for (var k = i; k < j; k++) {
+        t += rrMs[k];
+      }
+      dropped += runLen;
     }
     i = j;
   }

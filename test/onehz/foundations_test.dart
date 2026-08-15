@@ -298,4 +298,28 @@ void main() {
           closeTo(1.41421, 1e-4));
     });
   });
+
+  group('RR correction — the beat clock is WALL CLOCK', () {
+    test('a dropped run still advances nnTimesMs', () {
+      // T-12. Dropped runs used only to bump a counter, never `t`, so the two
+      // sides of every dropped run were spliced together: 299.0 s of real
+      // record came out as a 294.0 s span. cvhr_per_hour divides by that span,
+      // so the apnea screen read high on exactly the noisy nights that needed
+      // the correction.
+      final rr = <double>[for (var i = 0; i < 300; i++) 1000.0];
+      for (var k = 100; k < 105; k++) {
+        rr[k] = 250.0; // 5-beat artifact run -> dropped, never interpolated
+      }
+      var real = 0.0;
+      for (final v in rr) {
+        real += v;
+      }
+      final c = correctRr(rr);
+      expect(c.droppedCount, greaterThan(1));
+      // times[0] is the END of the first interval, so the span is the total
+      // elapsed time minus that first interval — exactly, no compaction.
+      final span = c.nnTimesMs.last - c.nnTimesMs.first;
+      expect(span, closeTo(real - rr.first, 1e-6));
+    });
+  });
 }

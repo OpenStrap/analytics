@@ -45,7 +45,11 @@ void main() {
     });
 
     test('GATES HF when artifact fraction exceeds the threshold', () {
-      final rr = <double>[for (var i = 0; i < 64; i++) 1000 + (i.isEven ? 30 : -30)];
+      // RE-PINNED 2026-08: 400 beats, not 64. Band powers are now Welch-
+      // averaged over segments long enough to RESOLVE the band (10 cycles of
+      // its lowest frequency: 250 s for LF), so a 64 s record honestly reports
+      // no LF and no HF at all rather than a grid-aliased number.
+      final rr = <double>[for (var i = 0; i < 400; i++) 1000 + (i.isEven ? 30 : -30)];
       final times = <double>[];
       var t = 0.0;
       for (final v in rr) {
@@ -56,6 +60,58 @@ void main() {
       expect(m.value!.hfGated, isTrue);
       expect(m.value!.hf, isNull); // HF withheld honestly
       expect(m.value!.lf, isNotNull); // LF still reported
+    });
+
+    test('MAGNITUDE: total power ≈ SDNN², and lf_hf is grid-stable', () {
+      // T-01. Nothing used to assert a spectral MAGNITUDE, which is how three
+      // separate defects survived: lombScargle returned Horne–Baliunas
+      // variance-NORMALISED power (dimensionless) that was labelled ms², and a
+      // fixed 600-point grid undersampled a night's periodogram ~19x so band
+      // power was a lucky sample rather than an integral.
+      //
+      // Known-answer synthetic: 30 ms LF tone at 0.10 Hz (variance 450 ms²) +
+      // 20 ms HF tone at 0.25 Hz (variance 200 ms²) on 9000 beats.
+      final nn = <double>[];
+      final ts = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < 9000; i++) {
+        final tsec = t / 1000.0;
+        final v = 1000.0 +
+            30.0 * math.sin(2 * math.pi * 0.10 * tsec) +
+            20.0 * math.sin(2 * math.pi * 0.25 * tsec);
+        nn.add(v);
+        t += v;
+        ts.add(t);
+      }
+      final sd = stddev(nn)!;
+      final m = hrvFreq(nn, ts, artifactFraction: 0.0);
+      final v = m.value!;
+      // Bands land on their injected variances, in ms².
+      expect(v.lf!, closeTo(450.0, 45.0));
+      expect(v.hf!, closeTo(200.0, 20.0));
+      // Parseval: the total is the series variance = SDNN². Pre-fix this
+      // printed 0.1 for a 651 ms² night.
+      expect(v.total!, closeTo(sd * sd, 0.05 * sd * sd));
+      // And the ratio no longer depends on how finely we happened to sample.
+      final coarse = hrvFreq(nn, ts, artifactFraction: 0.0, oversample: 1.0);
+      final fine = hrvFreq(nn, ts, artifactFraction: 0.0, oversample: 16.0);
+      expect(coarse.value!.lfhf!, closeTo(fine.value!.lfhf!, 0.1));
+    });
+
+    test('a band the record cannot RESOLVE is absent, not 0.0', () {
+      // ULF needs a 24-h record (its own header says so); the gate used to be
+      // 333 s, and `bandPower` skipped the grid's lowest point, so any session
+      // of 333–429 s emitted `ulf` as exactly 0.0.
+      final nn = <double>[for (var i = 0; i < 400; i++) 1000.0 + (i % 7)];
+      final ts = <double>[];
+      var t = 0.0;
+      for (final v in nn) {
+        t += v;
+        ts.add(t);
+      }
+      final m = hrvFreq(nn, ts, artifactFraction: 0.0);
+      expect(m.value!.ulf, isNull);
+      expect(m.value!.toJson().containsKey('ulf'), isFalse);
     });
 
     test('REGRESSION: a gated HF is not republished through `total`', () {
@@ -920,6 +976,34 @@ void main() {
       expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(m.confidence, 0);
+    });
+  });
+
+  group('trailing windows are CALENDAR days, not rows', () {
+    test('a wear gap breaks the illness CUSUM persistence run', () {
+      // T-14 / B-01. `persistDays: 2` used to mean two RECORDED nights, and the
+      // caller only passes days that produced a derived row — so an elevated
+      // Monday and an elevated night three weeks later escalated to red
+      // "sustained elevation". The 28-day baseline stretched over months the
+      // same way.
+      final dates = <String>[];
+      final rhr = <double?>[];
+      for (var i = 1; i <= 20; i++) {
+        dates.add('2026-06-${i.toString().padLeft(2, '0')}');
+        rhr.add(55.0 + (i % 3));
+      }
+      dates.add('2026-06-21');
+      rhr.add(75.0); // elevated
+      dates.add('2026-07-14');
+      rhr.add(75.0); // elevated, but 23 days later
+
+      final out = illnessCusum(dates, rhr);
+      expect(out[20].state, IllnessState.yellow);
+      expect(out[21].state, IllnessState.green,
+          reason: 'pre-fix: red, "sustained elevation" across a 3-week gap');
+      // And with no recent baseline left, it says so rather than scoring.
+      expect(out[21].cusum, isNull);
+      expect(out[21].need, contains('need_baseline'));
     });
   });
 }

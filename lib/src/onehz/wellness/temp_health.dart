@@ -72,13 +72,16 @@ List<TempIllnessDay> tempIllnessFlag(
 }) {
   final n = nightlyTemp.length;
   final out = <TempIllnessDay>[];
+  // CALENDAR days, not rows — see [calendarDays].
+  final day = calendarDays(dates);
   var elevatedRun = 0;
+  var lastScoredDay = -1 << 20;
   for (var i = 0; i < n; i++) {
     final t = nightlyTemp[i];
     final lut = (luteal != null && i < luteal.length) ? luteal[i] : false;
-    final lo = i - baselineDays < 0 ? 0 : i - baselineDays;
     final window = <double>[];
-    for (var j = lo; j < i; j++) {
+    for (var j = i - 1; j >= 0; j--) {
+      if (day[i] - day[j] > baselineDays) break;
       final v = nightlyTemp[j];
       if (v != null) window.add(v);
     }
@@ -101,6 +104,9 @@ List<TempIllnessDay> tempIllnessFlag(
       elevatedRun = 0;
       continue;
     }
+    // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows.
+    if (day[i] - lastScoredDay > 1) elevatedRun = 0;
+    lastScoredDay = day[i];
     final elevated = zz >= zThresh;
     if (elevated) {
       elevatedRun++;
@@ -149,19 +155,28 @@ class OvulationEvent {
 ///
 /// For each candidate night i: the coverline = max of the prior [lookback]
 /// nights; if night i and the next ([confirm]-1) nights all exceed
-/// (coverline + [threshold]) ADC counts, ovulation is confirmed, estimated at
-/// the night just before the rise (i-1).
+/// (coverline + [threshold]), ovulation is confirmed, estimated at the night
+/// just before the rise (i-1).
+///
+/// UNITS: [threshold] is in WHATEVER UNIT [nightlyTemp] carries — this function
+/// is unit-agnostic and cannot check. It was documented as "ADC counts" while
+/// the live caller passes z-SCORES, so the default 1.0 silently became "one
+/// whole SD above the max of the prior 6 nights" rather than the classic rule's
+/// ~0.2 F. Pass a [threshold] appropriate to the series you hand in, and set
+/// [inputLabel] so the envelope names it.
 ///
 /// HONESTY: confirmation ONLY — this NEVER predicts a future ovulation. Returns
-/// all detected events over the series. `relative` tier (ADC counts, no °C).
+/// all detected events over the series. `relative` tier — never an absolute
+/// temperature.
 Metric<List<OvulationEvent>> menstrualCoverline(
   List<String> dates,
   List<double?> nightlyTemp, {
   int lookback = 6,
   int confirm = 3,
   double threshold = 1.0,
+  String inputLabel = 'nightly_skin_temp',
 }) {
-  const inputs = ['nightly_skin_temp_adc'];
+  final inputs = [inputLabel];
   final n = nightlyTemp.length;
   if (n < lookback + confirm) {
     return Metric<List<OvulationEvent>>.absent(

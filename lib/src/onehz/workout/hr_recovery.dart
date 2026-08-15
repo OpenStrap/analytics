@@ -41,11 +41,20 @@ class HrRecovery {
 /// exercise end. Peak HR is the max over the [peakWindowSec] before end; recovery
 /// HR is the median of a small window around end+[recoverySec] (robust to a single
 /// spike). Returns absent if the tail is too short, off-skin, or doesn't descend.
+///
+/// [tsSec] OPTIONAL unix-second timestamps parallel to [hrTailBpm]. SUPPLY THEM.
+/// Without them "+60 s" is really "+60 ARRAY POSITIONS": the substrate this is
+/// sliced from is one row per decoded record, not a dense 1 Hz grid, so on a
+/// gappy tail the "HR at +60 s" sample can be many minutes post-exercise and
+/// `hrr_bpm` is overstated — read by the user as a fitness marker. With [tsSec]
+/// the recovery point is found by CLOCK TIME and the span is checked for holes.
 Metric<HrRecovery> hrRecovery(
   List<int> hrTailBpm, {
   int? endIndex,
   int recoverySec = 60,
   int peakWindowSec = 30,
+  List<int>? tsSec,
+  int maxGapSec = 30,
 }) {
   const inputs = ['hr_1hz'];
   final end = endIndex ?? 0;
@@ -64,10 +73,34 @@ Metric<HrRecovery> hrRecovery(
     if (h > peak) peak = h.toDouble();
   }
   // Recovery HR: median of a ±3 s window around end + recoverySec.
-  final target = end + recoverySec;
+  final times = (tsSec != null && tsSec.length == hrTailBpm.length) ? tsSec : null;
+  int target;
+  if (times != null) {
+    // Locate the recovery point on the CLOCK, and refuse if the tail has a hole
+    // in it between exercise end and there.
+    final wantTs = times[end] + recoverySec;
+    var t = -1;
+    for (var i = end; i < times.length; i++) {
+      if (i > end && times[i] - times[i - 1] > maxGapSec) break;
+      if (times[i] >= wantTs) {
+        t = i;
+        break;
+      }
+    }
+    if (t < 0) {
+      return Metric<HrRecovery>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'HR tail does not reach +${recoverySec}s without a gap — no HRR',
+      );
+    }
+    target = t;
+  } else {
+    target = end + recoverySec;
+  }
   final lo = (target - 3).clamp(0, hrTailBpm.length - 1);
   final hi = (target + 3).clamp(0, hrTailBpm.length - 1);
-  if (hi >= hrTailBpm.length || target >= hrTailBpm.length) {
+  if (target >= hrTailBpm.length) {
     return const Metric<HrRecovery>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
@@ -95,8 +128,24 @@ Metric<HrRecovery> hrRecovery(
     );
   }
   final pct = peak > 0 ? 100.0 * drop / peak : 0.0;
-  // Confidence: a clearly descending tail from a high peak is more trustworthy.
-  final conf = clamp(drop / 30.0, 0.3, 0.9);
+  // Confidence from DATA QUALITY, not from the answer. This used to be
+  // `clamp(drop / 30, 0.3, 0.9)` — confidence derived from the metric's own
+  // magnitude, so a motion-artifact spike inflated `peak`, inflated `drop`, and
+  // RAISED the confidence: the least trustworthy readings scored highest.
+  var seen = 0, valid = 0;
+  for (var i = peakLo; i <= end; i++) {
+    seen++;
+    if (hrTailBpm[i] > 0) valid++;
+  }
+  for (var i = lo; i <= hi; i++) {
+    seen++;
+    if (hrTailBpm[i] > 0) valid++;
+  }
+  final validFrac = seen == 0 ? 0.0 : valid / seen;
+  // Timestamped tails earn the top of the band; positional ones cannot, because
+  // we have no way to know the recovery sample is really 60 s later.
+  final conf =
+      clamp(0.3 + 0.4 * validFrac + (times != null ? 0.2 : 0.0), 0.2, 0.9);
   return Metric<HrRecovery>(
     value: HrRecovery(
       peakHr: peak,

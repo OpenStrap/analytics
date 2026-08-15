@@ -64,7 +64,14 @@ Metric<IrregularRhythm> irregularBeatScreen(
   double maxArtifact = 0.30,
 }) {
   const inputs = ['rr_cleaned'];
-  final nn = [for (final v in rrMs) if (v >= 300 && v <= 2000) v];
+  // The defensive [300, 2000] filter COMPACTS the series. Keep the mask too, so
+  // successive differences below are taken only between beats that were both
+  // kept AND adjacent in the input — otherwise every filtered beat manufactured
+  // one spurious difference spanning the gap, which counted toward pNNx and
+  // inflated sdsd/sd1, pushing both flag conditions toward a false "sustained
+  // irregularity" screen positive.
+  final keep = [for (final v in rrMs) v >= 300 && v <= 2000];
+  final nn = [for (var i = 0; i < rrMs.length; i++) if (keep[i]) rrMs[i]];
   if (nn.length < minBeats) {
     return const Metric<IrregularRhythm>.absent(
       tier: Tier.estimate,
@@ -81,14 +88,35 @@ Metric<IrregularRhythm> irregularBeatScreen(
     );
   }
 
-  // Poincaré descriptors.
-  final diffs = [for (var i = 1; i < nn.length; i++) nn[i] - nn[i - 1]];
-  final sdsd = stddev(diffs) ?? 0.0;
-  final sdnn = stddev(nn) ?? 0.0;
+  // Poincaré descriptors — successive beats only (see [keep]).
+  final diffs = <double>[
+    for (var i = 1; i < rrMs.length; i++)
+      if (keep[i] && keep[i - 1]) rrMs[i] - rrMs[i - 1]
+  ];
+  final sdsd = stddev(diffs);
+  final sdnn = stddev(nn);
+  if (sdsd == null || sdnn == null) {
+    return const Metric<IrregularRhythm>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'no successive clean beats to build a Poincare plot from',
+    );
+  }
   final sd1 = sdsd / math.sqrt2;
   final v = 2 * sdnn * sdnn - sd1 * sd1;
   final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-  final ratio = sd2 > 0 ? sd1 / sd2 : 0.0;
+  if (sd2 <= 0) {
+    // SD1/SD2 is undefined without long-term variability to divide by; emitting
+    // ratio 0.0 with sd1 = sd2 = 0 published "perfectly regular" as a
+    // measurement of a degenerate series.
+    return const Metric<IrregularRhythm>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'no long-term variability (SD2 = 0) — the SD1/SD2 ratio is '
+          'undefined, not "perfectly regular"',
+    );
+  }
+  final ratio = sd1 / sd2;
 
   // pNNx — irregularly-irregular fraction.
   var over = 0;
@@ -98,8 +126,11 @@ Metric<IrregularRhythm> irregularBeatScreen(
   final pnnPct = diffs.isEmpty ? 0.0 : 100.0 * over / diffs.length;
 
   final flag = ratio >= sd1sd2Flag && pnnPct >= pnnFlagPct;
-  // Confidence scales with beat count; ~5000 beats ≈ a full strong night.
-  final conf = clamp(nn.length / 5000.0, 0.3, 0.9);
+  // Confidence scales with beat count (~5000 beats ≈ a full strong night) AND
+  // with the artifact fraction we were handed — it used to ignore it entirely,
+  // so a barely-passing 29 %-artifact night published at the same confidence as
+  // a clean one.
+  final conf = clamp(nn.length / 5000.0 * (1 - artifactFraction), 0.2, 0.9);
   return Metric<IrregularRhythm>(
     value: IrregularRhythm(
       sd1: sd1,

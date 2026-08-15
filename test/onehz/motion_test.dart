@@ -72,8 +72,8 @@ void main() {
       final m = relativeIntensityBands(enmo);
       expect(m.present, isTrue);
       final b = m.value!;
-      expect(b.lightCut, lessThan(b.moderateCut));
-      expect(b.moderateCut, lessThan(b.vigorousCut));
+      expect(b.lightCut!, lessThan(b.moderateCut!));
+      expect(b.moderateCut!, lessThan(b.vigorousCut!));
       expect(m.tier, Tier.relative);
       // a zero-ENMO minute is sedentary; the largest is vigorous.
       expect(b.labels.first, 'sedentary');

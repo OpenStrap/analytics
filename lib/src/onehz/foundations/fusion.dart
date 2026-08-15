@@ -45,7 +45,13 @@ FusionResult inverseVarianceFuse(List<FusionInput> inputs) {
   var wsum = 0.0; // Σ 1/σ²
   var vwsum = 0.0; // Σ value/σ²
   for (final inp in inputs) {
-    if (!inp.trusted || inp.variance <= 0 || inp.value.isNaN) {
+    // NOTE: `variance <= 0` is FALSE for a NaN variance, so test finiteness
+    // explicitly — otherwise a NaN variance sails past the guard and poisons
+    // `wsum`, and the absent branch below can never fire.
+    if (!inp.trusted ||
+        !inp.variance.isFinite ||
+        inp.variance <= 0 ||
+        !inp.value.isFinite) {
       dropped.add(inp.label);
       continue;
     }
@@ -78,7 +84,11 @@ FusionResult inverseVarianceFuse(List<FusionInput> inputs) {
 /// variance = baseVariance / max(quality, floor).
 double varianceFromQuality(double quality, double baseVariance,
     {double floor = 0.05}) {
-  final q = quality < floor ? floor : (quality > 1 ? 1 : quality);
+  // A NaN quality satisfies neither comparison, so clamp it to the floor
+  // explicitly rather than returning a NaN variance downstream.
+  final q = !quality.isFinite || quality < floor
+      ? floor
+      : (quality > 1 ? 1.0 : quality);
   return baseVariance / q;
 }
 

@@ -369,7 +369,7 @@ double _powerAt(LombScargle ls, double fHz) {
     final d = (pt.freqHz - fHz).abs();
     if (d < bestDist) {
       bestDist = d;
-      best = pt.power;
+      best = pt.psd;
     }
   }
   return best;

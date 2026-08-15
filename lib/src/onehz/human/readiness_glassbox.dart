@@ -48,11 +48,18 @@ class GlassBoxInput {
 
 class ReadinessBreakdownItem {
   final String label;
-  final double percentileOfYou; // 0..100, sign-ORIENTED (higher=better-for-you)
+
+  /// 0..100, sign-ORIENTED (higher=better-for-you). NULL when the input had too
+  /// little of the user's own history to rank against — absence, never a
+  /// fabricated rank and never NaN (see [note] for the machine-readable reason).
+  final double? percentileOfYou;
   final double weight;
   final double weightedContribution; // w·(pct-50), signed — narrative driver
   final bool pastMdc; // did the underlying change clear its MDC?
   final bool used; // was the input present + usable
+  /// Machine-readable reason this input was not used, e.g.
+  /// `need_baseline:have=2,need=7`. Null when the input WAS used.
+  final String? note;
   const ReadinessBreakdownItem({
     required this.label,
     required this.percentileOfYou,
@@ -60,14 +67,17 @@ class ReadinessBreakdownItem {
     required this.weightedContribution,
     required this.pastMdc,
     required this.used,
+    this.note,
   });
   Map<String, dynamic> toJson() => {
         'label': label,
-        'percentile_of_you': round6(percentileOfYou),
+        'percentile_of_you':
+            percentileOfYou == null ? null : round6(percentileOfYou!),
         'weight': round6(weight),
         'weighted_contribution': round6(weightedContribution),
         'past_mdc': pastMdc,
         'used': used,
+        if (note != null) 'note': note,
       };
 }
 
@@ -121,11 +131,12 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
     if (inp.history.length < minHistory) {
       items.add(ReadinessBreakdownItem(
         label: inp.label,
-        percentileOfYou: double.nan,
+        percentileOfYou: null, // no rank yet — absent, not NaN, not 50
         weight: inp.weight,
         weightedContribution: 0,
         pastMdc: false,
         used: false,
+        note: 'need_baseline:have=${inp.history.length},need=$minHistory',
       ));
       continue;
     }
@@ -163,10 +174,14 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
   }
 
   if (nUsable == 0 || wsum == 0) {
-    return const Metric<GlassBoxReadiness>.absent(
+    var have = 0;
+    for (final inp in inputs) {
+      if (inp.history.length > have) have = inp.history.length;
+    }
+    return Metric<GlassBoxReadiness>.absent(
       tier: Tier.estimate,
       inputs_used: used,
-      note: 'no readiness input has enough of your history yet',
+      note: 'need_baseline:have=$have,need=$minHistory',
     );
   }
 

@@ -661,7 +661,14 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
     }
   }
   final covered = idx.length;
-  final coverage = covered / motion.length;
+  // Denominator is the elapsed minute SPAN, not the count of minutes that
+  // happened to carry a sample — see the same note in enmo.dart. A day worn
+  // 4 h out of 24 used to report coverage 1.0, and this metric's confidence
+  // keys off coverage.
+  final spanMinutes = motion.isEmpty
+      ? 0
+      : ((motion.last.tsMinStartMs - motion.first.tsMinStartMs) / 60000).round() + 1;
+  final coverage = spanMinutes <= 0 ? 0.0 : clamp(covered / spanMinutes, 0.0, 1.0);
   if (covered < dailyStepMinCoveredMinutes) {
     return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,

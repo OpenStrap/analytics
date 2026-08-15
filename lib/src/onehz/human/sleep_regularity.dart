@@ -29,45 +29,6 @@ class Sri {
       };
 }
 
-/// True Phillips Sleep Regularity Index from a CONTIGUOUS binary sleep/wake
-/// vector. `asleep[i]` = is the person asleep in epoch i. [epochsPerDay] is the
-/// number of epochs spanning 24 h (e.g. 1440 for 1-min epochs, 96 for 15-min).
-///
-/// We compare every epoch with the epoch exactly one day later and score
-/// agreement. Needs strictly more than one day of data.
-Metric<Sri> sleepRegularityIndex(List<bool> asleep, {required int epochsPerDay}) {
-  const inputs = ['sleep_wake_binary'];
-  if (epochsPerDay <= 0 || asleep.length <= epochsPerDay) {
-    return const Metric<Sri>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'SRI needs more than one full day of sleep/wake epochs',
-    );
-  }
-  var agree = 0;
-  final pairs = asleep.length - epochsPerDay;
-  for (var i = 0; i < pairs; i++) {
-    if (asleep[i] == asleep[i + epochsPerDay]) agree++;
-  }
-  final p = agree / pairs;
-  final sri = 200.0 * p - 100.0;
-  final band = sri >= 80
-      ? 'very regular'
-      : sri >= 60
-          ? 'regular'
-          : sri >= 40
-              ? 'somewhat irregular'
-              : 'irregular';
-  // Confidence scales with how many days were compared.
-  final days = pairs / epochsPerDay;
-  return Metric<Sri>(
-    value: Sri(sri, epochsPerDay, pairs, band),
-    confidence: clamp(days / 7.0, 0.3, 0.95),
-    tier: Tier.high,
-    inputs_used: inputs,
-    note: 'epoch-by-epoch 24-h concordance (true SRI, not SD-of-midsleep)',
-  );
-}
 
 class SleepDebt {
   final double? osdHours; // estimated personal optimal sleep duration (h)

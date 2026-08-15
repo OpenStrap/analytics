@@ -76,6 +76,12 @@ class CardioStagerResult {
 
 const int _epochSec = 30;
 
+/// Minimum fraction of epochs that must carry a valid HR before this stager
+/// will label anything. Below it every HR-relative gate is silent and the
+/// classifier degenerates to "all light sleep" — see the gate in
+/// [classifyCardioEpochs].
+const double minHrCoverage = 0.5;
+
 // The previous rule OR-ed three boolean axes (RMSSD drop as PRIMARY, plus
 // LF/HF and R(k) throttled to z>4.0) and was calibrated against a single
 // Apple-Watch-labelled night. Measurement against 99 PSG-labelled wrist nights
@@ -542,7 +548,17 @@ CardioStagerResult classifyCardioEpochs(
   // local, not this repositioning-detection threshold.
   final motSample = [for (final m in motion) m];
   final motMed = median(motSample) ?? 0;
-  final motMad = (mad(motSample) ?? 0).clamp(1e-9, double.infinity);
+  // MAD == 0 means MORE THAN HALF the epochs share one motion value — the
+  // guaranteed case when accel is mostly absent. Clamping to 1e-9 made
+  // `bigMoveCut` = motMed + 5e-9, so every epoch fractionally above the median
+  // became a "big move" and drove the WAKE gate. This is the same MAD-0 class
+  // that produced the blank-readiness and nocturnalRhr bugs, and RobustScale.of
+  // already refuses it. Abstain from the motion axis instead: null thresholds
+  // mean `still` is true everywhere (baseline selection falls back to the whole
+  // window) and `bigMove` is never asserted, so WAKE has to come from HR.
+  final motMadRaw = mad(motSample) ?? 0;
+  final motUsable = motMadRaw > 0 && motMadRaw.isFinite;
+  final motMad = motUsable ? motMadRaw : 0.0;
   // Personal-baseline blend (P2): pull each LOCAL threshold a bounded fraction
   // toward the sleeper's rolling profile value. `_pw` (≤0.5) grows with nights,
   // so per-night-local always leads; a null profile axis ⇒ no blend for it.
@@ -551,13 +567,13 @@ CardioStagerResult classifyCardioEpochs(
       (personal == null || _pw == 0) ? local : local * (1 - _pw) + personal * _pw;
   // "still" (for baseline selection) = motion near the night's typical low.
   final stillCut = blendP(motMed + 1.5 * motMad, profile?.enmoStillCut);
-  bool still(int e) => motion[e] <= stillCut;
+  bool still(int e) => !motUsable || motion[e] <= stillCut;
   // "big move" = clearly elevated motion (getting up / large reposition), used
   // for the WAKE decision — a much higher bar than `still` so normal in-sleep
   // repositioning (which the van-Hees window already certified as sleep) is NOT
   // mistaken for wake.
   final bigMoveCut = blendP(motMed + 5.0 * motMad, profile?.enmoMoveCut);
-  bool bigMove(int e) => motion[e] > bigMoveCut;
+  bool bigMove(int e) => motUsable && motion[e] > bigMoveCut;
 
   final sleepHr = <double>[
     for (var e = 0; e < nEpoch; e++)
@@ -573,7 +589,15 @@ CardioStagerResult classifyCardioEpochs(
   // whole-window mean as the baseline when no epoch qualifies as `still` (that
   // is a real measurement, just not a quiet one).
   final hrAll = <double>[for (final h in hr) if (!h.isNaN) h];
-  if (hrAll.isEmpty) return _abstain(epochSec);
+  // ...and "no HR anywhere" is not the same test as "enough HR to stage with".
+  // The gate used to be `hrAll.isEmpty`, i.e. ONE valid epoch in 900 passed it.
+  // With HR NaN for most epochs neither `hrUp` nor `hrTowardWake` can ever be
+  // true, so no epoch can be wake and none can be REM: a sparse HR stream (the
+  // gen5 device family) came out ~100 % light sleep, TST = time in bed,
+  // efficiency ~100 %, at confidence up to 0.6. Abstention is the honest
+  // failure.
+  final hrCov = nEpoch == 0 ? 0.0 : hrAll.length / nEpoch.toDouble();
+  if (hrCov < minHrCoverage) return _abstain(epochSec);
   final hrMedGlobal = median(sleepHr) ?? mean(hrAll)!;
 
   // ── LOCAL rolling HR baseline for the WAKE/REM autonomic gates ─────────────
@@ -830,7 +854,15 @@ CardioStagerResult classifyCardioEpochs(
   final rrCov = nEpoch == 0
       ? 0.0
       : sleepRmssd.length / nEpoch.toDouble();
-  final conf = clamp(0.35 + 0.25 * rrCov, 0.3, 0.6);
+  // HR coverage is folded in: `rrCov` alone said nothing about whether the
+  // HR-relative gates (wake, REM floor, deep trough) had anything to fire on.
+  final hrCovConf = nEpoch == 0
+      ? 0.0
+      : clamp(
+          [for (final h in hr) if (!h.isNaN) h].length / nEpoch.toDouble(),
+          0.0,
+          1.0);
+  final conf = clamp((0.35 + 0.25 * rrCov) * hrCovConf, 0.15, 0.6);
 
   return CardioStagerResult(
     StagerResult(
@@ -996,14 +1028,22 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     }
     return c;
   }
-  // Context (min sleep flanking) → max bridgeable wake (min). Slightly more
-  // generous than Webster's classic table: the van Hees window already certified
-  // this span as the consolidated rest period, so brief arousals inside it are
-  // far more likely repositioning than true wake.
+  // Context (min sleep flanking) → max bridgeable wake (min). THE PUBLISHED
+  // TABLE, unmodified: Webster et al. 1982 / Cole et al. 1992 rescoring rules —
+  // 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15 bridges ≤4.
+  //
+  // This used to run [15→10], [10→5], [4→2] — 2.5x the published bridge — on
+  // the argument that the van Hees window had already certified the span as the
+  // consolidated rest period. That argument does not hold: on the forced-window
+  // paths (manual / confirmed / auto_fallback) van Hees never runs at all, and
+  // even where it does, a genuine 9-minute 3 a.m. awakening flanked by 15 min of
+  // sleep was being relabelled light sleep. TST was over-reported, WASO
+  // under-reported and efficiency inflated, potentially several times a night,
+  // disclosed only in a code comment the user never sees.
   final rules = <List<double>>[
-    [minToEp(15), minToEp(10)],
-    [minToEp(10), minToEp(5)],
-    [minToEp(4), minToEp(2)],
+    [minToEp(15), minToEp(4)],
+    [minToEp(10), minToEp(3)],
+    [minToEp(4), minToEp(1)],
   ];
   var i = onset;
   while (i <= lastSleep) {

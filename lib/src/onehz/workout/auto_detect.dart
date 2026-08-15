@@ -102,6 +102,16 @@ class AutoWorkoutDetector {
   /// A dip below the gate no longer than this does NOT break the span.
   static const int maxDipS = 90;
 
+  /// A GAP IN THE DATA longer than this breaks the span.
+  ///
+  /// A dip is "HR present and low"; a gap is "no HR at all", and only the dip
+  /// used to be time-bounded — so an off-wrist stretch produced no samples, the
+  /// loop never saw it, and the span simply resumed at the next elevated
+  /// sample. Two 12-minute efforts 40 minutes apart came out as one 64-minute
+  /// workout whose mean HR (a mean over present samples only) still read
+  /// normal. Absence of data is not evidence of continuity.
+  static const int maxGapS = 90;
+
   /// Two windows whose gap is strictly < this are merged (5 min).
   static const int mergeGapS = 5 * 60;
 
@@ -219,6 +229,8 @@ class AutoWorkoutDetector {
     }
 
     for (var k = 0; k < n; k++) {
+      // Break on a hole in the record before anything else — see [maxGapS].
+      if (k > 0 && spanStart != null && ts[k] - ts[k - 1] > maxGapS) closeSpan();
       if (bpm[k] >= floor) {
         spanStart ??= ts[k];
         spanEnd = ts[k];

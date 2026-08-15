@@ -148,9 +148,14 @@ class SleepSegmentation {
 /// THE single-source sleep segmentation.
 ///
 /// [accel] 1 Hz gravity vectors. [hr1hz] 1 Hz HR (bpm; 0 = off-skin), same time
-/// base / length as [accel]. [hrBaseline] optional daytime HR samples (bpm) used
-/// for a nocturnal-HR-dip consensus that refines onset/offset; when omitted the
-/// accel window stands alone.
+/// base / length as [accel].
+///
+/// [hrBaseline] is CURRENTLY UNUSED. The file header describes a pipeline step
+/// that confirms/refines onset and offset against a nocturnal-HR dip; no such
+/// code exists, and the parameter is read nowhere in this file. It is kept in
+/// the signature (all three edge call sites pass a real baseline) so wiring the
+/// step up later is a one-file change — but until then, onset and offset are
+/// NOT HR-refined, whatever the header says.
 SleepSegmentation segmentSleep(
   List<AccelSample> accel,
   List<double> hr1hz, {
@@ -307,8 +312,37 @@ SleepSegmentation segmentSleep(
       if (perSec[i] == SleepStage.wake) waso++;
     }
   }
+  if (tst == 0) {
+    // Nothing in the window staged as sleep. A forced window deliberately skips
+    // the 3 h and index gates, so this used to publish tst 0 / efficiency 0 % as
+    // a PRESENT metric — "0 h 0 m slept, 0 % efficiency" for a night we simply
+    // did not observe. That is a fabricated measurement, not an abstention.
+    return SleepSegmentation.absent;
+  }
   final efficiency = inBed > 0 ? 100.0 * tst / inBed : 0.0;
-  final conf = clamp(((wm.confidence > 0 ? wm.confidence : 0.45) + 0.5) / 2.0, 0.0, 0.6);
+
+  // Confidence = window quality x STAGING quality. The staging term used to be
+  // the literal 0.5, so every forced-window night (where `wm` is absent) came
+  // out at exactly 0.475 no matter how much data was behind it. cardioStager
+  // computes a real staging confidence (0.35 + 0.25*rrCov) and throws it away
+  // on the way out, and threading it back through SleepSession is a wider
+  // change than this — so recompute the same quantity from the HR and beats
+  // that actually landed INSIDE the chosen window.
+  var hrCovered = 0;
+  final rrSeconds = <int>{};
+  for (var i = 0; i < n; i++) {
+    final ts = trimmedAccel[i].tsMs ~/ 1000;
+    if (ts < chosen.start || ts >= chosen.end) continue;
+    if (trimmedHr[i] > 0) hrCovered++;
+  }
+  for (final b in rr) {
+    if (b.ts >= chosen.start && b.ts < chosen.end) rrSeconds.add(b.ts);
+  }
+  final hrCov = clamp(hrCovered / inBed, 0.0, 1.0);
+  final rrCov = clamp(rrSeconds.length / inBed, 0.0, 1.0);
+  final stagingConf = (0.35 + 0.25 * rrCov) * hrCov;
+  final windowConf = wm.confidence > 0 ? wm.confidence : 0.45;
+  final conf = clamp((windowConf + stagingConf) / 2.0, 0.0, 0.6);
 
   return SleepSegmentation(
     window: SleepWindow(
@@ -316,15 +350,17 @@ SleepSegmentation segmentSleep(
       offsetIdx: offset,
       onsetMs: chosen.start * 1000.0,
       offsetMs: chosen.end * 1000.0,
-      immobile:
-          fallbackWindow?.immobile ?? List<bool>.filled(trimmedAccel.length, false),
+      // EMPTY when van Hees never ran (every forced-window path), as
+      // `immobileUnknown` already is. A full-length all-false immobility mask
+      // and an all-0.0 deg arm-angle series are fabricated per-second
+      // measurements, not "we did not look".
+      immobile: fallbackWindow?.immobile ?? const [],
       // Forward the undecidable-second mask too. Dropping it here silently
       // downgraded "we could not tell" into "not immobile", which is the
       // conservative direction but costs the caller `unresolvedTailSec` — the
       // one signal that says a night ran past the end of the record.
       immobileUnknown: fallbackWindow?.immobileUnknown ?? const [],
-      zAngleDeg:
-          fallbackWindow?.zAngleDeg ?? List<double>.filled(trimmedAccel.length, 0.0),
+      zAngleDeg: fallbackWindow?.zAngleDeg ?? const [],
       sptSec: inBed,
     ),
     stages: perSec,
