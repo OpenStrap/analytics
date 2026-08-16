@@ -8,34 +8,57 @@ void main() {
     final cfg = Baselines.hrvCfg; // min5 max250 floor5 hlB14 hlS21
 
     test('first valid night seeds at the value, floor spread, calibrating', () {
-      final s = Baselines.update(null, 60.0, cfg);
+      final s = Baselines.update(null, 60.0, cfg)!;
       expect(s.baseline, 60.0);
       expect(s.spread, cfg.floorSpread);
       expect(s.nValid, 1);
       expect(s.status, BaselineStatus.calibrating);
     });
 
-    test('out-of-range first night seeds at midpoint, nValid 0', () {
-      final s = Baselines.update(null, 999.0, cfg); // > maxVal
-      expect(s.baseline, (cfg.minVal + cfg.maxVal) / 2.0);
-      expect(s.nValid, 0);
-      expect(s.nightsSinceUpdate, 1);
+    test('out-of-range first night yields NO baseline (was: the midpoint)', () {
+      // an-clinical-1. This used to return a state whose baseline was
+      // (minVal + maxVal) / 2 = 127.5 ms — a number nobody measured — against
+      // which deviation() reported z = -13 for an ordinary 45 ms night.
+      expect(Baselines.update(null, 999.0, cfg), isNull); // > maxVal
+      expect(Baselines.update(null, null, cfg), isNull);
+    });
+
+    test('foldHistory over no usable night is absent, not an invented centre',
+        () {
+      expect(Baselines.foldHistory(const <double?>[], cfg), isNull);
+      expect(Baselines.foldHistory(const <double?>[null, null], cfg), isNull);
+      // A single usable night later in the series still builds a real state.
+      final s = Baselines.foldHistory(<double?>[null, 52.0], cfg)!;
+      expect(s.baseline, 52.0);
+      expect(s.nValid, 1);
+    });
+
+    test('deviation abstains on a zero-night state', () {
+      const empty = BaselineState(
+          baseline: 127.5,
+          spread: 5.0,
+          nValid: 0,
+          nightsSinceUpdate: 0,
+          status: BaselineStatus.calibrating);
+      expect(Baselines.deviation(45.0, empty), isNull);
     });
 
     test('hard-outlier night past early life is SEEN but NOT folded', () {
       // Build a settled (non-young, nValid>=8) flat baseline at 60.
       final vals = <double?>[for (var i = 0; i < 10; i++) 60.0];
-      final settled = Baselines.foldHistory(vals, cfg);
+      final settled = Baselines.foldHistory(vals, cfg)!;
       expect(settled.nValid, 10);
       expect(settled.baseline, closeTo(60.0, 1e-9));
       // spread is at the floor (flat history), so a value > 5*floor away is hard-rejected.
       final before = settled.baseline;
-      final after = Baselines.update(settled, 60.0 + 6 * cfg.floorSpread, cfg);
+      final after = Baselines.update(settled, 60.0 + 6 * cfg.floorSpread, cfg)!;
       expect(after.baseline, before, reason: 'hard outlier not folded');
-      expect(after.nValid, settled.nValid, reason: 'nValid unchanged on reject');
+      expect(after.nValid, settled.nValid,
+          reason: 'nValid unchanged on reject');
     });
 
-    test('early-life fast adapt: a high seed is pulled toward reality in days', () {
+    test('early-life fast adapt: a high seed is pulled toward reality in days',
+        () {
       // Seed high at 90, then feed true lower nights at 55. Young (nValid<8) uses
       // halfLife 3 and a suspended hard-outlier gate, so it tracks down fast.
       var s = Baselines.update(null, 90.0, cfg);
@@ -44,23 +67,23 @@ void main() {
       }
       // With earlyHalfLifeB=3 (λ≈0.206) over 4 nights from 90 toward 55,
       // it should drop well below the midpoint, proving the anti-anchoring fix.
-      expect(s.baseline, lessThan(80.0));
+      expect(s!.baseline, lessThan(80.0));
       expect(s.baseline, greaterThan(55.0));
     });
 
     test('deviation z = (v-baseline)/(1.253*spread)', () {
-      final s = BaselineState(
+      const s = BaselineState(
           baseline: 60.0,
           spread: 5.0,
           nValid: 14,
           nightsSinceUpdate: 0,
           status: BaselineStatus.trusted);
-      final d = Baselines.deviation(60.0 + 1.253 * 5.0, s);
+      final d = Baselines.deviation(60.0 + 1.253 * 5.0, s)!;
       expect(d.z, closeTo(1.0, 1e-9));
       expect(d.delta, closeTo(1.253 * 5.0, 1e-9));
       // A value comfortably inside ±σ is in-normal-range.
-      expect(Baselines.deviation(62.0, s).inNormalRange, isTrue);
-      final d2 = Baselines.deviation(60.0 + 2 * 1.253 * 5.0, s);
+      expect(Baselines.deviation(62.0, s)!.inNormalRange, isTrue);
+      final d2 = Baselines.deviation(60.0 + 2 * 1.253 * 5.0, s)!;
       expect(d2.inNormalRange, isFalse);
     });
 
@@ -72,27 +95,20 @@ void main() {
     });
 
     test('skip-and-hold on null night increments nightsSinceUpdate', () {
-      final seeded = Baselines.update(null, 60.0, cfg);
-      final held = Baselines.update(seeded, null, cfg);
+      final seeded = Baselines.update(null, 60.0, cfg)!;
+      final held = Baselines.update(seeded, null, cfg)!;
       expect(held.baseline, seeded.baseline);
       expect(held.nValid, seeded.nValid);
       expect(held.nightsSinceUpdate, 1);
-    });
-
-    test('trailing-30 fallback: mean + sample SD, σ floor, internal spread', () {
-      final vals = <double?>[50.0, 60.0, 70.0]; // mean 60, SD=10
-      final s = Baselines.rollingMeanSD(vals, cfg);
-      expect(s.baseline, closeTo(60.0, 1e-9));
-      // SD=10 > floor σ (5); stored as SD/1.253.
-      expect(s.spread, closeTo(10.0 / 1.253, 1e-9));
-      expect(s.nValid, 3);
     });
   });
 
   group('RR artifact correction (Lipponen-Tarvainen)', () {
     test('clean physiological series classifies all normal', () {
       // 60 beats around 1000 ms with small +/-15 ms wobble (HRV).
-      final rr = <double>[for (var i = 0; i < 60; i++) 1000 + (i.isEven ? 15 : -15)];
+      final rr = <double>[
+        for (var i = 0; i < 60; i++) 1000 + (i.isEven ? 15 : -15)
+      ];
       final r = correctRr(rr);
       expect(r.cleanFraction, closeTo(1.0, 1e-9));
       expect(r.droppedCount, 0);
@@ -118,7 +134,8 @@ void main() {
       ];
     }
 
-    test('REGRESSION: a clean physiological RSA record is NOT flagged — the '
+    test(
+        'REGRESSION: a clean physiological RSA record is NOT flagged — the '
         'quartile deviation is taken on the SIGNED dRR series '
         '(Lipponen-Tarvainen 2019)', () {
       // Taking the QD of |dRR| folds the symmetric ±dRR distribution onto one
@@ -156,7 +173,8 @@ void main() {
       expect(r.cleanFraction, lessThan(1.0));
     });
 
-    test('flags EXACTLY one injected isolated ectopic and spline-corrects it', () {
+    test('flags EXACTLY one injected isolated ectopic and spline-corrects it',
+        () {
       final rr = <double>[for (var i = 0; i < 60; i++) 1000.0];
       rr[30] = 500; // single short extra beat (isolated)
       final r = correctRr(rr);
@@ -180,30 +198,6 @@ void main() {
       expect(r.correctedCount, 0);
       expect(r.droppedCount, greaterThanOrEqualTo(2));
       expect(r.nn.length, lessThan(60)); // dropped, not bridged
-    });
-  });
-
-  group('PPG SQI gate (Elgendi + Orphanidou)', () {
-    test('rejects off-skin / out-of-range HR', () {
-      expect(ppgTrust([1, 2, 3, 2, 1], 0).trusted, isFalse); // off-skin
-      expect(ppgTrust([1, 2, 3, 2, 1], 220).trusted, isFalse); // hr too high
-    });
-    test('rejects flatline PPG even with plausible HR', () {
-      final r = ppgTrust([5, 5, 5, 5, 5], 60);
-      expect(r.trusted, isFalse);
-      expect(r.reasons, contains('flatline'));
-    });
-    test('accepts a skewed, in-range window', () {
-      // right-skewed window (systolic-upstroke-like).
-      final w = <double>[0, 0, 0, 1, 4, 9, 2, 0, 0, 0];
-      final r = ppgTrust(w, 60);
-      expect(r.skewness, greaterThan(0));
-      expect(r.trusted, isTrue);
-    });
-    test('RR physiological-plausibility rule', () {
-      expect(rrPhysiologicallyPlausible([900, 950, 1000]), isTrue);
-      expect(rrPhysiologicallyPlausible([900, 250]), isFalse); // <300
-      expect(rrPhysiologicallyPlausible([300, 1000]), isFalse); // ratio>3
     });
   });
 
@@ -240,7 +234,8 @@ void main() {
       expect(e.last.value, lessThan(20));
       expect(e.last.value, greaterThan(10));
     });
-    test('REGRESSION: gap-aware EWMA never extrapolates outside the data on a '
+    test(
+        'REGRESSION: gap-aware EWMA never extrapolates outside the data on a '
         'duplicate or non-monotonic timestamp', () {
       // dt <= 0 made lambda = 1 - 2^(-dt/H) NEGATIVE, so the update ran
       // BACKWARDS: [0,1000,500] with values [10,10,20] produced 5.857 — below
@@ -320,6 +315,33 @@ void main() {
       // elapsed time minus that first interval — exactly, no compaction.
       final span = c.nnTimesMs.last - c.nnTimesMs.first;
       expect(span, closeTo(real - rr.first, 1e-6));
+    });
+
+    test('a spline-corrected isolated beat advances by the REAL interval', () {
+      // an-clinical-4, the sibling the dropped-run fix above missed. Every
+      // ~60th beat is a MISSED detection: one ~2000 ms interval where two
+      // ~1000 ms ones belong. The spline emits ~1000 ms as the NN value (right)
+      // but the clock used to advance by that 1000 too (wrong) — deleting ~1 s
+      // of record per corrected beat, 1.6 % of a night at this rate, which
+      // inflated cvhr_per_hour and shortened hrvFreq's spanSec.
+      final rr = <double>[
+        // The anomaly sits at i % 60 == 30 so the first and last beats are
+        // normal — the span below is then exactly total-minus-first-interval.
+        for (var i = 0; i < 3600; i++) i % 60 == 30 ? 2000.0 : 1000.0,
+      ];
+      var real = 0.0;
+      for (final v in rr) {
+        real += v;
+      }
+      final c = correctRr(rr);
+      expect(c.correctedCount, greaterThan(50),
+          reason: 'spline path exercised');
+      final span = c.nnTimesMs.last - c.nnTimesMs.first;
+      // Exact wall clock: total elapsed minus the first interval. Before the
+      // fix this came out ~59 s (1.6 %) short of it.
+      expect(span, closeTo(real - rr.first, 1e-6));
+      // The emitted NN value is still the interpolated one, not the raw 2000.
+      expect(c.nn.reduce((a, b) => a > b ? a : b), lessThan(1500.0));
     });
   });
 }

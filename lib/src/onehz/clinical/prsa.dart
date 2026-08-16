@@ -6,9 +6,14 @@
 //
 // Algorithm:
 //   1. Anchor selection: for DC, anchor i where RR(i) > RR(i-1) (a
-//      deceleration); for AC, RR(i) < RR(i-1). (Optionally bounded by a ratio
-//      threshold T to suppress artifacts — default unbounded as in the
-//      canonical DC.)
+//      deceleration); for AC, RR(i) < RR(i-1). Bounded by a ratio threshold T
+//      to suppress artifacts, default 0.05 — Bauer's own PRSA excludes anchors
+//      whose RR change exceeds 5 %, so 0.05 is the canonical setting and the
+//      one the published risk tiers below were read against. (The header used
+//      to claim "default unbounded"; it never was. DC is strongly cap-sensitive
+//      — at RMSSD 80 the capped estimate is 10.3 ms against 35.1 ms unbounded —
+//      so this is not a cosmetic disagreement, and the number must not be
+//      changed on the strength of a stale comment.)
 //   2. For each anchor, take a window of length 2L centered at the anchor.
 //      Drop anchors too close to the series ends.
 //   3. Phase-aligned averaging: X(k) = mean over anchors of RR(anchor+k),

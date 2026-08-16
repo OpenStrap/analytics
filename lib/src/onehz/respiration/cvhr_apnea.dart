@@ -12,16 +12,25 @@
 //   1. Build a 1 Hz HR-equivalent envelope from cleaned NN (instantaneous HR
 //      = 60000/NN), smoothed with a 2nd-order (quadratic) Savitzky-Golay-like
 //      local polynomial to suppress beat jitter while preserving cycle shape.
-//   2. Adaptive 5th / 95th percentile envelopes over a sliding ~130 s window
-//      define the "normal band"; a dip = an excursion below the 5th-pct
-//      envelope of width 10–120 s.
-//   3. Keep a dip as a CVHR cycle only if depth-to-width ratio > 0.7 ms/s
-//      (the steep bradycardia-then-tachycardia signature, not slow drift).
+//   2. An adaptive baseline — the sliding MEDIAN over a ~130 s window, which
+//      spans ≥2 apnea cycles so it tracks the eupneic level without being
+//      pulled into any single event. The bradycardia is an NN MAXIMUM (NN ↑ ⇔
+//      HR ↓), so the scored quantity is the POSITIVE excursion above that
+//      baseline; negative excursions (the recovery tachycardia) are clipped.
+//      A run clears the baseline when it exceeds max(0.5 × the 75th percentile
+//      of the positive excursions, 5 ms) — the only percentile in this file.
+//   3. Keep a run as a CVHR cycle only if its width is 10–120 s AND its
+//      depth-to-width ratio > 0.7 ms/s (the steep bradycardia-then-tachycardia
+//      signature, not slow drift).
 //   4. CVHR cycles per hour => an apnea SCREEN index (NOT an AHI, NOT a
 //      diagnosis). Report night-to-night variability caveat.
 //
 // HONESTY: this is a SCREEN. We never output an AHI or a clinical category, and
 // we flag that single-night CVHR has substantial night-to-night variability.
+// The denominator is OBSERVED time: the night is split at recording gaps, each
+// contiguous stretch is analysed on its own, and the hole contributes neither
+// interpolated beats nor hours. Dividing by the first-to-last span instead let
+// a 2 h charging break cut the index from 80.0/h to 53.3/h on identical beats.
 
 import 'dart:math' as math;
 import '../types.dart';
@@ -30,9 +39,15 @@ import '../util.dart';
 class CvhrResult {
   final int cycleCount; // detected CVHR cycles
   final double cvhrPerHour; // cycles / hour (the screen index)
-  final double analyzedHours; // night length analyzed
-  final double meanDepthMs; // mean dip depth (ms of NN excursion)
-  final double meanWidthSec; // mean dip width (s)
+  final double analyzedHours; // OBSERVED hours analysed (gaps excluded)
+
+  /// Mean dip depth (ms of NN excursion) — NULL when no cycle was detected.
+  /// It used to be 0 in that case, which serialised an absence as a
+  /// measurement. `cycleCount == 0` and these being null are the same fact.
+  final double? meanDepthMs;
+
+  /// Mean dip width (s) — NULL when no cycle was detected. See [meanDepthMs].
+  final double? meanWidthSec;
   const CvhrResult({
     required this.cycleCount,
     required this.cvhrPerHour,
@@ -44,8 +59,8 @@ class CvhrResult {
         'cycle_count': cycleCount,
         'cvhr_per_hour': round6(cvhrPerHour),
         'analyzed_hours': round6(analyzedHours),
-        'mean_depth_ms': round6(meanDepthMs),
-        'mean_width_sec': round6(meanWidthSec),
+        'mean_depth_ms': meanDepthMs == null ? null : round6(meanDepthMs!),
+        'mean_width_sec': meanWidthSec == null ? null : round6(meanWidthSec!),
       };
 }
 
@@ -53,7 +68,13 @@ class CvhrResult {
 ///
 /// [nnMs] cleaned NN intervals (ms), [nnTimesMs] their cumulative beat times
 /// (ms). [artifactFraction] from RR-correction. Tunables follow Hayano:
-/// dip width 10–120 s, depth/width ratio > 0.7 ms/s, ~130 s percentile window.
+/// dip width 10–120 s, depth/width ratio > 0.7 ms/s, ~130 s baseline window.
+///
+/// Callers pass one unsegmented block (the whole sleep window), so a charging
+/// or off-wrist stretch arrives here inline. Beats more than [maxGapSec] apart
+/// start a NEW segment: each is resampled and scored on its own, and only the
+/// segments' own spans enter [CvhrResult.analyzedHours]. The gap is not
+/// interpolated across and is not charged to the denominator.
 Metric<CvhrResult> cvhrApneaScreen(
   List<double> nnMs,
   List<double> nnTimesMs, {
@@ -63,6 +84,7 @@ Metric<CvhrResult> cvhrApneaScreen(
   double depthWidthRatioMin = 0.7, // ms per second
   double envWindowSec = 130,
   double maxArtifact = 0.30,
+  double maxGapSec = 30,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
   if (nnMs.length < 60 || nnTimesMs.length != nnMs.length) {
@@ -81,31 +103,102 @@ Metric<CvhrResult> cvhrApneaScreen(
     );
   }
 
-  // Resample NN onto a uniform 1 Hz grid by piecewise-linear interpolation of
-  // the tachogram (NN vs beat time). This gives evenly-spaced points for the
-  // sliding-window percentile envelopes and the polynomial smoother. (Times in
-  // seconds.)
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
-  final t0 = tSec.first;
-  final t1 = tSec.last;
-  final analyzedHours = (t1 - t0) / 3600.0;
-  if (analyzedHours <= 0) {
+  if (tSec.last - tSec.first <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'degenerate beat times',
     );
   }
-  final nGrid = (t1 - t0).floor() + 1;
-  if (nGrid < 60) {
+
+  // SEGMENT AT GAPS. Beats more than [maxGapSec] apart are two recordings, not
+  // one: interpolating a straight line across the hole invents a flat stretch
+  // with no cycles in it, and charging the hole to `analyzedHours` divides a
+  // real cycle count by time we never observed. Both push the index DOWN, so a
+  // charging break used to read as an improvement.
+  final segStart = <int>[0];
+  for (var i = 1; i < tSec.length; i++) {
+    if (tSec[i] - tSec[i - 1] > maxGapSec) segStart.add(i);
+  }
+
+  var cycleCount = 0;
+  var analyzedHours = 0.0;
+  final depths = <double>[]; // ms
+  final widths = <double>[]; // s
+  for (var s = 0; s < segStart.length; s++) {
+    final lo = segStart[s];
+    final hi = (s + 1 < segStart.length ? segStart[s + 1] : tSec.length) - 1;
+    final segT = tSec.sublist(lo, hi + 1);
+    final segNn = nnMs.sublist(lo, hi + 1);
+    final spanSec = segT.last - segT.first;
+    // Too short to hold even one cycle plus its baseline window — it also can't
+    // be scored, so it contributes neither cycles nor hours.
+    if (segT.length < 60 || spanSec < 60) continue;
+    analyzedHours += spanSec / 3600.0;
+    _scoreSegment(
+      segT,
+      segNn,
+      minWidthSec: minWidthSec,
+      maxWidthSec: maxWidthSec,
+      depthWidthRatioMin: depthWidthRatioMin,
+      envWindowSec: envWindowSec,
+      onCycle: (depth, width) {
+        cycleCount++;
+        depths.add(depth);
+        widths.add(width);
+      },
+    );
+  }
+
+  if (analyzedHours <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'span too short for a CVHR screen (<60 s)',
+      note: 'no gap-free stretch long enough for a CVHR screen (<60 s)',
     );
   }
+
+  final perHour = cycleCount / analyzedHours;
+  final conf = clamp((1 - artifactFraction) * 0.85, 0.2, 0.85);
+  return Metric<CvhrResult>(
+    value: CvhrResult(
+      cycleCount: cycleCount,
+      cvhrPerHour: perHour,
+      analyzedHours: analyzedHours,
+      meanDepthMs: depths.isEmpty ? null : mean(depths),
+      meanWidthSec: widths.isEmpty ? null : mean(widths),
+    ),
+    confidence: conf,
+    tier: Tier.high,
+    inputs_used: inputs,
+    note: 'CVHR/ACAT (Hayano) apnea SCREEN — NOT a diagnosis, NOT an AHI; '
+        'single-night CVHR has substantial night-to-night variability, '
+        'interpret as a trend over multiple nights',
+  );
+}
+
+/// Score ONE gap-free stretch: resample → smooth → sliding-median baseline →
+/// positive-excursion runs → width + steepness gates. Calls [onCycle] with
+/// (depthMs, widthSec) per surviving cycle. [t] in seconds, [nn] in ms.
+void _scoreSegment(
+  List<double> t,
+  List<double> nn, {
+  required double minWidthSec,
+  required double maxWidthSec,
+  required double depthWidthRatioMin,
+  required double envWindowSec,
+  required void Function(double depthMs, double widthSec) onCycle,
+}) {
+  // Resample NN onto a uniform 1 Hz grid by piecewise-linear interpolation of
+  // the tachogram (NN vs beat time). This gives evenly-spaced points for the
+  // sliding-window baseline and the polynomial smoother. Only ever called on a
+  // stretch with no gap larger than the caller's tolerance, so no interpolation
+  // here spans a hole.
+  final t0 = t.first;
+  final nGrid = (t.last - t0).floor() + 1;
   final grid = List<double>.generate(nGrid, (i) => t0 + i);
-  final nnGrid = _resampleLinear(tSec, nnMs, grid);
+  final nnGrid = _resampleLinear(t, nn, grid);
 
   // 2nd-order local-polynomial smoothing (Savitzky-Golay quadratic, ~7 s half
   // window) to suppress beat jitter while keeping the cyclic shape.
@@ -139,9 +232,6 @@ Metric<CvhrResult> cvhrApneaScreen(
   // Find peaks of `exc`: local maxima exceeding `prom`, each isolated to one
   // contiguous super-threshold run (so one bradycardia = one cycle). Measure
   // the run width and the peak depth; apply the width + depth/width gates.
-  var cycleCount = 0;
-  final depths = <double>[]; // ms
-  final widths = <double>[]; // s
   var i = 0;
   while (i < nGrid) {
     if (exc[i] <= prom) {
@@ -158,30 +248,9 @@ Metric<CvhrResult> cvhrApneaScreen(
     if (widthSec < minWidthSec || widthSec > maxWidthSec) continue;
     // Depth-to-width steepness gate (ms per second): the bradycardia-tachycardia
     // swing is steep; slow baseline drift is shallow per second.
-    final ratio = peakDepth / widthSec;
-    if (ratio < depthWidthRatioMin) continue;
-    cycleCount++;
-    depths.add(peakDepth);
-    widths.add(widthSec);
+    if (peakDepth / widthSec < depthWidthRatioMin) continue;
+    onCycle(peakDepth, widthSec);
   }
-
-  final perHour = analyzedHours > 0 ? cycleCount / analyzedHours : 0.0;
-  final conf = clamp((1 - artifactFraction) * 0.85, 0.2, 0.85);
-  return Metric<CvhrResult>(
-    value: CvhrResult(
-      cycleCount: cycleCount,
-      cvhrPerHour: perHour,
-      analyzedHours: analyzedHours,
-      meanDepthMs: depths.isEmpty ? 0 : mean(depths)!,
-      meanWidthSec: widths.isEmpty ? 0 : mean(widths)!,
-    ),
-    confidence: conf,
-    tier: Tier.high,
-    inputs_used: inputs,
-    note: 'CVHR/ACAT (Hayano) apnea SCREEN — NOT a diagnosis, NOT an AHI; '
-        'single-night CVHR has substantial night-to-night variability, '
-        'interpret as a trend over multiple nights',
-  );
 }
 
 /// Piecewise-linear resample of (t,y) onto a sorted [grid] of times (same unit).

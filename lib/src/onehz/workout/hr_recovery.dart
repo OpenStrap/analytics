@@ -43,11 +43,21 @@ class HrRecovery {
 /// spike). Returns absent if the tail is too short, off-skin, or doesn't descend.
 ///
 /// [tsSec] OPTIONAL unix-second timestamps parallel to [hrTailBpm]. SUPPLY THEM.
-/// Without them "+60 s" is really "+60 ARRAY POSITIONS": the substrate this is
-/// sliced from is one row per decoded record, not a dense 1 Hz grid, so on a
+/// Without them EVERY window here is really ARRAY POSITIONS: the substrate this
+/// is sliced from is one row per decoded record, not a dense 1 Hz grid, so on a
 /// gappy tail the "HR at +60 s" sample can be many minutes post-exercise and
 /// `hrr_bpm` is overstated — read by the user as a fitness marker. With [tsSec]
-/// the recovery point is found by CLOCK TIME and the span is checked for holes.
+/// ALL THREE windows are resolved on the clock: the peak window before end, the
+/// recovery point, and the ±3 s median around it. Supplying [tsSec] used to
+/// convert only the recovery point, leaving the peak window positional — a
+/// 30-position window on a 20 s-spaced tail spanned 580 s of clock, so "peak at
+/// exercise end" came from nine minutes earlier and inflated the drop by 28 bpm
+/// while ALSO collecting the +0.2 timestamped-confidence bonus.
+///
+/// [maxGapSec] bounds a hole in either direction. A gap inside the peak window
+/// is not fatal — the window simply stops there — but it does forfeit the
+/// timestamped bonus, because the peak is then measured over less clock time
+/// than was asked for.
 Metric<HrRecovery> hrRecovery(
   List<int> hrTailBpm, {
   int? endIndex,
@@ -65,15 +75,37 @@ Metric<HrRecovery> hrRecovery(
       note: 'no HR tail for HRR',
     );
   }
+  final times = (tsSec != null && tsSec.length == hrTailBpm.length) ? tsSec : null;
   // Peak HR over the window ending at exercise end (valid samples only).
-  final peakLo = (end - peakWindowSec).clamp(0, hrTailBpm.length - 1);
+  // With timestamps the window is peakWindowSec of CLOCK TIME walked backwards
+  // from end, stopping at a hole; without them it is peakWindowSec positions,
+  // which is all the caller has given us to go on.
+  int peakLo;
+  var peakWindowFull = true;
+  if (times != null) {
+    var i = end;
+    while (i > 0 &&
+        times[end] - times[i - 1] <= peakWindowSec &&
+        times[i] - times[i - 1] <= maxGapSec) {
+      i--;
+    }
+    peakLo = i;
+    // "Full" = the window covers the requested clock span, OR it was cut short
+    // by the start of the caller's slice rather than by the DATA. Stopping at
+    // peakLo > 0 with a short span means the samples themselves are too far
+    // apart (or a hole intervened) to resolve the window — that is the case
+    // that forfeits the timestamped confidence bonus below.
+    peakWindowFull =
+        peakLo == 0 || times[end] - times[peakLo] >= peakWindowSec;
+  } else {
+    peakLo = (end - peakWindowSec).clamp(0, hrTailBpm.length - 1);
+  }
   double peak = 0;
   for (var i = peakLo; i <= end; i++) {
     final h = hrTailBpm[i];
     if (h > peak) peak = h.toDouble();
   }
   // Recovery HR: median of a ±3 s window around end + recoverySec.
-  final times = (tsSec != null && tsSec.length == hrTailBpm.length) ? tsSec : null;
   int target;
   if (times != null) {
     // Locate the recovery point on the CLOCK, and refuse if the tail has a hole
@@ -98,14 +130,28 @@ Metric<HrRecovery> hrRecovery(
   } else {
     target = end + recoverySec;
   }
-  final lo = (target - 3).clamp(0, hrTailBpm.length - 1);
-  final hi = (target + 3).clamp(0, hrTailBpm.length - 1);
   if (target >= hrTailBpm.length) {
-    return const Metric<HrRecovery>.absent(
+    return Metric<HrRecovery>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'HR tail too short to reach +${60}s recovery point',
+      note: 'HR tail too short to reach +${recoverySec}s recovery point',
     );
+  }
+  // The ±3 s median window, on the clock when we have one. Positionally it was
+  // ±3 ROWS, which on a sparse tail averages HR from minutes apart.
+  int lo, hi;
+  if (times != null) {
+    lo = target;
+    while (lo > 0 && times[target] - times[lo - 1] <= 3) {
+      lo--;
+    }
+    hi = target;
+    while (hi + 1 < times.length && times[hi + 1] - times[target] <= 3) {
+      hi++;
+    }
+  } else {
+    lo = (target - 3).clamp(0, hrTailBpm.length - 1);
+    hi = (target + 3).clamp(0, hrTailBpm.length - 1);
   }
   final recWin = [
     for (var i = lo; i <= hi; i++)
@@ -143,9 +189,14 @@ Metric<HrRecovery> hrRecovery(
   }
   final validFrac = seen == 0 ? 0.0 : valid / seen;
   // Timestamped tails earn the top of the band; positional ones cannot, because
-  // we have no way to know the recovery sample is really 60 s later.
-  final conf =
-      clamp(0.3 + 0.4 * validFrac + (times != null ? 0.2 : 0.0), 0.2, 0.9);
+  // we have no way to know the recovery sample is really 60 s later. A
+  // timestamped tail too sparse to fill the peak window doesn't earn it either
+  // — the timestamps proved the window was short rather than fixing it.
+  final conf = clamp(
+    0.3 + 0.4 * validFrac + (times != null && peakWindowFull ? 0.2 : 0.0),
+    0.2,
+    0.9,
+  );
   return Metric<HrRecovery>(
     value: HrRecovery(
       peakHr: peak,

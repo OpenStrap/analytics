@@ -16,7 +16,8 @@
 //      makes magnitude-based stillness false-positive on a merely resting arm.
 //   2. Enumerate EVERY immobility bout (the nocturnal path keeps only the
 //      longest), bridging brief arousals.
-//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window.
+//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window,
+//      and bouts built on seconds the band never measured (`minNapAccelCoverage`).
 //   4. Require an autonomic signature — median HR inside the bout at or below
 //      `napRestingHrMult` × the DAYTIME-AWAKE HR baseline. Stillness alone is
 //      also desk work, reading and a car passenger seat.
@@ -103,6 +104,18 @@ const double napRestingHrMult = 0.95;
 /// all. Below it we abstain — daytime HR is opportunistic on this device.
 const double minNapHrCoverage = 0.5;
 
+/// A bout needs a DECODED gravity vector on at least this fraction of its
+/// wall-clock seconds. Mirrors `kMinAccelCoverageForVanHees` in the edge, which
+/// guards the nocturnal path the same way — but the gate belongs HERE so no
+/// caller can forget it.
+///
+/// It is a CONTRACT, not a live fix: `stillAt` already refuses an unmeasured
+/// second, and a bout can only absorb unmeasured time through a bridge, which
+/// is capped at [napBridgeSec] between runs of at least the sustained window —
+/// so today's arithmetic cannot get coverage below ~50% anyway. Encoded here so
+/// a future change to either bound cannot silently reopen the hole.
+const double minNapAccelCoverage = 0.5;
+
 /// A bout overlapping off-wrist or excluded (charging / workout) spans by at
 /// least this fraction is discarded. A charging band is perfectly still.
 const double maxNapOffWristFraction = 0.5;
@@ -172,6 +185,13 @@ Metric<List<NapWindow>> detectNaps(
   // positional array, not a uniform grid: pruning and sync gaps leave holes, so
   // two samples an hour apart can be adjacent indices. Joining them would read
   // an unobserved hour as unbroken stillness and count it as sleep.
+  //
+  // It breaks at an UNMEASURED second too, and that falls out of the primitive:
+  // `deltaDeg` is NaN wherever gravity was not decoded (see [immobilityMask]),
+  // and `NaN < thr` is false. A second the band never measured therefore fails
+  // the still test outright instead of contributing the constant 0.0° of an
+  // exact (0,0,0) sample — which is what emitted a 50-minute decode gap as a
+  // nap at the 0.85 confidence cap.
   bool stillAt(int k) =>
       mask.deltaDeg[k] < thr && (k == 0 || absAt(k) - absAt(k - 1) == 1);
 
@@ -280,7 +300,7 @@ Metric<List<NapWindow>> detectNaps(
   // Every rejection path increments one of these and reports it in `skipped`.
   // A silent `continue` turns "your 7-hour still block is too long to be a nap"
   // into a bare "no qualifying nap", which tells the caller nothing about why.
-  var outOfRange = 0, inMainSleep = 0, noBaseline = 0;
+  var outOfRange = 0, inMainSleep = 0, noBaseline = 0, unobserved = 0;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -308,6 +328,18 @@ Metric<List<NapWindow>> detectNaps(
         start < mainSleep.end &&
         end > mainSleep.start) {
       inMainSleep++;
+      continue;
+    }
+
+    // Wall-clock accel coverage — the seconds inside the bout the band actually
+    // measured gravity for, over the bout's elapsed span (so a recording hole
+    // counts against it exactly as an invalid sample does).
+    var accelSec = 0;
+    for (var k = start; k < end; k++) {
+      if (series[k].valid) accelSec++;
+    }
+    if (accelSec / tib < minNapAccelCoverage) {
+      unobserved++;
       continue;
     }
 
@@ -421,6 +453,7 @@ Metric<List<NapWindow>> detectNaps(
     if (noBaseline > 0) '$noBaseline without an awake HR baseline',
     if (outOfRange > 0) '$outOfRange outside 15 min–6 h',
     if (inMainSleep > 0) '$inMainSleep inside the main sleep window',
+    if (unobserved > 0) '$unobserved with accel coverage <50% (unmeasured)',
     if (unverifiable > 0) '$unverifiable unverifiable (HR coverage <50%)',
     if (offWrist > 0) '$offWrist off-wrist/excluded',
     if (awakeStill > 0) '$awakeStill still but no HR dip',

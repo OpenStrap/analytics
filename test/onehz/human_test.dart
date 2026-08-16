@@ -31,7 +31,8 @@ void main() {
       final v = m.value!;
       expect(v.sjlHours, closeTo(2.0, 0.15));
       expect(v.absHours, closeTo(2.0, 0.15));
-      expect(v.sjlHours, greaterThan(0), reason: 'weekend runs later => positive');
+      expect(v.sjlHours, greaterThan(0),
+          reason: 'weekend runs later => positive');
     });
 
     test('insufficient free nights => absent', () {
@@ -220,17 +221,39 @@ void main() {
     test('top-of-window value => high percentile', () {
       // 30 days centred ~50 with spread; tonight = 70 is near the top.
       final hist = List<double>.generate(30, (i) => 40.0 + i); // 40..69
-      final m = percentileOfYou(70, hist);
+      final m = percentileOfYou(70, hist, better: Better.higher);
       expect(m.present, isTrue);
       expect(m.value!.percentile, greaterThan(95));
       expect(m.value!.label, 'among your best');
+    });
+
+    test(
+        'the label follows `better`, so RHR is not congratulated for a bad night',
+        () {
+      // an-wellness-1. The band ladder used to be a bare pct->string map, so
+      // the RHR detail screen printed the user's WORST-ever resting HR as
+      // "among your best" and their best-ever as "among your lowest".
+      final nights = List<double>.generate(29, (i) => 54.0 + (i % 5)); // 54..58
+      final worst = percentileOfYou(72, nights, better: Better.lower);
+      expect(worst.value!.percentile, 100.0);
+      expect(worst.value!.label, 'among your worst');
+      final best = percentileOfYou(50, nights, better: Better.lower);
+      expect(best.value!.percentile, 0.0);
+      expect(best.value!.label, 'among your best');
+      // Same numbers, higher-is-better metric: the verdicts swap.
+      expect(percentileOfYou(72, nights, better: Better.higher).value!.label,
+          'among your best');
+      // No good end of the scale: position, not verdict.
+      expect(percentileOfYou(72, nights, better: Better.neither).value!.label,
+          'among your highest');
     });
 
     test('record gated by MDC: tiny beat is NOT a record, big beat is', () {
       final hist = List<double>.generate(30, (i) => 40.0 + (i % 10)); // spread
       final priorMax = hist.reduce((a, b) => a > b ? a : b);
       // Barely beats the max => within MDC noise => NOT a record.
-      final small = personalRecord(priorMax + 0.01, hist, better: Better.higher);
+      final small =
+          personalRecord(priorMax + 0.01, hist, better: Better.higher);
       expect(small.value!.isRecord, isFalse);
       // Clearly beats it.
       final big = personalRecord(priorMax + 50, hist, better: Better.higher);
@@ -239,13 +262,14 @@ void main() {
     });
 
     test('short history => absent', () {
-      final m = percentileOfYou(10, [1, 2, 3]);
+      final m = percentileOfYou(10, [1, 2, 3], better: Better.higher);
       expect(m.present, isFalse);
     });
   });
 
   group('glass-box readiness + deterministic narrative', () {
-    test('one driver off => narrative names that driver, breakdown complete', () {
+    test('one driver off => narrative names that driver, breakdown complete',
+        () {
       // HRV tanks tonight; everything else is dead-on the personal median.
       final hrvHist = List<double>.generate(20, (i) => 4.0 + (i % 5) * 0.02);
       final rhrHist = List<double>.generate(20, (i) => 55.0 + (i % 5) * 0.2);
@@ -254,7 +278,10 @@ void main() {
 
       final inputs = [
         GlassBoxInput(
-            label: 'hrv', value: 3.0, history: hrvHist, weight: wHrv), // way low
+            label: 'hrv',
+            value: 3.0,
+            history: hrvHist,
+            weight: wHrv), // way low
         GlassBoxInput(
             label: 'rhr',
             value: 55.4,
@@ -262,10 +289,16 @@ void main() {
             weight: wRhr,
             lowerIsBetter: true),
         GlassBoxInput(
-            label: 'resp', value: 14.2, history: respHist, weight: wResp,
+            label: 'resp',
+            value: 14.2,
+            history: respHist,
+            weight: wResp,
             lowerIsBetter: true),
         GlassBoxInput(
-            label: 'temp', value: 0.04, history: tempHist, weight: wTemp,
+            label: 'temp',
+            value: 0.04,
+            history: tempHist,
+            weight: wTemp,
             lowerIsBetter: true),
       ];
       // ignore: deprecated_member_use_from_same_package
@@ -289,7 +322,10 @@ void main() {
       final inputs = [
         GlassBoxInput(label: 'hrv', value: 50.2, history: hist, weight: wHrv),
         GlassBoxInput(
-            label: 'rhr', value: 50.2, history: hist, weight: wRhr,
+            label: 'rhr',
+            value: 50.2,
+            history: hist,
+            weight: wRhr,
             lowerIsBetter: true),
       ];
       // ignore: deprecated_member_use_from_same_package
@@ -303,7 +339,8 @@ void main() {
       final inputs = [
         GlassBoxInput(label: 'hrv', value: 64, history: hist, weight: wHrv),
         // temp has no history => dropped + reweighted, not zeroed.
-        GlassBoxInput(label: 'temp', value: 0.0, history: const [], weight: wTemp),
+        GlassBoxInput(
+            label: 'temp', value: 0.0, history: const [], weight: wTemp),
       ];
       // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
@@ -316,17 +353,16 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  group('PLAUSIBILITY on real ../whoop_hist.jsonl (single-night pieces only)', () {
+  group('PLAUSIBILITY on real ../whoop_hist.jsonl (single-night pieces only)',
+      () {
     final histFile = File('../whoop_hist.jsonl');
     test('real HR/RR feed the human layer without crashing', () {
       if (!histFile.existsSync()) {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final hr = <double>[];
       final rrMs = <double>[];
       for (final line in lines) {
@@ -364,14 +400,15 @@ void main() {
       expect(m, isNotNull);
       expect(Tier.all.contains(m.tier), isTrue);
       // ignore: avoid_print
-      print('REAL human-layer plausibility: realRHR=${realRhr.toStringAsFixed(1)} '
+      print(
+          'REAL human-layer plausibility: realRHR=${realRhr.toStringAsFixed(1)} '
           'realRMSSD=${realRmssd.toStringAsFixed(1)} '
           'state=${m.present ? m.value!.state : "absent"} '
           '(baseline SYNTHETIC — capture too short for multi-night)');
 
       // percentile-of-you against a synthetic 30-day window using the real RHR.
       final win = List<double>.generate(30, (i) => realRhr + (i - 15) * 0.3);
-      final p = percentileOfYou(realRhr, win);
+      final p = percentileOfYou(realRhr, win, better: Better.lower);
       expect(p.present, isTrue);
       expect(p.value!.percentile, inInclusiveRange(0, 100));
     });

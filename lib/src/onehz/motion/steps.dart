@@ -379,6 +379,12 @@ const double personalDynFloorQuantile = 0.90;
 /// Minimum pooled trailing minutes before a personal floor is trustworthy.
 /// 2000 minutes ≈ 1.5 days of continuous wear, in practice several partial
 /// days — enough that the quantile is not dominated by one posture or one day.
+///
+/// This gates [personalDynFloor], which needs the RAW minute pool. A caller
+/// that prunes its substrate cannot supply that and uses
+/// [personalDynFloorFromDailySummaries] instead, which is gated on DAYS —
+/// so do NOT report cold-start progress against this constant unless the
+/// caller genuinely counted minutes. See [dailyActiveMinutes].
 const int personalDynFloorMinMinutes = 2000;
 
 /// Minimum trailing DAYS for [personalDynFloorFromDailySummaries].
@@ -542,7 +548,12 @@ double? dailyDynSummary(
 class DailyMovementEstimate {
   final int activeMinutes; // minutes with sustained wrist movement
   final double dynFloorG; // personal floor actually applied (g)
-  final double coverage; // fraction of the day with valid motion data
+
+  /// Covered minutes / EXPECTED minutes when the caller supplies
+  /// `expectedMinutes` (1440 for a calendar day); otherwise covered minutes /
+  /// the worn SPAN, which counts interior holes but not the unworn ends.
+  /// Read the two cases differently — only the first is "fraction of the day".
+  final double coverage;
   final int boutCount; // number of qualifying bouts
 
   const DailyMovementEstimate({
@@ -590,11 +601,17 @@ class DailyMovementEstimate {
 /// which is what this returns. A covered minute counts when BOTH of these hold:
 ///   • its [MotionMinute.dynAmp] is above [personalDynFloorG];
 ///   • it belongs to a run of at least [minBoutMin] CONSECUTIVE qualifying
-///     minutes, where consecutive means adjacent in ORIGINAL minute index — a
-///     coverage gap breaks the run and cannot stitch two short stretches into
-///     one qualifying bout. This is a DENOISER, not a health threshold: the
-///     2018 US Physical Activity Guidelines removed the 10-minute minimum-bout
-///     rule, so do not defend this number physiologically.
+///     minutes, where consecutive means ADJACENT ON THE CLOCK — the next
+///     minute's `tsMinStartMs` is exactly 60 s later. A coverage gap breaks the
+///     run and cannot stitch two short stretches into one qualifying bout. This
+///     is a DENOISER, not a health threshold: the 2018 US Physical Activity
+///     Guidelines removed the 10-minute minimum-bout rule, so do not defend
+///     this number physiologically.
+///
+/// [expectedMinutes] mirrors `enmoSeries`: pass 1440 for a calendar day so
+/// [DailyMovementEstimate.coverage] is measured against the day rather than
+/// against the worn span. Without it, a day worn 4 h out of 24 reports 1.0
+/// while `enmoSeries` reports 0.167 for the identical substrate.
 ///
 /// There is deliberately no upper ceiling and no HR gate. Both were measured
 /// against real substrate and found to be dead or harmful — see the comments
@@ -603,9 +620,15 @@ class DailyMovementEstimate {
 /// [personalDynFloorG] is REQUIRED and MAY BE NULL. Null means "not enough
 /// history to know this user's movement scale", and the honest answer to that
 /// is an ABSENT metric carrying a `need_baseline:have=…,need=…` note — build
-/// the floor with [personalDynFloor] and pass [pooledMinutesAvailable] so the
-/// note can report progress. There is deliberately NO constant fallback: a
-/// constant absolute floor is precisely the failure this design removes.
+/// the floor with [personalDynFloorFromDailySummaries] and pass
+/// [historyDaysAvailable] so the note can report progress. There is
+/// deliberately NO constant fallback: a constant absolute floor is precisely
+/// the failure this design removes.
+///
+/// The note counts DAYS, against [personalDynFloorMinDays]. It used to count
+/// them against [personalDynFloorMinMinutes] (2000) while every caller passed a
+/// day count, so a user three days in was told `have=3,need=2000` — ~1997 more
+/// of a unit nobody was measuring, for a metric that unlocks in two.
 ///
 /// Tier is always ESTIMATE.
 ///
@@ -618,7 +641,8 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   required double? personalDynFloorG,
   double minSamplesPerMinute = 30,
   int minBoutMin = 3,
-  int pooledMinutesAvailable = 0,
+  int historyDaysAvailable = 0,
+  int? expectedMinutes,
 }) {
   const inputs = ['dyn_amp_per_min', 'personal_dyn_floor'];
   if (motion.isEmpty) {
@@ -637,8 +661,8 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: needBaselineNote(
-        have: pooledMinutesAvailable,
-        need: personalDynFloorMinMinutes,
+        have: historyDaysAvailable,
+        need: personalDynFloorMinDays,
       ),
     );
   }
@@ -661,14 +685,15 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
     }
   }
   final covered = idx.length;
-  // Denominator is the elapsed minute SPAN, not the count of minutes that
-  // happened to carry a sample — see the same note in enmo.dart. A day worn
-  // 4 h out of 24 used to report coverage 1.0, and this metric's confidence
-  // keys off coverage.
-  final spanMinutes = motion.isEmpty
-      ? 0
-      : ((motion.last.tsMinStartMs - motion.first.tsMinStartMs) / 60000).round() + 1;
-  final coverage = spanMinutes <= 0 ? 0.0 : clamp(covered / spanMinutes, 0.0, 1.0);
+  // COVERAGE DENOMINATOR — same rule as enmo.dart, and it must be the same
+  // rule, because both are published for the same day. The worn SPAN counts
+  // interior holes but NOT the unworn ends, so a day worn 4 h out of 24 read
+  // coverage 1.0 here while enmoSeries(expectedMinutes: 1440) read 0.167 on the
+  // identical substrate. Pass [expectedMinutes] to count the ends too.
+  final spanMinutes =
+      ((motion.last.tsMinStartMs - motion.first.tsMinStartMs) / 60000).round() + 1;
+  final denom = expectedMinutes ?? spanMinutes;
+  final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
   if (covered < dailyStepMinCoveredMinutes) {
     return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
@@ -708,9 +733,14 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   // pass 2 — bout gate: only credit minutes inside a run of >= minBoutMin
   // CONSECUTIVE gate-passing minutes, so a scattered single minute (a brief
   // movement/HR blip mid-turnover in bed, say) never becomes phantom activity.
-  // Runs are broken by ORIGINAL minute index (idx[k]), not position in the
-  // covered-minutes array, so a coverage gap can't stitch two separate
-  // stretches into one fake long bout.
+  //
+  // Adjacency is tested ON THE CLOCK. It used to be `idx[end+1] == idx[end]+1`,
+  // which is adjacency in the gap-COMPACTED list: enmoSeries emits no
+  // MotionMinute at all for a fully-absent minute, so an off-wrist minute never
+  // occupies a slot and could not break a run. Measured: four isolated moving
+  // minutes an HOUR apart were credited as one 4-minute bout. Partially-covered
+  // minutes were already handled — they stay in `motion` and are excluded from
+  // `idx` — so only the fully-absent (off-wrist) case slipped through.
   var activeMin = 0;
   var boutCount = 0;
   var k = 0;
@@ -722,7 +752,10 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
     var end = k;
     while (end + 1 < idx.length &&
         gateOk[end + 1] &&
-        idx[end + 1] == idx[end] + 1) {
+        ((motion[idx[end + 1]].tsMinStartMs - motion[idx[end]].tsMinStartMs) /
+                    60000)
+                .round() ==
+            1) {
       end++;
     }
     if (end - k + 1 >= minBoutMin) {

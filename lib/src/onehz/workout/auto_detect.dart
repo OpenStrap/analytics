@@ -1,13 +1,15 @@
 // auto_detect.dart — opt-in "did you just work out?" SUGGESTION detector.
 //
 // Opt-in workout suggestion detector (ported from AutoWorkoutDetector.swift).
-// DELIBERATELY conservative (low sensitivity): a sustained ≥12-min
-// elevation of HR ≥ resting+30 bpm, brief (≤90 s) dips tolerated, near windows
-// merged, optional motion confirmation, overlap-excluded against saved spans.
+// DELIBERATELY conservative (low sensitivity): a sustained ≥12-min elevation of
+// HR ≥ max(RHR+[elevatedMarginBPM], RHR+[hrrFloorFraction]·HRR) — RHR+59 at
+// RHR 60 / HRmax 190 — brief (≤90 s) dips tolerated, near windows merged,
+// optional motion confirmation, overlap-excluded against saved spans.
+// (The header and the note used to quote "RHR+30", the margin this detector
+// deliberately abandoned: see [hrrFloorFraction] for the 30 false windows on a
+// sedentary week that motivated replacing it.)
 //
-// This NEVER writes a row — it only ever SUGGESTS. It is separate from the
-// persistent per-day [WorkoutDetector] (workout_detect.dart), which computes
-// calories/zones/strain for the durable "detected" rows.
+// This NEVER writes a row — it only ever SUGGESTS.
 //
 // HYBRID SEAM: every surviving bout is run through a [SportClassifier]; the
 // default returns "detected" (no sport typing). OpenStrap's motion-based HAR typer
@@ -394,7 +396,9 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
     confidence: list.isEmpty ? 0.0 : 0.6,
     tier: Tier.estimate,
     inputs_used: const ['hr_1hz', 'resting_hr', 'motion_1hz'],
-    note: 'opt-in workout suggestion (HR ≥ RHR+30 sustained ≥12 min); '
+    note: 'opt-in workout suggestion (HR ≥ max(RHR+'
+        '${AutoWorkoutDetector.elevatedMarginBPM}, RHR+'
+        '${AutoWorkoutDetector.hrrFloorFraction}·HRR) sustained ≥12 min); '
         'wrist-HR ESTIMATE, not medical advice',
   );
 }

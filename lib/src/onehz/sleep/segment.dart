@@ -9,23 +9,28 @@
 // Pipeline:
 //   1. vanHeesSleepWindow(accel) with the published 30-min bridge gap → the
 //      in-bed REST window [onsetIdx, offsetIdx) + the per-second immobility mask.
-//   2. (optional) nocturnal-HR-dip consensus: when a daytime [hrBaseline] is
-//      supplied, confirm/refine onset & offset to where HR sustains below the
-//      baseline (the cardiac signature of sleep), tightening — never widening —
-//      the accel window. This is a CONSENSUS refinement, not a second detector.
-//   3. AdvancedSleepStager.detectSleep/stageWindow, staged via
+//   2. AdvancedSleepStager.detectSleep/stageWindow, staged via
 //      StagingMethod.cardio (the default — delegates to cardioStager, the
 //      transparent motion+HR+RMSSD rule stager; see advanced_stager.dart's
 //      file header for the 2026-07 comparison behind this default) → 4-class
 //      wake/light/deep/rem per epoch, over the WINDOW SLICE ONLY.
-//   4. Expand the per-epoch stages to PER-SECOND labels over the window, and
+//   3. Expand the per-epoch stages to PER-SECOND labels over the window, mark
+//      every second we did not actually observe as 'unobserved' (step 4), and
 //      derive TST/WASO/efficiency/stage-seconds ALL from those labels
 //      (asleep = stage != wake), so they are mutually consistent and consistent
 //      with any hypnogram built from `stages`.
+//   4. UNOBSERVED time. The window is wall-clock; the substrate is a POSITIONAL
+//      array with holes, and HR is intermittent. A second with no sample, or
+//      with no heart rate anywhere near it, is labelled 'unobserved' and counts
+//      into NOTHING — not TST, not WASO, not wake, not the efficiency
+//      denominator. It is published as [SleepSegmentation.unobservedSec] so the
+//      UI can state the reason instead of implying a measurement.
 //
-// HONESTY: if no qualifying sleep (no window, or in-bed < ~3 h, or staging
-// cannot run) we return SleepSegmentation.absent — everything null, confidence
-// 0. Never fabricated. Stages are tier ESTIMATE (3-class autonomic, not PSG).
+// HONESTY: if no qualifying sleep (no window, in-bed < ~3 h, staging cannot
+// run, or too little of the window was observed) we return
+// SleepSegmentation.absent — everything null, confidence 0, with
+// [SleepSegmentation.absenceReason] set where the cause is known. Never
+// fabricated. Stages are tier ESTIMATE (3-class autonomic, not PSG).
 
 import 'dart:math' as math;
 import '../types.dart';
@@ -37,6 +42,22 @@ import 'advanced_stager.dart';
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
 const int _minQualifyingSleepSec = 3 * 3600;
 
+/// Fraction of the in-bed window that must be OBSERVED (a sample present, and a
+/// heart rate within half an epoch of it) before any accounting figure is
+/// published. Below it the night is [SleepSegmentation.absent] with a reason,
+/// not a plausible number over a window nobody watched. Same 0.5 floor the edge
+/// applies to the nocturnal accel path (`kMinAccelCoverageForVanHees`).
+const double kMinObservedFractionForSleep = 0.5;
+
+/// A second is credited with cardiac evidence when a valid HR sample lands
+/// within ±[_hrEvidenceHalfWinSec] of it — half a staging epoch either side.
+///
+/// The stager decides a 30-s epoch on ANY valid HR inside it, so this is the
+/// closest per-second equivalent available here (segmentation does not see the
+/// stager's epoch grid, which starts at each usable run, not at a fixed
+/// offset). Worst-case misalignment is under one epoch in either direction.
+const int _hrEvidenceHalfWinSec = 15;
+
 /// Single-source sleep segmentation result. Every accounting figure is derived
 /// from the per-second [stages] labels (asleep = stage != wake), so the parts
 /// are mutually consistent. When no sleep qualifies, see [SleepSegmentation.absent].
@@ -47,14 +68,24 @@ class SleepSegmentation {
   /// Per-second 3-class labels over the window [onsetIdx, offsetIdx).
   /// Empty when absent. `stages.length == inBedSec`. (Back-compat: wake/nrem/rem;
   /// NREM here is light+deep combined — the Light/Deep split lives in [stages4].)
+  ///
+  /// LEGACY VIEW, LOSSY: [SleepStage] has no 'unobserved' member, so a second we
+  /// never observed reads here as `wake`. It is NOT counted as wake in any figure
+  /// on this class — see [stages4] and [unobservedSec] — but a reader that
+  /// tallies this list itself will over-count wake. Prefer [stages4].
   final List<SleepStage> stages;
 
-  /// Per-second 4-class hypnogram-ready labels over the SAME window, aligned 1:1
-  /// with [stages]: 'wake' | 'light' | 'deep' | 'rem'. 'light' and 'deep' are the
+  /// Per-second labels over the SAME window, aligned 1:1 with [stages]:
+  /// 'wake' | 'light' | 'deep' | 'rem' | 'unobserved'. 'light' and 'deep' are the
   /// two halves of NREM — 'deep' marks the NREM seconds the LOW-CONFIDENCE
   /// HR-depth overlay flags as deep (see walch_stager STEP 2); 'light' is the
   /// remaining NREM. The Light/Deep split is an UNVALIDATED estimate; surface it
-  /// badged low-confidence. Empty when absent.
+  /// badged low-confidence.
+  ///
+  /// 'unobserved' is not a stage and not a measurement: it marks a second the
+  /// record does not contain, or one with no heart rate within half an epoch. A
+  /// hypnogram must break at those seconds rather than draw across them.
+  /// Empty when absent.
   final List<String> stages4;
 
   /// Total sleep time (s): seconds where stage != wake. Null when absent.
@@ -65,9 +96,19 @@ class SleepSegmentation {
   final int? wasoSec;
 
   /// In-bed time (s) = window length (offsetIdx − onsetIdx). Null when absent.
+  /// This is WALL-CLOCK span and includes [unobservedSec].
   final int? inBedSec;
 
-  /// Sleep efficiency (%) = 100 · TST / in-bed. Null when absent.
+  /// Seconds inside the window we did not observe: no sample in the record, or
+  /// no heart rate within half a staging epoch. They count into NOTHING else on
+  /// this class. Observed in-bed time is `inBedSec - unobservedSec`. Null when
+  /// absent.
+  final int? unobservedSec;
+
+  /// Sleep efficiency (%) = 100 · TST / OBSERVED in-bed seconds. Null when
+  /// absent. The denominator excludes [unobservedSec] on purpose: dividing by
+  /// wall-clock time published 62.7 % for a night where three of the eight hours
+  /// were never recorded, which reads as measured wakefulness.
   final double? efficiencyPct;
 
   /// NREM seconds (stage == nrem) = [lightSec] + [deepSec]. Null when absent.
@@ -87,8 +128,16 @@ class SleepSegmentation {
   /// Wake seconds within the window (stage == wake). Null when absent.
   final int? wakeSec;
 
-  /// 0..1 confidence (van Hees window × staging × HR-consensus). 0 when absent.
+  /// 0..1 confidence — the mean of a van Hees window term and a staging term.
+  /// There is no HR-consensus term; no such step exists (see [segmentSleep]).
+  /// 0 when absent.
   final double confidence;
+
+  /// Machine-readable cause when [present] is false and the cause is known
+  /// (currently: too little of the window was observed). Null when a caller
+  /// should say nothing more than "no qualifying sleep". Never render a bare
+  /// dash for an absence that carries one of these.
+  final String? absenceReason;
 
   const SleepSegmentation({
     required this.window,
@@ -97,6 +146,7 @@ class SleepSegmentation {
     required this.tstSec,
     required this.wasoSec,
     required this.inBedSec,
+    required this.unobservedSec,
     required this.efficiencyPct,
     required this.nremSec,
     required this.lightSec,
@@ -104,6 +154,7 @@ class SleepSegmentation {
     required this.remSec,
     required this.wakeSec,
     required this.confidence,
+    this.absenceReason,
   });
 
   /// Honest "no qualifying sleep" result — all figures null, confidence 0.
@@ -114,6 +165,7 @@ class SleepSegmentation {
     tstSec: null,
     wasoSec: null,
     inBedSec: null,
+    unobservedSec: null,
     efficiencyPct: null,
     nremSec: null,
     lightSec: null,
@@ -123,6 +175,27 @@ class SleepSegmentation {
     confidence: 0,
   );
 
+  /// Absent BECAUSE the window was too thinly observed to stand behind — the
+  /// caller has a reason to show, not a hole.
+  static SleepSegmentation unobservedWindow(String reason) =>
+      SleepSegmentation(
+        window: null,
+        stages: const <SleepStage>[],
+        stages4: const <String>[],
+        tstSec: null,
+        wasoSec: null,
+        inBedSec: null,
+        unobservedSec: null,
+        efficiencyPct: null,
+        nremSec: null,
+        lightSec: null,
+        deepSec: null,
+        remSec: null,
+        wakeSec: null,
+        confidence: 0,
+        absenceReason: reason,
+      );
+
   bool get present => window != null;
 
   Map<String, dynamic> toJson() => {
@@ -130,6 +203,7 @@ class SleepSegmentation {
         'tst_sec': tstSec,
         'waso_sec': wasoSec,
         'in_bed_sec': inBedSec,
+        'unobserved_sec': unobservedSec,
         'efficiency_pct':
             efficiencyPct == null ? null : round6(efficiencyPct!),
         'nrem_sec': nremSec,
@@ -139,6 +213,7 @@ class SleepSegmentation {
         'wake_sec': wakeSec,
         'epochs': stages.length,
         'confidence': round6(confidence),
+        if (absenceReason != null) 'absence_reason': absenceReason,
         // Deep is a LOW-CONFIDENCE, unvalidated HR-depth overlay (see
         // walch_stager STEP 2). Carry the flag so the UI badges it honestly.
         'deep_low_confidence': true,
@@ -234,7 +309,6 @@ SleepSegmentation segmentSleep(
       start: onsetSec,
       end: offsetSec,
       asleepMin: AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0,
-      inBedSec: offsetSec - onsetSec,
     );
   } else {
     final sessions = AdvancedSleepStager.detectSleep(
@@ -265,6 +339,34 @@ SleepSegmentation segmentSleep(
     return SleepSegmentation.absent;
   }
 
+  // OBSERVED mask over the wall-clock window. `inBed` is wall-clock length but
+  // `trimmedAccel` is a POSITIONAL array with holes (pruning, sync gaps), and HR
+  // is intermittent — so a second is observed only when BOTH hold:
+  //   * the record contains a sample for it, and
+  //   * a valid HR landed within half a staging epoch of it.
+  // Neither used to be checked. Every unwritten second defaulted to 'wake' and
+  // was then counted as measured WASO, as wake_sec and into the efficiency
+  // denominator: an 8 h confirmed window over a 5 h record published waso
+  // 10740 s and 62.7 % efficiency for three hours nobody watched. And every
+  // no-HR epoch could only ever fall through to NREM (see cardio_stager's
+  // asymmetric gates), so it was credited to TST as Light on zero cardiac
+  // evidence, one-way, inflating TST and efficiency and never deflating them.
+  final sampled = List<bool>.filled(inBed, false);
+  final hrNear = List<bool>.filled(inBed, false);
+  for (var k = onset; k < tsSec.length && tsSec[k] < chosen.end; k++) {
+    final off = tsSec[k] - chosen.start;
+    if (off < 0 || off >= inBed) continue;
+    sampled[off] = true;
+    if (trimmedHr[k] <= 0) continue;
+    final lo = math.max(0, off - _hrEvidenceHalfWinSec);
+    final hi = math.min(inBed - 1, off + _hrEvidenceHalfWinSec);
+    for (var m = lo; m <= hi; m++) {
+      hrNear[m] = true;
+    }
+  }
+  final observed = List<bool>.generate(inBed, (i) => sampled[i] && hrNear[i],
+      growable: false);
+
   final stages4 = List<String>.filled(inBed, 'wake');
   for (final session in chosen.sessions) {
     for (final seg in session.stages) {
@@ -275,6 +377,23 @@ SleepSegmentation segmentSleep(
       }
     }
   }
+  // Stamped LAST: an unobserved second has no stage, whatever a staging segment
+  // spanning the hole happened to claim.
+  var unobservedSec = 0;
+  for (var i = 0; i < inBed; i++) {
+    if (observed[i]) continue;
+    stages4[i] = 'unobserved';
+    unobservedSec++;
+  }
+
+  final observedSec = inBed - unobservedSec;
+  if (observedSec < inBed * kMinObservedFractionForSleep) {
+    return SleepSegmentation.unobservedWindow(
+      'only ${observedSec}s of a ${inBed}s window were observed '
+      '(sample + heart rate); below the '
+      '${(kMinObservedFractionForSleep * 100).round()}% floor',
+    );
+  }
 
   final perSec = List<SleepStage>.generate(
     inBed,
@@ -284,6 +403,7 @@ SleepSegmentation segmentSleep(
   var tst = 0, waso = 0, nrem = 0, light = 0, deep = 0, rem = 0, wake = 0;
   var firstSleep = -1, lastSleep = -1;
   for (var i = 0; i < perSec.length; i++) {
+    if (!observed[i]) continue;
     switch (perSec[i]) {
       case SleepStage.wake:
         wake++;
@@ -309,7 +429,7 @@ SleepSegmentation segmentSleep(
   }
   if (firstSleep >= 0) {
     for (var i = firstSleep; i <= lastSleep; i++) {
-      if (perSec[i] == SleepStage.wake) waso++;
+      if (observed[i] && perSec[i] == SleepStage.wake) waso++;
     }
   }
   if (tst == 0) {
@@ -319,7 +439,8 @@ SleepSegmentation segmentSleep(
     // did not observe. That is a fabricated measurement, not an abstention.
     return SleepSegmentation.absent;
   }
-  final efficiency = inBed > 0 ? 100.0 * tst / inBed : 0.0;
+  // Denominator is OBSERVED in-bed time, not wall clock — see [efficiencyPct].
+  final efficiency = observedSec > 0 ? 100.0 * tst / observedSec : 0.0;
 
   // Confidence = window quality x STAGING quality. The staging term used to be
   // the literal 0.5, so every forced-window night (where `wm` is absent) came
@@ -357,7 +478,7 @@ SleepSegmentation segmentSleep(
       immobile: fallbackWindow?.immobile ?? const [],
       // Forward the undecidable-second mask too. Dropping it here silently
       // downgraded "we could not tell" into "not immobile", which is the
-      // conservative direction but costs the caller `unresolvedTailSec` — the
+      // conservative direction but costs the caller `undecidableSec` — the
       // one signal that says a night ran past the end of the record.
       immobileUnknown: fallbackWindow?.immobileUnknown ?? const [],
       zAngleDeg: fallbackWindow?.zAngleDeg ?? const [],
@@ -368,6 +489,7 @@ SleepSegmentation segmentSleep(
     tstSec: tst,
     wasoSec: waso,
     inBedSec: inBed,
+    unobservedSec: unobservedSec,
     efficiencyPct: efficiency,
     nremSec: nrem,
     lightSec: light,
@@ -384,12 +506,6 @@ class _SleepGroup {
   final int end;
   final double asleepMin;
 
-  /// SUM of the bridged sessions' durations — the bridge GAPS are excluded, so
-  /// this is NOT `end - start` for a multi-session group. Do not use it for
-  /// time-of-day math: `start + inBedSec ~/ 2` lands half the total gap EARLY
-  /// (a single 50-min bridge ⇒ 25 min early). Use [midsleepSec] for that.
-  final int inBedSec;
-
   /// The group's circadian centre: the midpoint of its ACTUAL SPAN. This is
   /// what a midsleep anchor is defined against (the middle of the sleep period,
   /// gaps included — Roenneberg's MSF/mid-sleep convention), and it is what
@@ -401,7 +517,6 @@ class _SleepGroup {
     required this.start,
     required this.end,
     required this.asleepMin,
-    required this.inBedSec,
   });
 }
 
@@ -419,7 +534,6 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: session.start,
           end: session.end,
           asleepMin: asleepMin,
-          inBedSec: session.end - session.start,
         ),
       );
       continue;
@@ -433,7 +547,6 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: last.start,
           end: math.max(last.end, session.end),
           asleepMin: last.asleepMin + asleepMin,
-          inBedSec: last.inBedSec + (session.end - session.start),
         ),
       );
     } else {
@@ -444,7 +557,6 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
           start: session.start,
           end: session.end,
           asleepMin: asleepMin,
-          inBedSec: session.end - session.start,
         ),
       );
     }
@@ -484,8 +596,7 @@ _SleepGroup? _pickMainSleepGroup(
   }
 
   double alignmentBonusFor(_SleepGroup g) {
-    // Midsleep = the middle of the SPAN, never `start + inBedSec/2` — see
-    // [_SleepGroup.inBedSec]/[_SleepGroup.midsleepSec].
+    // Midsleep = the middle of the SPAN — see [_SleepGroup.midsleepSec].
     final dist =
         circularDistanceSec(localSecOfDay(g.midsleepSec), targetMidsleepSec);
     if (dist <= fullWindowSec) return alignmentBonusMin;
@@ -588,6 +699,9 @@ int? _circularMeanSec(List<int> secs) {
   return ((sec % secondsPerDay) + secondsPerDay) % secondsPerDay;
 }
 
+/// 4-class label → the legacy 3-class enum. 'unobserved' has no member and maps
+/// to `wake` — see [SleepSegmentation.stages] for why that view is lossy and why
+/// no figure on this class is derived from it.
 SleepStage _sleepStageFor(String label) {
   switch (label) {
     case 'rem':

@@ -242,6 +242,8 @@ Metric<Chronotype> chronotype(
     stability = percentileOfYou(
       band,
       [for (final h in history) _unwrapAround(_mctqBandAnchorH, _wrap24(h))],
+      // A chronotype has no better end — an early type is not a good type.
+      better: Better.neither,
       minN: 14,
     );
   }

@@ -41,9 +41,11 @@ class HrvTime {
 
 /// Short-window time-domain HRV on a cleaned NN series (ms).
 ///
-/// [nnMs] cleaned NN intervals. [nnTimesMs] beat times for SDANN/SDNN-index
-/// segmentation (optional; if absent, SDANN/SDNN-index are null). Returns an
-/// absent Metric when there are too few beats.
+/// [nnMs] cleaned NN intervals. [nnTimesMs] beat times, used both for
+/// SDANN/SDNN-index segmentation and to skip successive-difference pairs that
+/// straddle a dropped run (optional; without it SDANN/SDNN-index are null and
+/// RMSSD/pNN50 include the seams). Returns an absent Metric when there are too
+/// few beats.
 Metric<HrvTime> hrvTime(List<double> nnMs, {List<double>? nnTimesMs}) {
   const inputs = ['rr_cleaned'];
   if (nnMs.length < 2) {
@@ -54,20 +56,30 @@ Metric<HrvTime> hrvTime(List<double> nnMs, {List<double>? nnTimesMs}) {
     );
   }
 
-  // RMSSD: root mean square of successive differences.
+  // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
+  // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
+  // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
+  // can sit either side of a seconds-long hole; differencing straight down the
+  // list manufactured one large difference per dropped run. Same `keep`-mask
+  // treatment irregular_rhythm.dart already applies. A pair is contiguous iff
+  // the elapsed time between the two beat times is the interval itself.
   var ssd = 0.0;
   var nn50 = 0;
+  var pairs = 0;
+  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
   for (var i = 1; i < nnMs.length; i++) {
+    if (gapAware && nnTimesMs[i] - nnTimesMs[i - 1] > nnMs[i] + 0.5) continue;
     final d = nnMs[i] - nnMs[i - 1];
     ssd += d * d;
     if (d.abs() > 50) nn50++;
+    pairs++;
   }
-  final rmssd = math.sqrt(ssd / (nnMs.length - 1));
-  final pnn50 = 100.0 * nn50 / (nnMs.length - 1);
+  final rmssd = pairs > 0 ? math.sqrt(ssd / pairs) : null;
+  final pnn50 = pairs > 0 ? 100.0 * nn50 / pairs : null;
   final sdnn = stddev(nnMs);
 
   double? sdann, sdnnIndex;
-  if (nnTimesMs != null && nnTimesMs.length == nnMs.length) {
+  if (gapAware) {
     final seg = _fiveMinSegments(nnMs, nnTimesMs);
     if (seg.length >= 2) {
       final means = [for (final s in seg) mean(s)!];
@@ -278,8 +290,10 @@ List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
   return out;
 }
 
-List<double> _cleanWindowRr(List<double> rr) =>
-    _rejectWindowEctopic([for (final v in rr) if (v >= 300 && v <= 2000) v]);
+List<double> _cleanWindowRr(List<double> rr) => _rejectWindowEctopic([
+      for (final v in rr)
+        if (v >= 300 && v <= 2000) v
+    ]);
 
 List<double> _rejectWindowEctopic(List<double> nn) {
   const radius = 2;

@@ -106,8 +106,8 @@ void main() {
   // (3) An accelerometer dropout must not be carried forward into "stillness".
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — bounded accel carry-forward', () {
-    test('a 6 h dropout inside an 8 h window stays unstaged '
-        '(was: TST 8 h, WASO 0, efficiency 100%)', () {
+    test('a 6 h dropout inside an 8 h window makes the night ABSENT '
+        '(was: TST 8 h, WASO 0, efficiency 100%; then WASO 6 h)', () {
       final accel = <AccelSample>[];
       final hr = <double>[];
       void block(int fromSec, int secs) {
@@ -123,15 +123,46 @@ void main() {
 
       final s = segmentSleep(accel, hr,
           forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+      // RE-PINNED 2026-08 (an-sleep-2): only 2 of the 8 h were observed — 25%,
+      // below the 50% floor — so there is no honest figure to publish. The
+      // previous pin (present, wake ≈ 6 h, efficiency < 30%) was itself the
+      // defect: it reported six hours of MEASURED wakefulness for six hours
+      // nobody recorded.
+      expect(s.present, isFalse);
+      expect(s.tstSec, isNull);
+      expect(s.wakeSec, isNull);
+      expect(s.efficiencyPct, isNull);
+      expect(s.absenceReason, contains('observed'),
+          reason: 'the absence must carry its reason, not be a bare hole');
+    });
+
+    test('a 2 h dropout inside an 8 h window is UNOBSERVED, not WASO', () {
+      // 75% observed — above the floor, so the night publishes, but the hole
+      // must not be counted as measured wake in any figure.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var k = 0; k < 8 * 3600; k++) {
+        if (k >= 3 * 3600 && k < 5 * 3600) continue; // 2 h hole
+        accel.add(AccelSample((_t0 + k) * 1000.0, 0.005, 0.0, 1.0));
+        hr.add(52);
+      }
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
       expect(s.present, isTrue);
       expect(s.inBedSec, 8 * 3600);
-      // Only the ~2 h that actually has data can be staged; the 6 h hole is
-      // wake. Allow the bounded 60 s carry-forward tail on each real block.
-      expect(s.tstSec!, lessThan(2 * 3600 + 2 * 61),
-          reason: 'pre-fix: 28800 — the whole window read as sleep');
-      expect(s.wakeSec!, greaterThan(5 * 3600 + 45 * 60),
-          reason: 'pre-fix: 0');
-      expect(s.efficiencyPct!, lessThan(30.0), reason: 'pre-fix: 100.0');
+      // Exactly the 7200 s hole: the seconds on either side of it have both a
+      // sample and a heart rate, so the ±15 s HR-evidence margin adds nothing
+      // here (it only bites where samples exist but HR does not).
+      expect(s.unobservedSec, 7200, reason: 'pre-fix: 0 (no such state)');
+      // NEW VALUES, and why they moved: the denominator is now the OBSERVED
+      // 28800-7200 = 21600 s, not the wall-clock 28800. WASO no longer absorbs
+      // the hole (pre-fix it was ~7200).
+      expect(s.wasoSec!, lessThan(120), reason: 'pre-fix: ~7200');
+      expect(s.tstSec! + s.wakeSec!, 8 * 3600 - 7200);
+      expect(s.efficiencyPct!, greaterThan(95.0),
+          reason: 'pre-fix: ~74.9 (7200 unrecorded seconds in the denominator)');
+      // The hypnogram must break at the hole rather than draw across it.
+      expect(s.stages4[4 * 3600], 'unobserved');
     });
 
     test('a SHORT dropout is still carried forward (the bound is 60 s, not 0)',
@@ -439,14 +470,14 @@ void main() {
       expect(w.offsetIdx, lessThanOrEqualTo(n - win + 1));
 
       // ...and the tail is reported as UNDECIDABLE, not as movement.
-      expect(w.unresolvedTailSec, win - 1, reason: 'pre-fix: 0 (no such state)');
+      expect(w.undecidableSec, win - 1, reason: 'pre-fix: 0 (no such state)');
       expect(w.immobileUnknown.length, n);
       expect(w.immobileUnknown.sublist(n - win + 1).every((u) => u), isTrue);
       for (var i = 0; i < n - win + 1; i++) {
         expect(w.immobileUnknown[i], isFalse,
             reason: 'second $i has a full forward window — it is decided');
       }
-      expect(w.toJson()['unresolved_tail_sec'], win - 1);
+      expect(w.toJson()['undecidable_sec'], win - 1);
     });
 
     test('a move inside the tail is resolved PER SECOND '
@@ -472,7 +503,7 @@ void main() {
 
       // The two seconds must not share one answer — that is the whole bug.
       expect(w.immobileUnknown[3350] == w.immobileUnknown[3500], isFalse);
-      expect(w.unresolvedTailSec, 193, reason: 'pre-fix: 0 (no such state)');
+      expect(w.undecidableSec, 193, reason: 'pre-fix: 0 (no such state)');
     });
   });
 
@@ -527,6 +558,37 @@ void main() {
       ]);
       final oldCpc = coupling.bandPower(0.1, 0.4) / coupling.bandPower(0.01, 0.1);
       expect(oldCpc / rrRatio, closeTo(1.0, 1e-4));
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // (an-sleep-3) An epoch with no heart rate can only ever be labelled asleep.
+  // ═══════════════════════════════════════════════════════════════════════════
+  group('honesty — no cardiac evidence is not sleep', () {
+    test('two 1 h PPG dropouts inside a 6 h still window are not credited',
+        () {
+      // HR coverage 0.667 — comfortably above cardio_stager's `minHrCoverage`
+      // abstain floor, which only catches the all-or-nothing case. Every gate
+      // that can produce WAKE or REM needs a non-NaN HR while the fall-through
+      // is an unconditional NREM, so pre-fix all 7200 no-HR seconds came out
+      // asleep: tst 21600, efficiency 100.0, wake 0.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var k = 0; k < 6 * 3600; k++) {
+        accel.add(AccelSample((_t0 + k) * 1000.0, 0.005, 0.0, 1.0));
+        final dropout =
+            (k >= 3600 && k < 2 * 3600) || (k >= 4 * 3600 && k < 5 * 3600);
+        hr.add(dropout ? 0.0 : 52.0);
+      }
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 6 * 3600));
+      expect(s.present, isTrue);
+      // 7200 s of dropout, less the +/-15 s HR-evidence margin reaching into
+      // each of the four dropout edges: 7200 - 4*15 = 7140.
+      expect(s.unobservedSec, 7140, reason: 'pre-fix: 0 (no such state)');
+      expect(s.tstSec!, lessThanOrEqualTo(6 * 3600 - 7140),
+          reason: 'pre-fix: 21600 — the dropouts were credited as Light');
+      expect(s.stages4[90 * 60], 'unobserved');
     });
   });
 }

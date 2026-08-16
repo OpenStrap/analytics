@@ -134,26 +134,89 @@ void main() {
   });
 
   group('recommendedWake', () {
-    test('90-minute cycle-aligned wake from bedtime', () {
-      // bed 23:00 = 1380, need 7.5h=27000s=450min → round(450/90)=5 cycles.
-      // wake = (1380 + 5*90) mod 1440 = 1830 mod 1440 = 390 = 06:30.
-      final m = recommendedWake(bedtimeMinOfDay: 1380, needSec: 27000);
-      expect(m.present, isTrue);
-      expect(m.tier, Tier.estimate);
-      expect(m.confidence, closeTo(0.55, 1e-9));
-      expect(m.value!.wakeMinOfDay, closeTo(390.0, 1e-9));
+    test('wake = bedtime + the SAME time in bed the bedtime was backed off',
+        () {
+      // an-wellness-2. This used to add round(need/90)*90 SLEEP minutes onto a
+      // bedtime built from an IN-BED duration, so the pair always described a
+      // short night: at need 8 h / eff 88 % it gave bed 21:55 and wake 05:25 —
+      // a 7.50 h span for an 8.00 h need, and 95 min before the 07:00 typical
+      // wake the bedtime was anchored to. Now the two ends agree exactly, so
+      // target wake lands back on the user's own typical wake.
+      // need 8h, eff 88% -> inBed = 28800/0.88 = 32727.27s = 545.4545 min.
+      final bed = recommendedBedtime(
+        needSec: 28800,
+        typicalWakeMinOfDay: 420, // 07:00
+        typicalEfficiencyPct: 88,
+      );
+      final wake = recommendedWake(
+        bedtimeMinOfDay: bed.value!.bedtimeMinOfDay,
+        needSec: 28800,
+        typicalEfficiencyPct: 88,
+      );
+      expect(wake.present, isTrue);
+      expect(wake.tier, Tier.estimate);
+      expect(wake.confidence, closeTo(0.55, 1e-9));
+      expect(wake.value!.wakeMinOfDay, closeTo(420.0, 1e-9));
     });
 
-    test('cycles floor at 1 for tiny need', () {
-      // need 30 min → round(30/90)=0 → max(1,0)=1 cycle = 90 min.
-      final m = recommendedWake(bedtimeMinOfDay: 100, needSec: 1800);
-      expect(m.value!.wakeMinOfDay, closeTo(190.0, 1e-9));
+    test('INVARIANT: the span is never short of need/efficiency', () {
+      // The old shortfall was systematic, not unlucky: the efficiency gap is
+      // need*0.136 (65 min at an 8 h need) while the biggest possible cycle
+      // round-UP was 45 min. Grid it.
+      for (final needH in [6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 10.0, 11.0]) {
+        for (final effPct in [75.0, 80.0, 85.0, 88.0, 92.0, 99.0]) {
+          final needSec = needH * 3600.0;
+          final bed = recommendedBedtime(
+            needSec: needSec,
+            typicalWakeMinOfDay: 420,
+            typicalEfficiencyPct: effPct,
+          ).value!.bedtimeMinOfDay;
+          final wake = recommendedWake(
+            bedtimeMinOfDay: bed,
+            needSec: needSec,
+            typicalEfficiencyPct: effPct,
+          ).value!.wakeMinOfDay;
+          final span = (wake - bed) % 1440.0;
+          final required = needSec / (effPct / 100.0) / 60.0;
+          expect(span, greaterThanOrEqualTo(required - 1e-6),
+              reason: 'need ${needH}h at $effPct% eff: '
+                  'span $span min < in-bed $required min');
+        }
+      }
+    });
+
+    test('more need never moves target wake EARLIER', () {
+      // The cycle rounding used to make a 0.5 h need increase shift target wake
+      // 55 min LATER (05:25 -> 06:20 at a fixed 07:00 typical wake) by crossing
+      // a 90-minute boundary. Monotone now, and pinned at typical wake.
+      double wakeFor(double needH) {
+        final bed = recommendedBedtime(
+          needSec: needH * 3600.0,
+          typicalWakeMinOfDay: 420,
+          typicalEfficiencyPct: 88,
+        ).value!.bedtimeMinOfDay;
+        return recommendedWake(
+          bedtimeMinOfDay: bed,
+          needSec: needH * 3600.0,
+          typicalEfficiencyPct: 88,
+        ).value!.wakeMinOfDay;
+      }
+
+      for (final h in [7.0, 7.5, 8.0, 8.5, 9.0]) {
+        expect(wakeFor(h), closeTo(420.0, 1e-9));
+      }
     });
 
     test('wraps around midnight into [0,1440)', () {
-      // bed 23:30=1410, need ~7.5h → 5 cycles=450 → 1860 mod 1440 = 420.
-      final m = recommendedWake(bedtimeMinOfDay: 1410, needSec: 27000);
-      expect(m.value!.wakeMinOfDay, closeTo(420.0, 1e-9));
+      // bed 23:30 = 1410, need 7.5h at 88% -> inBed 511.36 min -> 1921.36 mod
+      // 1440 = 481.36 (08:01).
+      final m = recommendedWake(
+        bedtimeMinOfDay: 1410,
+        needSec: 27000,
+        typicalEfficiencyPct: 88,
+      );
+      expect(m.value!.wakeMinOfDay, closeTo(481.3636, 1e-3));
+      expect(m.value!.wakeMinOfDay, greaterThanOrEqualTo(0.0));
       expect(m.value!.wakeMinOfDay, lessThan(1440.0));
     });
   });
@@ -203,7 +266,8 @@ void main() {
       // low-recovery day asked for a number the user had already passed before
       // getting out of bed. A recover ceiling must sit above a rest day (2–4)
       // and below a typical active day (8–11).
-      final m = strainTarget(recovery0to100: 20, ctl: null, atl: null, tsb: null);
+      final m =
+          strainTarget(recovery0to100: 20, ctl: null, atl: null, tsb: null);
       expect(m.value!.band, 'recover');
       expect(m.value!.targetMin, closeTo(0, 1e-9));
       expect(m.value!.targetMax, greaterThan(4.0));
@@ -214,30 +278,36 @@ void main() {
       // 21 is a maximal day. A push ceiling above ~19 is not a target, it is a
       // dare — the old band topped out at 18 on a scale whose real ceiling was
       // ~16 for a marathon.
-      final m = strainTarget(recovery0to100: 90, ctl: null, atl: null, tsb: null);
+      final m =
+          strainTarget(recovery0to100: 90, ctl: null, atl: null, tsb: null);
       expect(m.value!.band, 'push');
       expect(m.value!.targetMin, closeTo(13, 1e-9));
       expect(m.value!.targetMax, lessThanOrEqualTo(19.0));
     });
 
-    test('fatigue is judged on the ATL:CTL RATIO, not a raw TRIMP difference', () {
+    test('fatigue is judged on the ATL:CTL RATIO, not a raw TRIMP difference',
+        () {
       // ctl/atl arrive as raw daily TRIMP (hundreds), but the thresholds were
       // sized as if they were 0–21 strain points: `atl − ctl > 10` fired on
       // ordinary week-to-week noise. 320 vs 300 is a 6.7 % lift — not fatigue —
       // yet the old absolute test (diff 20 > 10) shrank the window for it.
-      final noise = strainTarget(recovery0to100: 70, ctl: 300, atl: 320, tsb: null);
+      final noise =
+          strainTarget(recovery0to100: 70, ctl: 300, atl: 320, tsb: null);
       expect(noise.value!.targetMin, closeTo(9, 1e-9));
       expect(noise.value!.targetMax, closeTo(14, 1e-9));
 
       // A genuine 30 % acute lift over chronic still lowers the window.
-      final real = strainTarget(recovery0to100: 70, ctl: 100, atl: 130, tsb: null);
+      final real =
+          strainTarget(recovery0to100: 70, ctl: 100, atl: 130, tsb: null);
       expect(real.value!.targetMin, closeTo(8, 1e-9));
       expect(real.value!.targetMax, closeTo(12, 1e-9));
     });
 
-    test('freshness is judged on TSB relative to CTL, not a raw TRIMP value', () {
+    test('freshness is judged on TSB relative to CTL, not a raw TRIMP value',
+        () {
       // tsb 6 against a chronic load of 300 is 2 % — noise, not freshness.
-      final noise = strainTarget(recovery0to100: 70, ctl: 300, atl: 294, tsb: 6);
+      final noise =
+          strainTarget(recovery0to100: 70, ctl: 300, atl: 294, tsb: 6);
       expect(noise.value!.targetMax, closeTo(14, 1e-9));
 
       // tsb 20 against a chronic load of 100 is a real 20 % taper.
@@ -246,7 +316,8 @@ void main() {
     });
 
     test('no load history leaves the recovery window untouched', () {
-      final m = strainTarget(recovery0to100: 70, ctl: null, atl: null, tsb: null);
+      final m =
+          strainTarget(recovery0to100: 70, ctl: null, atl: null, tsb: null);
       expect(m.value!.targetMin, closeTo(9, 1e-9));
       expect(m.value!.targetMax, closeTo(14, 1e-9));
       // A zero chronic load must not divide by zero into an adjustment.
@@ -265,7 +336,8 @@ void main() {
 
   group('vo2maxEstimate', () {
     test('Uth ratio 15.3×maxHr/restingHr on a known value', () {
-      final m = vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
+      final m =
+          vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
       expect(m.present, isTrue);
       expect(m.tier, Tier.estimate);
       expect(m.confidence, closeTo(0.45, 1e-9));
@@ -332,8 +404,7 @@ void main() {
       expect(m.tier, Tier.estimate);
       expect(m.value!.physioAge, lessThan(40.0));
       expect(m.value!.deltaYears, lessThan(0.0));
-      expect(m.value!.deltaYears,
-          closeTo(m.value!.physioAge - 40.0, 1e-9));
+      expect(m.value!.deltaYears, closeTo(m.value!.physioAge - 40.0, 1e-9));
     });
 
     test('physio age is clamped to [18,95]', () {
@@ -398,12 +469,12 @@ void main() {
       };
       final out = journalCorrelations(
           journal: journal, dates: dates, outcomes: outcomes);
-      final eff =
-          out.firstWhere((c) => c.tag == 'alcohol').effects.single;
+      final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
       expect(eff.insufficient, isFalse);
       expect(eff.meaningful, isTrue);
       expect(eff.delta, closeTo(41 - 81, 1e-9)); // −40
-      expect(eff.higherSide, 'untagged'); // untagged (non-alcohol) recovers more
+      expect(
+          eff.higherSide, 'untagged'); // untagged (non-alcohol) recovers more
       expect(eff.nTagged, 2);
       expect(eff.nUntagged, 2);
       expect(eff.pctChange, isNotNull);
@@ -508,7 +579,8 @@ void main() {
     test('restingHr == 0 (the off-skin sentinel) ABSTAINS, never Infinity', () {
       // PRE-FIX `maxHr <= restingHr` did not catch it: 15.3 * (190/0) produced
       // value: Infinity, which Metric.toJson emits raw and jsonEncode throws on.
-      final m = vo2maxEstimate(restingHr: 0, maxHr: 190, sex: Sex.male, age: 30);
+      final m =
+          vo2maxEstimate(restingHr: 0, maxHr: 190, sex: Sex.male, age: 30);
       expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(() => jsonEncode(m.toJson()), returnsNormally);
@@ -527,7 +599,8 @@ void main() {
     });
 
     test('a valid pair still computes', () {
-      final m = vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
+      final m =
+          vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
       expect(m.present, isTrue);
       expect(m.value!.isFinite, isTrue);
       expect(() => jsonEncode(m.toJson()), returnsNormally);

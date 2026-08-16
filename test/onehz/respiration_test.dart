@@ -89,6 +89,49 @@ void main() {
       expect(m.value!.brpm!, closeTo(12, 1.5));
     });
 
+    test('RSA: 26.4 br/min is REPORTED, not folded to a plausible 22', () {
+      // an-motion-1. The search band stopped at rsaHiHz (0.40 Hz = 24 br/min)
+      // while the anti-alias guard tested respHiHz (0.5), so the guard was dead
+      // code and any real rate above 24 br/min came back as the largest
+      // SPURIOUS in-band peak at confidence 0.90. Measured pre-fix:
+      // 26.4 -> 22.23, 28.8 -> 17.43, both present. The search now runs to the
+      // window's own beat-rate Nyquist.
+      for (final trueBrpm in [26.4, 28.8]) {
+        final s = syntheticRsaRr(
+            modHz: trueBrpm / 60.0, hrBpm: 75, ampMs: 40, beats: 600);
+        final corr = correctRr(s.rr);
+        final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+            artifactFraction: 1 - corr.cleanFraction);
+        expect(m.present, isTrue, reason: m.note);
+        expect(m.value!.brpm!, closeTo(trueBrpm, 1.5),
+            reason: 'got ${m.value!.brpm} for a true $trueBrpm br/min');
+      }
+    });
+
+    test('RSA: a rate the BEAT RATE cannot resolve is ABSENT, not a number',
+        () {
+      // The tachogram is sampled once per beat, so at HR 43 (NN ~1400 ms) the
+      // Nyquist is ~21 br/min — below the HF band itself. A 26 br/min breather
+      // folds to a full-height peak at 16.9 br/min that no spectral test can
+      // tell from a genuine 16.9. The honest output is nothing.
+      final s = syntheticRsaRr(modHz: 26 / 60.0, hrBpm: 43, ampMs: 40, beats: 600);
+      final corr = correctRr(s.rr);
+      final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('alias'));
+    });
+
+    test('RSA: the note states the ceiling actually enforced', () {
+      // It used to say "1 Hz Nyquist caps rate at 30 br/min" while enforcing 24.
+      final s = syntheticRsaRr(modHz: 0.25, hrBpm: 60, ampMs: 40, beats: 500);
+      final corr = correctRr(s.rr);
+      final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.note, contains('could resolve up to'));
+    });
+
     test('RSA: absent on too-few beats -> null + confidence 0', () {
       final m = rsaRespRate([800, 810, 790], [800, 1610, 2400],
           artifactFraction: 0);
@@ -185,6 +228,58 @@ void main() {
       expect(v.cvhrPerHour, greaterThan(0));
       // Honesty: it's a screen, never a diagnosis — note says so.
       expect(m.note!.toLowerCase(), contains('screen'));
+    });
+
+    test('CVHR: an off-wrist HOLE does not dilute the per-hour index', () {
+      // an-motion-6. analyzedHours was the first-to-last beat SPAN and
+      // _resampleLinear drew a straight line across the hole, so the identical
+      // beats with a 2 h gap in the middle read 53.33/h instead of 80.00/h — a
+      // 33% "improvement" in an apnea screen bought by taking the band off.
+      const cycleSec = 60;
+      final nn = <double>[];
+      final nnTimes = <double>[];
+      var t = 0.0;
+      var s = 0;
+      while (s < cycleSec * 14) {
+        final hr = 60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
+        final r = 60000.0 / hr;
+        nn.add(r);
+        t += r;
+        nnTimes.add(t);
+        s = (t / 1000.0).floor();
+      }
+      final whole = cvhrApneaScreen(nn, nnTimes, artifactFraction: 0);
+
+      // Same beats, second half displaced by a 2 h hole.
+      final half = nnTimes.length ~/ 2;
+      final gapped = [
+        for (var i = 0; i < nnTimes.length; i++)
+          i < half ? nnTimes[i] : nnTimes[i] + 2 * 3600 * 1000
+      ];
+      final holed = cvhrApneaScreen(nn, gapped, artifactFraction: 0);
+
+      expect(holed.present, isTrue, reason: holed.note);
+      expect(holed.value!.analyzedHours,
+          closeTo(whole.value!.analyzedHours, 0.02),
+          reason: 'the 2 h hole is not observed time');
+      expect(holed.value!.cvhrPerHour, closeTo(whole.value!.cvhrPerHour, 3.0),
+          reason: 'pre-fix this fell by a third');
+    });
+
+    test('CVHR: no cycles means mean depth/width are ABSENT, not 0', () {
+      // an-motion-7. They were non-nullable and filled with 0, serialising an
+      // absence as a measurement.
+      final rr = List<double>.filled(400, 1000.0);
+      final jit = [
+        for (var i = 0; i < rr.length; i++) rr[i] + (i.isEven ? 5 : -5)
+      ];
+      final corr = correctRr(jit);
+      final m = cvhrApneaScreen(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.value!.cycleCount, 0);
+      expect(m.value!.meanDepthMs, isNull);
+      expect(m.value!.meanWidthSec, isNull);
+      expect(m.value!.toJson()['mean_depth_ms'], isNull);
     });
 
     test('CVHR: a steady (non-cyclic) RR yields ~0 cycles', () {

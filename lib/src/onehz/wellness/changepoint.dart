@@ -4,9 +4,10 @@
 // min-seg ≥7 d) + BOCPD online ... on smoothed daily aggregates."
 //
 // Two methods:
-//   1. ONLINE two-sided CUSUM (Page 1954) — running detector that fires when the
-//      accumulated standardized deviation crosses a threshold; resets after a
-//      detection. Cheap, streaming, for "something just shifted".
+//   1. ONLINE two-sided CUSUM (Page 1954) — running detector that standardizes
+//      each point against the data BEFORE it (an expanding pre-change baseline,
+//      restarted at every detection) and fires when the accumulated deviation
+//      crosses a threshold. Cheap, streaming, for "something just shifted".
 //   2. OFFLINE exact change-point search via binary segmentation with an
 //      MBIC/BIC penalty (Killick 2012 cost = Gaussian change-in-mean SSE), with
 //      a min-segment length ≥7. (Exact PELT and binary segmentation give the
@@ -34,39 +35,67 @@ class CusumDetection {
       {'index': index, 'direction': direction, 'stat': round6(stat)};
 }
 
-/// Two-sided CUSUM over a series, standardized by a robust scale.
+/// Two-sided CUSUM over a series, standardized against a PRE-change baseline.
 ///
-/// [x] the (smoothed) series. [k] slack in scale-units (reference value),
-/// [h] decision threshold in scale-units. Center/scale are the robust
-/// median/MAD of the whole series (or a supplied [center]/[scale]). Returns
-/// the indices where an upward/downward shift was detected (accumulator reset
-/// after each detection).
+/// [x] the (smoothed) series, oldest first. [k] slack in scale-units (reference
+/// value), [h] decision threshold in scale-units. [minBaseline] points required
+/// before any point can be scored.
+///
+/// Each point is standardized by the robust median/MAD of the points BEFORE it,
+/// back to the start of the current regime — never by the whole series. That is
+/// the difference between a detector and a description: standardizing by the
+/// whole series folds the post-change data into the scale, which pins |z| at
+/// MAD's 1.4826 reciprocal (≈0.675) for ANY balanced two-regime series whatever
+/// the step size. A 145 bpm permanent step in a 30-day window was invisible, and
+/// detection depended only on how LONG the regimes were. At h = 5 with k = 0.5
+/// that also meant the accumulator crept 0.1745/day and re-crossed the threshold
+/// on ten separate later days, so the caller's "only when the shift lands on the
+/// latest day" guard re-announced one shift as fresh over and over.
+///
+/// After a detection the baseline restarts at the detection index (the new
+/// regime is the new normal) and [minBaseline] points must accrue again, so one
+/// shift is announced once.
+///
+/// NO detection is emitted while a robust scale cannot be estimated — a
+/// perfectly flat baseline has no dispersion to standardize against, and an
+/// absent change-point beats a fabricated one.
 List<CusumDetection> cusumChangePoints(
   List<double> x, {
   double k = 0.5,
   double h = 5.0,
-  double? center,
-  double? scale,
+  int minBaseline = 10,
 }) {
   final out = <CusumDetection>[];
-  if (x.length < 2) return out;
-  final c = center ?? median(x)!;
-  var s = scale ?? (mad(x) ?? 0);
-  if (s <= 0) s = (stddev(x) ?? 1.0);
-  if (s <= 0) s = 1.0;
+  if (x.length <= minBaseline) return out;
+  var regimeStart = 0; // first index of the current (pre-change) regime
   var up = 0.0, dn = 0.0;
   for (var i = 0; i < x.length; i++) {
+    final baseline = x.sublist(regimeStart, i);
+    if (baseline.length < minBaseline) continue;
+    // ponytail: median/MAD recomputed over the expanding window each step —
+    // O(n² log n), and n is a 90-day series. Make it incremental if it ever
+    // runs on something longer.
+    final c = median(baseline)!;
+    final s = mad(baseline) ?? 0;
+    if (s <= 0 || !s.isFinite) {
+      // Degenerate (constant) baseline: there is no robust dispersion to
+      // standardize against. Hold, don't accumulate. Deliberately NO stddev
+      // fallback here (unlike illness_cusum, whose baseline window is a fixed
+      // 28 calendar days of the user's OWN quiet nights): this window grows
+      // until a detection, so on a flat history the SD is driven entirely by
+      // the very point under test — sqrt(n)-ish z for a 0.5 bpm move — and a
+      // critical-priority notification would fire on noise-free arithmetic.
+      continue;
+    }
     final z = (x[i] - c) / s;
     up = math.max(0, up + z - k);
     dn = math.max(0, dn - z - k);
-    if (up > h) {
-      out.add(CusumDetection(i, 1, up));
+    if (up > h || dn > h) {
+      final upward = up > h;
+      out.add(CusumDetection(i, upward ? 1 : -1, upward ? up : dn));
       up = 0;
       dn = 0;
-    } else if (dn > h) {
-      out.add(CusumDetection(i, -1, dn));
-      up = 0;
-      dn = 0;
+      regimeStart = i; // the shifted level becomes the new baseline
     }
   }
   return out;
@@ -157,7 +186,8 @@ Metric<Segmentation> segmentChangePoints(
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'binary segmentation w/ BIC-penalized change-in-mean; min-seg=$minSeg. '
+    note:
+        'binary segmentation w/ BIC-penalized change-in-mean; min-seg=$minSeg. '
         'Run on SMOOTHED aggregates only — do not celebrate regression-to-mean.',
   );
 }

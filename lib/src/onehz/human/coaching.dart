@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart' show mean, theilSen;
 
-
 class SleepNeed {
   final double needSec;
   const SleepNeed(this.needSec);
@@ -59,14 +58,21 @@ class BedtimeRec {
   Map<String, dynamic> toJson() => {'bedtime_min_of_day': bedtimeMinOfDay};
 }
 
+/// Time in bed (minutes) that delivers [needSec] of SLEEP at the user's own
+/// efficiency. Shared by [recommendedBedtime] and [recommendedWake] so the two
+/// ends of the same night can never be built from different durations again.
+double _inBedMin(double needSec, double typicalEfficiencyPct) {
+  final eff = (typicalEfficiencyPct / 100.0).clamp(0.75, 0.99);
+  return needSec / eff / 60.0;
+}
+
 Metric<BedtimeRec> recommendedBedtime({
   required double needSec,
   required double typicalWakeMinOfDay,
   required double typicalEfficiencyPct,
 }) {
-  final eff = (typicalEfficiencyPct / 100.0).clamp(0.75, 0.99);
-  final inBedSec = needSec / eff;
-  final bedMin = (typicalWakeMinOfDay - inBedSec / 60.0) % 1440.0;
+  final bedMin =
+      (typicalWakeMinOfDay - _inBedMin(needSec, typicalEfficiencyPct)) % 1440.0;
   return Metric<BedtimeRec>(
     value: BedtimeRec(bedMin < 0 ? bedMin + 1440.0 : bedMin),
     confidence: 0.6,
@@ -81,19 +87,31 @@ class WakeRec {
   Map<String, dynamic> toJson() => {'wake_min_of_day': wakeMinOfDay};
 }
 
+/// Target wake = the recommended bedtime plus the SAME time-in-bed the bedtime
+/// was backed off from.
+///
+/// It used to add `round(need / 90) × 90` — sleep minutes, cycle-quantized —
+/// onto a bedtime built from an IN-BED duration, so the span was always short
+/// of the night the card promised: the efficiency gap is need × 0.136 (65 min
+/// at an 8 h need) while the largest possible round-UP is 45 min. The pair
+/// described a night delivering less than the need printed beside it, target
+/// wake landed before the user's own typical wake, and a 0.5 h need increase
+/// could push target wake 55 min LATER by crossing a cycle boundary. Cycle
+/// alignment is gone with it: quantizing TIME IN BED to 90-minute sleep cycles
+/// was never the thing Kleitman's cycles describe.
 Metric<WakeRec> recommendedWake({
   required double bedtimeMinOfDay,
   required double needSec,
+  required double typicalEfficiencyPct,
 }) {
-  final sleepMin = needSec / 60.0;
-  final cycles = math.max(1, (sleepMin / 90.0).round());
-  final wake = (bedtimeMinOfDay + cycles * 90.0) % 1440.0;
+  final wake =
+      (bedtimeMinOfDay + _inBedMin(needSec, typicalEfficiencyPct)) % 1440.0;
   return Metric<WakeRec>(
-    value: WakeRec(wake),
+    value: WakeRec(wake < 0 ? wake + 1440.0 : wake),
     confidence: 0.55,
     tier: Tier.estimate,
-    inputs_used: const ['sleep_need', 'bedtime'],
-    note: '90-minute cycle-aligned wake estimate',
+    inputs_used: const ['sleep_need', 'bedtime', 'efficiency'],
+    note: 'wake = bedtime + the time in bed the need and your efficiency imply',
   );
 }
 
@@ -205,7 +223,8 @@ Metric<double> vo2maxEstimate({
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: ['resting_hr', 'max_hr'],
-      note: 'VO2max needs a positive resting HR below HRmax — "—" (never imputed)',
+      note:
+          'VO2max needs a positive resting HR below HRmax — "—" (never imputed)',
     );
   }
   final vo2 = 15.3 * (maxHr / restingHr);
@@ -623,15 +642,15 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
     ..sort();
 
   JournalNumericEffect none(String outcome, int n) => JournalNumericEffect(
-    outcome: outcome,
-    rho: null,
-    slopePerUnit: null,
-    rhoLow: null,
-    rhoHigh: null,
-    n: n,
-    insufficient: true,
-    meaningful: false,
-  );
+        outcome: outcome,
+        rho: null,
+        slopePerUnit: null,
+        rhoLow: null,
+        rhoHigh: null,
+        n: n,
+        insufficient: true,
+        meaningful: false,
+      );
 
   final out = <JournalNumericCorrelation>[];
   for (final field in fields) {

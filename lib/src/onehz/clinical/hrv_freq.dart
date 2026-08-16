@@ -26,6 +26,11 @@ class HrvFreq {
   final double? lf;
   final double? hf;
   final double? total;
+
+  /// Which bands [total] is the sum of. Null exactly when [total] is null. A
+  /// band the record could not resolve is ABSENT from this list, never a 0 in
+  /// the sum — so "total" always says what it totalled.
+  final List<String>? totalBands;
   final double? lfhf;
   final double? nuLf;
   final double? nuHf;
@@ -36,6 +41,7 @@ class HrvFreq {
     this.lf,
     this.hf,
     this.total,
+    this.totalBands,
     this.lfhf,
     this.nuLf,
     this.nuHf,
@@ -47,6 +53,7 @@ class HrvFreq {
         if (lf != null) 'lf': round6(lf!),
         if (hf != null) 'hf': round6(hf!),
         if (total != null) 'total': round6(total!),
+        if (totalBands != null) 'total_bands': totalBands,
         if (lfhf != null) 'lf_hf': round6(lfhf!),
         if (nuLf != null) 'nu_lf': round6(nuLf!),
         if (nuHf != null) 'nu_hf': round6(nuHf!),
@@ -90,7 +97,8 @@ Metric<HrvFreq> hrvFreq(
   // A band whose lowest frequency the record is too short to resolve returns
   // null — absent, not a leakage-filled 0.0 (ULF used to be emitted as exactly
   // 0.0 for any session over 333 s, which is not a 24-h record by any reading).
-  final ulf = _welchBandPower(tSec, nnMs, 0.0003, 0.003, oversample: oversample);
+  final ulf =
+      _welchBandPower(tSec, nnMs, 0.0003, 0.003, oversample: oversample);
   final vlf = _welchBandPower(tSec, nnMs, 0.003, 0.04, oversample: oversample);
   final lf = _welchBandPower(tSec, nnMs, 0.04, 0.15, oversample: oversample);
   final hfRaw = _welchBandPower(tSec, nnMs, 0.15, 0.40, oversample: oversample);
@@ -117,11 +125,29 @@ Metric<HrvFreq> hrvFreq(
   // exactly the quantity the gate withheld (the gated and ungated totals came
   // out bit-identical), and dropping HF from the sum would republish a
   // different quantity under the same name. Either way it would be dishonest —
-  // so total is WITHHELD alongside HF. It is also withheld when a band the
-  // record could not resolve is missing from the sum.
+  // so total is WITHHELD alongside HF.
+  //
+  // A band the record could not RESOLVE is a different case, and it used to be
+  // handled with `?? 0` — which is exactly the absence-as-zero this package
+  // forbids, and it is not hypothetical: ULF needs 33 333 s of span (10 cycles
+  // at 0.0003 Hz) and a night is ~28 700 s, so ULF resolved on precisely no
+  // nights and the published total was silently the ULF-less sum. Withholding
+  // total instead would delete a rendered number on every night forever. So it
+  // is published with its composition NAMED in [totalBands]: the sum is over
+  // those bands and no others.
+  final bands = <String, double?>{
+    'ulf': ulf,
+    'vlf': vlf,
+    'lf': lf,
+    'hf': hfRaw
+  };
+  final resolved = [
+    for (final e in bands.entries)
+      if (e.value != null) e.key
+  ];
   final total = (hfGated || lf == null || hfRaw == null)
       ? null
-      : (ulf ?? 0) + (vlf ?? 0) + lf + hfRaw;
+      : [for (final b in resolved) bands[b]!].reduce((a, b) => a + b);
 
   // Confidence: penalize artifacts heavily; low-band-only reads still HIGH-ish.
   final conf = clamp((1 - artifactFraction) * (hfGated ? 0.6 : 0.9), 0.2, 0.9);
@@ -132,6 +158,7 @@ Metric<HrvFreq> hrvFreq(
       lf: lf,
       hf: hf,
       total: total,
+      totalBands: total == null ? null : resolved,
       lfhf: lfhf,
       nuLf: nuLf,
       nuHf: nuHf,
@@ -181,7 +208,8 @@ double? _welchBandPower(
   double oversample = 4.0,
   int minPointsPerSegment = 16,
 }) {
-  if (loHz <= 0 || hiHz <= loHz || tSec.length < minPointsPerSegment) return null;
+  if (loHz <= 0 || hiHz <= loHz || tSec.length < minPointsPerSegment)
+    return null;
   final span = tSec.last - tSec.first;
   final segSec = cyclesPerSegment / loHz;
   if (span < segSec) return null; // band not resolvable in this record

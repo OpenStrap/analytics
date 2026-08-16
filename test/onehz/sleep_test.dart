@@ -175,37 +175,6 @@ void main() {
     });
   });
 
-  // --------------------------------------------------------------- accounting
-  group('sleep accounting', () {
-    test('known in-bed window → TST/WASO/efficiency exact', () {
-      // 8h in bed (28800 s). Asleep except a 30-min WASO block at hour 3 and a
-      // 20-min sleep-latency wake at the very start.
-      const total = 8 * 3600;
-      final asleep = List<bool>.filled(total, true);
-      for (var i = 0; i < 20 * 60; i++) {
-        asleep[i] = false; // onset latency
-      }
-      final wasoStart = 3 * 3600;
-      for (var i = wasoStart; i < wasoStart + 30 * 60; i++) {
-        asleep[i] = false; // mid-night WASO
-      }
-      final m = sleepAccounting(asleep);
-      expect(m.present, isTrue);
-      final a = m.value!;
-      expect(a.onsetIdx, 20 * 60);
-      expect(a.wasoSec, 30 * 60); // only the mid-night block counts as WASO
-      expect(a.tstSec, total - 20 * 60 - 30 * 60);
-      // Efficiency = TST / in-bed, where in-bed = offset − onset + 1 (the sleep
-      // PERIOD, NOT the whole captured mask). Onset latency is excluded from the
-      // denominator: offset is the last asleep second (total-1), onset=1200.
-      final inBed = a.offsetIdx - a.onsetIdx + 1;
-      expect(inBed, total - 20 * 60); // 20-min latency trimmed off the front
-      expect(a.efficiencyPct, closeTo(100.0 * a.tstSec / inBed, 1e-6));
-      // And NOT the old whole-mask denominator.
-      expect(a.efficiencyPct, isNot(closeTo(100.0 * a.tstSec / total, 1e-6)));
-    });
-  });
-
   // ----------------------------------------------- segmentSleep (SINGLE SOURCE)
   group('segmentSleep single-source segmentation', () {
     // Build a synthetic capture: [dayHours] active day, then [nightHours] of a

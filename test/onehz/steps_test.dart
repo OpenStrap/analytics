@@ -286,11 +286,60 @@ void main() {
 
     test('COLD START: no personal floor → ABSTAIN with a need_baseline note', () {
       final m = dailyActiveMinutes(day(120, 30),
-          personalDynFloorG: null, pooledMinutesAvailable: 640);
+          personalDynFloorG: null, historyDaysAvailable: 3);
       expect(m.present, isFalse, reason: 'no constant fallback is permitted');
       expect(m.confidence, 0);
       expect(m.tier, Tier.estimate);
-      expect(m.note, 'need_baseline:have=640,need=$personalDynFloorMinMinutes');
+      // DAYS, not minutes: the only floor builder a storage-bound caller can
+      // use (personalDynFloorFromDailySummaries) is gated on days, and edge
+      // passes a day count. This used to read have=3,need=2000.
+      expect(m.note, 'need_baseline:have=3,need=$personalDynFloorMinDays');
+    });
+
+    test('an off-wrist HOUR between moving minutes does not make one bout', () {
+      // an-motion-2. Four isolated moving minutes an hour apart. enmoSeries
+      // emits NO MotionMinute for a fully-absent minute, so the old test
+      // `idx[end+1] == idx[end] + 1` was adjacency in the gap-COMPACTED list
+      // and these four sat "consecutive". PRE-FIX: activeMinutes 4, bouts 1.
+      final scattered = [
+        for (final min in [0, 60, 120, 180])
+          MotionMinute(min * 60000.0, 60, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      final m = dailyActiveMinutes(scattered,
+          personalDynFloorG: floorG, minBoutMin: 3);
+      expect(m.value!.activeMinutes, 0);
+      expect(m.value!.boutCount, 0);
+    });
+
+    test('a run broken by ONE absent minute is two sub-bout stretches', () {
+      // Same root cause, minimum case: minutes 0,1 then 3,4 (minute 2 absent).
+      // Adjacent in the list, an hour apart or one minute apart it makes no
+      // difference — the clock says they are not one run of 4.
+      final split = [
+        for (final min in [0, 1, 3, 4])
+          MotionMinute(min * 60000.0, 60, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      final m =
+          dailyActiveMinutes(split, personalDynFloorG: floorG, minBoutMin: 3);
+      expect(m.value!.activeMinutes, 0, reason: 'neither stretch reaches 3');
+      expect(m.value!.boutCount, 0);
+    });
+
+    test('a partially-worn day reports coverage against the DAY, not the span',
+        () {
+      // an-motion-5. 4 h worn out of 24. enmoSeries(expectedMinutes: 1440)
+      // reports 0.167 for this substrate; dailyActiveMinutes reported 1.000
+      // (and confidence 0.30, its ceiling) because it divided by the WORN span.
+      final worn = day(210, 30); // 240 contiguous covered minutes
+      final honest =
+          dailyActiveMinutes(worn, personalDynFloorG: floorG, expectedMinutes: 1440);
+      expect(honest.value!.coverage, closeTo(240 / 1440, 1e-9)); // 0.1667
+      expect(honest.confidence, closeTo(0.1, 1e-9),
+          reason: 'confidence keys off coverage; 0.30 was the pre-fix value');
+      // Without expectedMinutes the span denominator still applies — that is a
+      // different, documented claim, not the fraction of a day.
+      final spanOnly = dailyActiveMinutes(worn, personalDynFloorG: floorG);
+      expect(spanOnly.value!.coverage, 1.0);
     });
 
     test('a non-positive floor is treated as absent, not as "pass everything"',

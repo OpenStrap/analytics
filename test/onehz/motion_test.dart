@@ -235,12 +235,42 @@ void main() {
     test('high-motion epoch → absent (no posture during motion)', () {
       final s = <AccelSample>[];
       for (var i = 0; i < 30; i++) {
-        // wild swings → jitter ≫ maxJitterG
+        // wild swings along ONE axis: direction constant, ‖a‖ swinging — the
+        // case only the magnitude gate can see.
         s.add(AccelSample(i * 1000.0, 0, 0, i.isEven ? 0.2 : 2.0));
       }
       final m = staticTilt(s);
       expect(m.present, isFalse);
       expect(m.confidence, 0);
+    });
+
+    test('a ROTATING wrist yields no posture (magnitude gate was blind to it)',
+        () {
+      // an-motion-3. mean |Δ‖a‖| cannot see rotation by construction, and the
+      // 1 Hz record ships a firmware-fused ~1 g vector, so the old gate could
+      // not fire on real data at all. Measured pre-fix: a 180° sweep scored
+      // jitter 4.6e-17 g, stillness 1.000, confidence 0.90, position
+      // 'lateral_right'.
+      final s = <AccelSample>[
+        for (var i = 0; i < 30; i++)
+          AccelSample(i * 1000.0, 0, 1.03 * math.sin(math.pi * i / 29.0),
+              1.03 * math.cos(math.pi * i / 29.0)),
+      ];
+      final m = staticTilt(s);
+      expect(m.present, isFalse, reason: 'got ${m.value?.position}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('rotating'));
+    });
+
+    test('10 min of continuous rotation publishes ZERO postures', () {
+      // Pre-fix positionSeries kept all 20 epochs and split them 10
+      // lateral_right / 10 lateral_left — a posture history of a turning wrist.
+      final s = <AccelSample>[
+        for (var i = 0; i < 600; i++)
+          AccelSample(i * 1000.0, 0, 1.03 * math.sin(2 * math.pi * i / 60.0),
+              1.03 * math.cos(2 * math.pi * i / 60.0)),
+      ];
+      expect(positionSeries(s), isEmpty);
     });
 
     test('positionSeries segments and emits stable supine posture', () {
@@ -367,7 +397,7 @@ void main() {
       expect(medEnmo, lessThan(0.2), reason: 'median minute is restful');
 
       // Posture: low-motion epochs → stable, dominant posture, no crash.
-      final postures = positionSeries(accel, epochSec: 30, maxJitterG: 0.1);
+      final postures = positionSeries(accel, epochSec: 30, maxRotationDeg: 6.0, maxJitterG: 0.1);
       // ignore: avoid_print
       print('REAL posture epochs=${postures.length} '
           'positions=${{for (final p in postures) p.position}}');

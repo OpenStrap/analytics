@@ -29,8 +29,8 @@ void main() {
       for (var i = 0; i < 3 * 24 * 6; i++) {
         final tMs = i * 10 * 60 * 1000.0;
         final tHours = tMs / 3.6e6;
-        final adc = 2000 +
-            300 * math.cos(2 * math.pi / 24 * (tHours - peakHour));
+        final adc =
+            2000 + 300 * math.cos(2 * math.pi / 24 * (tHours - peakHour));
         samples.add(AdcSample(tMs, adc));
       }
       final m = tempCircadian(samples, epochMin: 60);
@@ -95,11 +95,15 @@ void main() {
     test('luteal phase suppresses the illness flag (confound tag)', () {
       final temp = <double?>[
         for (var i = 0; i < 14; i++) 2000.0 + (i.isEven ? 3 : -3),
-        2060, 2065, 2070,
+        2060,
+        2065,
+        2070,
       ];
       final luteal = <bool>[
         for (var i = 0; i < 14; i++) false,
-        true, true, true,
+        true,
+        true,
+        true,
       ];
       final out = tempIllnessFlag(dates(temp.length), temp,
           luteal: luteal, baselineDays: 21, zThresh: 2.0, persistDays: 2);
@@ -142,7 +146,9 @@ void main() {
     });
 
     test('no shift => no confirmation event', () {
-      final temp = <double?>[for (var i = 0; i < 20; i++) 2000.0 + (i.isEven ? 1 : -1)];
+      final temp = <double?>[
+        for (var i = 0; i < 20; i++) 2000.0 + (i.isEven ? 1 : -1)
+      ];
       final m = menstrualCoverline(
           [for (var i = 0; i < temp.length; i++) 'd$i'], temp,
           threshold: 1.5);
@@ -226,15 +232,77 @@ void main() {
           reason: 'no regression-to-mean false split');
     });
 
-    test('cusumChangePoints fires on an online upward step', () {
-      final x = <double>[
-        for (var i = 0; i < 30; i++) 10.0 + (i.isEven ? 0.2 : -0.2),
-        for (var i = 0; i < 15; i++) 15.0, // sustained upward shift
-      ];
-      final dets = cusumChangePoints(x, k: 0.5, h: 4.0);
+    // an-wellness-3. The old case here used a deliberately IMBALANCED 30-low /
+    // 15-high split, which put the whole-series median inside the low regime
+    // and kept the MAD small — so it passed while hiding the actual behaviour.
+    // Standardizing by the whole series folds the post-change data into the
+    // scale, which pins |z| at 1/1.4826 ~ 0.675 for ANY balanced two-regime
+    // series whatever the step size: detection depended only on how LONG the
+    // regimes were, never on how big the shift was.
+
+    // A deterministic 10-day noise cycle: median 0, MAD 1.4826.
+    const noise = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+    List<double> twoRegime(double base, double step, {int perRegime = 30}) => [
+          for (var i = 0; i < perRegime; i++) base + noise[i % 10],
+          for (var i = 0; i < perRegime; i++) base + step + noise[i % 10],
+        ];
+
+    test('a BALANCED step is detected at every size, once, on the high side',
+        () {
+      for (final step in [3.0, 7.0, 15.0, 60.0, 145.0]) {
+        final dets = cusumChangePoints(twoRegime(55.0, step), h: 5.0);
+        expect(dets, hasLength(1), reason: 'step $step announced once');
+        expect(dets.single.direction, 1);
+        expect(dets.single.index, inInclusiveRange(30, 36),
+            reason: 'step $step detected near the change, not drifted');
+      }
+      // Downward steps too.
+      final down = cusumChangePoints(twoRegime(200.0, -60.0), h: 5.0);
+      expect(down, hasLength(1));
+      expect(down.single.direction, -1);
+    });
+
+    test('a large step in a SHORT window is not invisible', () {
+      // 30 days, 55 -> 200. The whole-series scale made this return [].
+      final dets =
+          cusumChangePoints(twoRegime(55.0, 145.0, perRegime: 15), h: 5.0);
       expect(dets, isNotEmpty);
+      expect(dets.first.index, inInclusiveRange(15, 17));
       expect(dets.first.direction, 1);
-      expect(dets.first.index, greaterThanOrEqualTo(30));
+    });
+
+    test('one shift is announced ONCE under the caller`s latest-day gate', () {
+      // derivation_engine.dart replays a growing window and notifies only when
+      // `dets.last.index == n - 1`. On the whole-series scale that fired on
+      // n = 31,32,34,36,39,42,46,50,54,58 — ten critical-priority notifications
+      // about one shift.
+      final x = twoRegime(55.0, 10.0);
+      var fires = 0;
+      for (var n = 10; n <= x.length; n++) {
+        final dets = cusumChangePoints(x.sublist(0, n), h: 5.0);
+        if (dets.isNotEmpty && dets.last.index == n - 1) fires++;
+      }
+      expect(fires, 1);
+    });
+
+    test('no detection when a robust scale cannot be estimated', () {
+      // A perfectly constant baseline has no dispersion to standardize
+      // against; an absent change-point beats a fabricated one.
+      final x = <double>[
+        for (var i = 0; i < 30; i++) 55.0,
+        for (var i = 0; i < 30; i++) 200.0,
+      ];
+      expect(cusumChangePoints(x, h: 5.0), isEmpty);
+    });
+
+    test('no detection on a series that never shifts', () {
+      final x = [for (var i = 0; i < 60; i++) 55.0 + noise[i % 10]];
+      expect(cusumChangePoints(x, h: 5.0), isEmpty);
+    });
+
+    test('a series shorter than the baseline requirement yields nothing', () {
+      expect(cusumChangePoints([for (var i = 0; i < 10; i++) 55.0 + i], h: 5.0),
+          isEmpty);
     });
   });
 
@@ -293,7 +361,8 @@ void main() {
       expect(base.length, 14);
     });
 
-    test('degenerate-MAD baseline is rescued by mean/SD z (no intermittent "—")',
+    test(
+        'degenerate-MAD baseline is rescued by mean/SD z (no intermittent "—")',
         () {
       // A quantized RHR whose recent baseline clusters tight enough that the
       // median-absolute-deviation collapses to 0 (deviations from the median 52
@@ -310,7 +379,9 @@ void main() {
 
       // A TRULY constant baseline (SD == 0 too) still honestly abstains — we
       // only rescue degenerate MAD, never fabricate against zero dispersion.
-      final flat = readinessComposite([rhrInput(56.0, <double>[52, 52, 52, 52])]);
+      final flat = readinessComposite([
+        rhrInput(56.0, <double>[52, 52, 52, 52])
+      ]);
       expect(flat.present, isFalse);
     });
   });
@@ -326,10 +397,8 @@ void main() {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final temp = <AdcSample>[];
       final accel = <AccelSample>[];
       var firstTs = 0, lastTs = 0;
@@ -371,7 +440,8 @@ void main() {
   });
 
   group('baseline-need signals (need_baseline convention)', () {
-    test('readinessComposite: value present but 1-day baseline -> absent + need',
+    test(
+        'readinessComposite: value present but 1-day baseline -> absent + need',
         () {
       final inputs = [
         hrvInput(50.0, [48.0]), // value present, baseline length 1 (< min 3)
@@ -379,7 +449,8 @@ void main() {
       final m = readinessComposite(inputs);
       expect(m.present, isFalse);
       expect(m.confidence, 0);
-      expect(m.note, 'need_baseline:have=1,need=$readinessCompositeMinBaseline');
+      expect(
+          m.note, 'need_baseline:have=1,need=$readinessCompositeMinBaseline');
       // With >= minBaseline points it computes.
       final ok = readinessComposite([
         hrvInput(60.0, [48.0, 49.0, 50.0, 51.0, 52.0]),
@@ -424,7 +495,8 @@ void main() {
   // not floored to an epsilon scale.
   // -------------------------------------------------------------------------
   group('multivariateAnomaly — degenerate baseline (regression)', () {
-    test('an exactly-constant baseline column is DROPPED, never floored to 1e-6',
+    test(
+        'an exactly-constant baseline column is DROPPED, never floored to 1e-6',
         () {
       // Ten baseline nights whose skin-temp z is an exactly-constant quantized
       // 0.0 (MAD == 0 AND SD == 0), alongside a real HRV column, then a night
@@ -456,8 +528,7 @@ void main() {
       final feats = <AnomalyFeatures>[
         for (var i = 0; i < 12; i++)
           AnomalyFeatures(
-              hrv: 40.0 + (i.isEven ? 1.0 : -1.0),
-              temp: i.isEven ? 0.1 : -0.1),
+              hrv: 40.0 + (i.isEven ? 1.0 : -1.0), temp: i.isEven ? 0.1 : -0.1),
       ];
       final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
       final out =
@@ -493,7 +564,8 @@ void main() {
 
     test('a fully constant baseline (MAD=0 AND SD=0) still abstains', () {
       // The fallback is NOT a licence to score against zero dispersion.
-      final m = readinessComposite([rhrInput(60, List<double>.filled(8, 55.0))]);
+      final m =
+          readinessComposite([rhrInput(60, List<double>.filled(8, 55.0))]);
       expect(m.present, isFalse);
       expect(m.toJson()['value'], '—');
     });

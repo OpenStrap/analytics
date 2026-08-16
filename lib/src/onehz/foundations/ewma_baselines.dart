@@ -7,15 +7,13 @@
 // gating, early-life anti-anchoring (fast adapt + suspended hard-outlier gate +
 // inflated Winsor band), hard-outlier rejection, and Winsor clamping.
 //
-// Two paths:
-//   1. Winsorized EWMA (production): [baselineUpdate] / [baselineFoldHistory].
-//   2. Trailing-window mean/SD (auditable): [baselineRollingMeanSD].
+// [Baselines.update] folds one night, [Baselines.foldHistory] replays a series,
+// [Baselines.deviation] computes z / delta / ratio / in-normal-range.
 //
-// Both produce a [BaselineState] so a recovery scorer can consume either
-// uniformly. [baselineDeviation] computes z / delta / ratio / in-normal-range.
-//
-// HONESTY: insufficient nights => status `calibrating`; the engine never
-// fabricates a "trusted" baseline.
+// HONESTY: insufficient nights => status `calibrating`; NO nights => no state
+// at all (null), never a baseline invented from the midpoint of the metric's
+// physiological bounds. The engine never fabricates a baseline, trusted or
+// otherwise.
 
 import 'dart:math' as math;
 
@@ -27,7 +25,11 @@ class MetricCfg {
   /// Physiological upper bound (hard reject above).
   final double maxVal;
 
-  /// σ_floor: minimum dispersion.
+  /// Minimum [BaselineState.spread] — i.e. a floor in ABS-DEVIATION units, not
+  /// in σ. (Multiply by 1.253 for the σ it implies.) The dead trailing-mean/SD
+  /// path applied the same constant as a σ floor, which put the two paths 25 %
+  /// apart on identical history; it has been deleted, so only this reading
+  /// exists now.
   final double floorSpread;
 
   /// Baseline-center half-life (nights).
@@ -145,13 +147,29 @@ class Baselines {
   /// Default per-metric configurations (HRV, resting HR, respiration, skin temp).
   static const Map<String, MetricCfg> metricCfg = {
     'hrv': MetricCfg(
-        minVal: 5.0, maxVal: 250.0, floorSpread: 5.0, halfLifeB: 14.0, halfLifeS: 21.0),
+        minVal: 5.0,
+        maxVal: 250.0,
+        floorSpread: 5.0,
+        halfLifeB: 14.0,
+        halfLifeS: 21.0),
     'resting_hr': MetricCfg(
-        minVal: 30.0, maxVal: 120.0, floorSpread: 2.0, halfLifeB: 14.0, halfLifeS: 21.0),
+        minVal: 30.0,
+        maxVal: 120.0,
+        floorSpread: 2.0,
+        halfLifeB: 14.0,
+        halfLifeS: 21.0),
     'resp': MetricCfg(
-        minVal: 4.0, maxVal: 40.0, floorSpread: 0.5, halfLifeB: 14.0, halfLifeS: 21.0),
+        minVal: 4.0,
+        maxVal: 40.0,
+        floorSpread: 0.5,
+        halfLifeB: 14.0,
+        halfLifeS: 21.0),
     'skin_temp': MetricCfg(
-        minVal: 20.0, maxVal: 42.0, floorSpread: 0.3, halfLifeB: 14.0, halfLifeS: 21.0),
+        minVal: 20.0,
+        maxVal: 42.0,
+        floorSpread: 0.3,
+        halfLifeB: 14.0,
+        halfLifeS: 21.0),
   };
 
   /// Convenience accessors for the standard configs.
@@ -161,7 +179,8 @@ class Baselines {
   static MetricCfg get skinTempCfg => metricCfg['skin_temp']!;
 
   /// Convert a half-life in nights to an EWMA smoothing factor.
-  static double lambda(double halfLife) => 1.0 - math.pow(0.5, 1.0 / halfLife).toDouble();
+  static double lambda(double halfLife) =>
+      1.0 - math.pow(0.5, 1.0 / halfLife).toDouble();
 
   static BaselineStatus computeStatus(int nValid, int nightsSinceUpdate) {
     if (nightsSinceUpdate > staleDays && nValid >= minNightsSeed) {
@@ -176,11 +195,14 @@ class Baselines {
 
   /// Incorporate one new nightly value into the baseline state.
   ///
-  /// - `state == null`: seed the first night.
+  /// - `state == null`: seed the first night — or return NULL when that night
+  ///   carries no usable value, because nothing has been observed yet and a
+  ///   baseline for nothing does not exist.
   /// - `value == null` or out-of-range: skip-and-hold (carry forward).
   /// - hard outlier (> HARD_OUTLIER_K × spread): seen but not folded.
   /// - otherwise: Winsorized EWMA center + EWMA-abs-dev spread update.
-  static BaselineState update(BaselineState? state, double? value, MetricCfg cfg) {
+  static BaselineState? update(
+      BaselineState? state, double? value, MetricCfg cfg) {
     final lb = lambda(cfg.halfLifeB);
     final ls = lambda(cfg.halfLifeS);
 
@@ -194,13 +216,11 @@ class Baselines {
             nightsSinceUpdate: 0,
             status: BaselineStatus.calibrating);
       }
-      final seed = (cfg.minVal + cfg.maxVal) / 2.0;
-      return BaselineState(
-          baseline: seed,
-          spread: cfg.floorSpread,
-          nValid: 0,
-          nightsSinceUpdate: 1,
-          status: BaselineStatus.calibrating);
+      // No usable observation yet. This used to return a state whose baseline
+      // was `(minVal + maxVal) / 2` — a number nobody measured — and
+      // [deviation] then dutifully reported z = −13 against it. There is no
+      // baseline; say so.
+      return null;
     }
 
     // Missing night: skip-and-hold.
@@ -240,18 +260,9 @@ class Baselines {
       }
     }
 
-    // First real value after a None-placeholder seed: treat as clean first night.
-    if (state.nValid == 0) {
-      return BaselineState(
-          baseline: value,
-          spread: cfg.floorSpread,
-          nValid: 1,
-          nightsSinceUpdate: 0,
-          status: BaselineStatus.calibrating);
-    }
-
     // Step 1: Winsorized EWMA update.
-    final effSpread = isYoung ? state.spread * earlySpreadInflate : state.spread;
+    final effSpread =
+        isYoung ? state.spread * earlySpreadInflate : state.spread;
     final effLb = isYoung ? lambda(earlyHalfLifeB) : lb;
     final lo = state.baseline - winsorK * effSpread;
     final hi = state.baseline + winsorK * effSpread;
@@ -260,7 +271,8 @@ class Baselines {
 
     // Spread uses the UNCLAMPED value so true deviations are tracked.
     final absDev = (value - newBaseline).abs();
-    final newSpread = math.max(cfg.floorSpread, ls * absDev + (1.0 - ls) * state.spread);
+    final newSpread =
+        math.max(cfg.floorSpread, ls * absDev + (1.0 - ls) * state.spread);
     final newN = state.nValid + 1;
 
     return BaselineState(
@@ -273,78 +285,33 @@ class Baselines {
 
   /// Replay an ordered sequence of nightly values (oldest first) to build state.
   /// `null` entries are treated as missing nights (skip-and-hold).
-  static BaselineState foldHistory(List<double?> values, MetricCfg cfg) {
+  ///
+  /// NULL when no night in [values] was usable: with nothing observed there is
+  /// no personal baseline, and the caller must withhold z / delta / ratio /
+  /// in-normal-range rather than score today against an invented centre.
+  static BaselineState? foldHistory(List<double?> values, MetricCfg cfg) {
     BaselineState? state;
     for (final v in values) {
       state = update(state, v, cfg);
     }
-    if (state != null) return state;
-    final seed = (cfg.minVal + cfg.maxVal) / 2.0;
-    return BaselineState(
-        baseline: seed,
-        spread: cfg.floorSpread,
-        nValid: 0,
-        nightsSinceUpdate: 0,
-        status: BaselineStatus.calibrating);
+    return state;
   }
 
   // ── Deviation ───────────────────────────────────────────────────────────────
 
   /// Compute z / delta / ratio / in-normal-range for a value vs a baseline.
   /// z uses (value − baseline) / (1.253 × spread).
-  static Deviation deviation(double value, BaselineState state) {
+  ///
+  /// NULL when the state rests on zero valid nights — there is nothing to
+  /// deviate FROM. (The engine can no longer produce such a state; the guard
+  /// holds the contract for a hand-built or rehydrated one.)
+  static Deviation? deviation(double value, BaselineState state) {
+    if (state.nValid == 0) return null;
     final sigma = math.max(1.253 * state.spread, 1e-9);
     final z = (value - state.baseline) / sigma;
     final delta = value - state.baseline;
     final ratio = state.baseline != 0 ? (value / state.baseline - 1.0) : 0.0;
-    return Deviation(z: z, delta: delta, ratio: ratio, inNormalRange: z.abs() <= 1.0);
-  }
-
-  // ── Trailing-window mean/SD (simple, auditable) ─────────────────────────────
-
-  /// Rolling personal baseline from the trailing [window] valid nights, as a
-  /// plain mean and sample SD (ddof=1). The spread returned is in the SAME
-  /// internal abs-dev units the Winsor EWMA uses (SD / 1.253).
-  static BaselineState rollingMeanSD(List<double?> values, MetricCfg cfg,
-      {int window = 30}) {
-    final valid = <double>[
-      for (final v in values)
-        if (v != null && cfg.minVal <= v && v <= cfg.maxVal) v
-    ];
-    if (valid.isEmpty) {
-      final seed = (cfg.minVal + cfg.maxVal) / 2.0;
-      return BaselineState(
-          baseline: seed,
-          spread: cfg.floorSpread,
-          nValid: 0,
-          nightsSinceUpdate: 0,
-          status: BaselineStatus.calibrating);
-    }
-    final trailing =
-        valid.length > window ? valid.sublist(valid.length - window) : valid;
-    final n = trailing.length;
-    final mean = trailing.reduce((a, b) => a + b) / n;
-
-    double sd;
-    if (n >= 2) {
-      var ss = 0.0;
-      for (final v in trailing) {
-        final d = v - mean;
-        ss += d * d;
-      }
-      sd = math.sqrt(ss / (n - 1));
-    } else {
-      sd = cfg.floorSpread * 1.253;
-    }
-
-    final sigmaFloored = math.max(cfg.floorSpread, sd);
-    final spreadInternal = sigmaFloored / 1.253;
-
-    return BaselineState(
-        baseline: mean,
-        spread: spreadInternal,
-        nValid: n,
-        nightsSinceUpdate: 0,
-        status: computeStatus(n, 0));
+    return Deviation(
+        z: z, delta: delta, ratio: ratio, inNormalRange: z.abs() <= 1.0);
   }
 }

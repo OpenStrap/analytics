@@ -22,6 +22,25 @@ void main() {
     test('absent on too-few beats', () {
       expect(hrvTime([800]).present, isFalse);
     });
+
+    test('successive differences do not span a DROPPED run', () {
+      // an-clinical-6. correctRr drops multi-beat artifact runs while advancing
+      // its clock across them, so nn[i-1] and nn[i] can sit either side of a
+      // seconds-long hole. Differencing straight down the compacted list
+      // manufactured one large difference per dropped run — a fraction of a ms
+      // on a night's RMSSD, but pNN50 can be entirely seam-driven.
+      // 800-ms beats, a 3-beat hole, then 900-ms beats: the seam Δ is 100 ms
+      // (a pNN50 hit) and the real Δs are all 0.
+      final nn = <double>[800, 800, 800, 900, 900, 900];
+      final times = <double>[800, 1600, 2400, 5700, 6600, 7500]; // 3.3 s hole
+      final seamed = hrvTime(nn).value!; // no beat times -> seam included
+      expect(seamed.pnn50, closeTo(100.0 / 5, 1e-9));
+      final clean = hrvTime(nn, nnTimesMs: times).value!;
+      expect(clean.rmssd, 0.0, reason: '4 contiguous pairs, all Δ = 0');
+      expect(clean.pnn50, 0.0);
+      // SDNN is a dispersion of levels, not of differences — unaffected.
+      expect(clean.sdnn, closeTo(seamed.sdnn!, 1e-12));
+    });
   });
 
   group('frequency-domain HRV (Lomb-Scargle on beat times)', () {
@@ -49,7 +68,9 @@ void main() {
       // averaged over segments long enough to RESOLVE the band (10 cycles of
       // its lowest frequency: 250 s for LF), so a 64 s record honestly reports
       // no LF and no HF at all rather than a grid-aliased number.
-      final rr = <double>[for (var i = 0; i < 400; i++) 1000 + (i.isEven ? 30 : -30)];
+      final rr = <double>[
+        for (var i = 0; i < 400; i++) 1000 + (i.isEven ? 30 : -30)
+      ];
       final times = <double>[];
       var t = 0.0;
       for (final v in rr) {
@@ -135,6 +156,36 @@ void main() {
               'not computable');
       expect(gated.value!.toJson().containsKey('total'), isFalse);
       expect(gated.note, contains('total'));
+    });
+
+    test('total NAMES what it summed instead of folding absent bands in as 0',
+        () {
+      // an-clinical-3. `total` was `(ulf ?? 0) + (vlf ?? 0) + lf + hfRaw`, and
+      // ULF can never resolve on a night — _welchBandPower needs 10 cycles at
+      // 0.0003 Hz = 33 333 s of span and a night is ~28 700 s — so the ULF term
+      // entered the published total as a literal 0 on every single night, while
+      // the comment above it claimed total was withheld when an unresolvable
+      // band was missing. The number is unchanged (0 adds nothing); what
+      // changes is that the sum now says which bands it is a sum OVER.
+      final nn = <double>[for (var i = 0; i < 400; i++) 1000.0 + (i % 7)];
+      final ts = <double>[];
+      var t = 0.0;
+      for (final v in nn) {
+        t += v;
+        ts.add(t);
+      }
+      final v = hrvFreq(nn, ts, artifactFraction: 0.0).value!;
+      expect(v.ulf, isNull, reason: 'a 400-beat record cannot resolve ULF');
+      expect(v.totalBands, isNotNull);
+      expect(v.totalBands, isNot(contains('ulf')));
+      // The sum is EXACTLY the named bands, with nothing implicit in it.
+      final named = {'ulf': v.ulf, 'vlf': v.vlf, 'lf': v.lf, 'hf': v.hf};
+      var sum = 0.0;
+      for (final b in v.totalBands!) {
+        sum += named[b]!;
+      }
+      expect(v.total!, closeTo(sum, 1e-9));
+      expect(v.toJson()['total_bands'], v.totalBands);
     });
   });
 
@@ -273,7 +324,8 @@ void main() {
       expect(out.every((d) => d.state == IllnessState.green), isTrue);
       expect(out.every((d) => d.cusum == null), isTrue);
     });
-    test('REGRESSION: a DEGENERATE (zero-dispersion) baseline abstains instead '
+    test(
+        'REGRESSION: a DEGENERATE (zero-dispersion) baseline abstains instead '
         'of standardizing against a fabricated 1 bpm scale', () {
       // 9 identical quantized nights, then a 5 bpm bump. MAD = 0 AND SD = 0, so
       // there is no dispersion at all. The old `max(1.0, SD)` fallback made
@@ -320,7 +372,9 @@ void main() {
     test('absent under min nights', () {
       expect(readinessLnRmssd([4.0, 4.1]).present, isFalse);
     });
-    test("rolling mean is prior nights only, doesn't include tonight's own value", () {
+    test(
+        "rolling mean is prior nights only, doesn't include tonight's own value",
+        () {
       // 3 identical prior nights + a low tonight. baseline mean should be
       // 4.0 (the prior nights), not 3.5 (which is what you get if tonight's
       // own drop gets averaged into its own comparison baseline).
@@ -329,7 +383,8 @@ void main() {
       expect(m.present, isTrue);
       expect(m.value!.rolling7Mean, 4.0);
     });
-    test('REGRESSION: an UNDEFINED baseline SD abstains instead of emitting '
+    test(
+        'REGRESSION: an UNDEFINED baseline SD abstains instead of emitting '
         'cvPct 0.0 / band "normal"', () {
       // One prior night => stddev() is null => CV, SWC and the band are
       // undefined. The metric used to publish cvPct 0.0, swc null and
@@ -408,14 +463,16 @@ void main() {
 
   group('TRIMP + CTL/ATL/TSB', () {
     test('Banister TRIMP needs anchors; produces positive load', () {
-      final none = banisterTrimp([120, 130], restingHr: null, maxHr: 190, sex: Sex.male);
+      final none =
+          banisterTrimp([120, 130], restingHr: null, maxHr: 190, sex: Sex.male);
       expect(none.present, isFalse);
       final m = banisterTrimp([120, 140, 160],
           restingHr: 50, maxHr: 190, sex: Sex.male);
       expect(m.value!, greaterThan(0));
     });
 
-    test('REGRESSION: ONE Banister implementation, matching the published '
+    test(
+        'REGRESSION: ONE Banister implementation, matching the published '
         'sex-specific y = c·e^(b·x)', () {
       // The two implementations in this file disagreed by 1.5625× (the
       // top-level one dropped the 0.64/0.86 coefficient entirely) and the
@@ -451,7 +508,8 @@ void main() {
       final m = edwardsTrimp([10, 5, 0, 0, 0]);
       expect(m.value!, 20);
     });
-    test('CTL>ATL after a long steady block, then ATL spikes on a hard day', () {
+    test('CTL>ATL after a long steady block, then ATL spikes on a hard day',
+        () {
       final steady = <double>[for (var i = 0; i < 60; i++) 50.0];
       final base = ctlAtlTsb(steady);
       // both converge to ~50, TSB ~ 0.
@@ -464,7 +522,8 @@ void main() {
       expect(s.value!.tsb, lessThan(0));
     });
 
-    test('REGRESSION: one training day does NOT fabricate 42 days of chronic '
+    test(
+        'REGRESSION: one training day does NOT fabricate 42 days of chronic '
         'load', () {
       // ctlAtlTsb([500]) used to seed BOTH accumulators at dailyTrimp.first →
       // ctl 500, atl 500, tsb 0.0: a fully-adapted, perfectly-fresh athlete
@@ -505,7 +564,8 @@ void main() {
       expect(zones.zoneNumber(180.0), 5);
     });
 
-    test('accumulates duration until next sample and rounds to zone minutes', () {
+    test('accumulates duration until next sample and rounds to zone minutes',
+        () {
       final zoneSet = HeartRateZones.zonesFromMaxHr(200);
       final time = HeartRateZones.timeInZone([
         const HrSample(0, 110), // z1 for 60 s
@@ -641,7 +701,8 @@ void main() {
   // than on the formula restated. This group keeps only the mechanical
   // properties of the map itself.
   group('strain score (0-21 map of TRIMP above the waking baseline)', () {
-    test('subtracts the quiet-waking baseline for the observed wake window', () {
+    test('subtracts the quiet-waking baseline for the observed wake window',
+        () {
       // 960 waking minutes accrue ~180 TRIMP just by being awake. Charging that
       // as effort is what put an inactive day at 12.8/21.
       expect(baselineTrimp(960), closeTo(180.4, 0.5));
@@ -690,13 +751,18 @@ void main() {
       expect(StrainScorer.trimpToStrain(335), lessThan(100.0));
     });
 
-    test('REGRESSION: strain integrates PER-SAMPLE durations, not the first '
+    test(
+        'REGRESSION: strain integrates PER-SAMPLE durations, not the first '
         'inter-sample gap applied to everything', () {
       const bpmv = 150.0;
       // (a) 21 samples over 20 min whose FIRST two are 1 s apart — exactly the
       // sparse stream minSparseReadings admits. sampleDuration was 1 s for all
       // 21 samples → strain 8.08 instead of ~47.
-      final tsIrregular = <double>[0, 1, for (var i = 1; i < 20; i++) 1 + i * 63.1];
+      final tsIrregular = <double>[
+        0,
+        1,
+        for (var i = 1; i < 20; i++) 1 + i * 63.1
+      ];
       final bpm21 = List<double>.filled(21, bpmv);
       final irregular =
           StrainScorer.strain(bpm21, tsIrregular, maxHR: 190, restingHR: 50)!;
@@ -710,8 +776,7 @@ void main() {
       // (b) The inverse: 700 samples at 1 Hz behind a 300 s leading gap. The
       // 5-min first gap became every sample's duration → strain 104.25.
       final tsGap = <double>[0, for (var i = 0; i < 699; i++) 300.0 + i];
-      final gapped = StrainScorer.strain(
-          List<double>.filled(700, bpmv), tsGap,
+      final gapped = StrainScorer.strain(List<double>.filled(700, bpmv), tsGap,
           maxHR: 190, restingHR: 50)!;
       final dense = StrainScorer.strain(List<double>.filled(700, bpmv),
           [for (var i = 0; i < 700; i++) i.toDouble()],
@@ -728,7 +793,9 @@ void main() {
       expect(durs.reduce(math.max), closeTo(1 / 60.0, 1e-12));
     });
 
-    test('Edwards zone weight at %HRR boundaries (RHR=0,reserve=100 → bpm=%HRR)', () {
+    test(
+        'Edwards zone weight at %HRR boundaries (RHR=0,reserve=100 → bpm=%HRR)',
+        () {
       int w(double pct) => StrainScorer.zoneWeight(pct, 0, 100);
       expect(w(49), 0);
       expect(w(50), 1);
@@ -769,7 +836,8 @@ void main() {
       expect(h2, greaterThan(StrainScorer.tanakaHRmax(30)));
     });
 
-    test('gating: too few samples → null; spanning ≥600s with ≥20 → computes', () {
+    test('gating: too few samples → null; spanning ≥600s with ≥20 → computes',
+        () {
       // 30 samples but spanning only 30s → fails sparse-span gate → null.
       final ts30 = [for (var i = 0; i < 30; i++) i.toDouble()];
       expect(
@@ -791,7 +859,9 @@ void main() {
           isNull);
     });
 
-    test('trimpStrain envelope: present/ESTIMATE on enough data, absent otherwise', () {
+    test(
+        'trimpStrain envelope: present/ESTIMATE on enough data, absent otherwise',
+        () {
       final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
       final m = trimpStrain(List<double>.filled(700, 140), ts,
           maxHr: 190, restingHr: 50);
@@ -803,7 +873,9 @@ void main() {
       expect(absent.confidence, 0);
     });
 
-    test('trimpStrain is absent (not fabricated) when maxHr or restingHr is missing', () {
+    test(
+        'trimpStrain is absent (not fabricated) when maxHr or restingHr is missing',
+        () {
       final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
       final bpm = List<double>.filled(700, 140);
       final noMax = trimpStrain(bpm, ts, restingHr: 50);
@@ -821,8 +893,8 @@ void main() {
       expect(one.present, isFalse);
       expect(one.confidence, 0);
       expect(one.note, 'need_baseline:have=1,need=$readinessLnRmssdMinNights');
-      final enough = readinessLnRmssd(
-          List<double>.generate(readinessLnRmssdMinNights, (i) => 3.5 + i * 0.01));
+      final enough = readinessLnRmssd(List<double>.generate(
+          readinessLnRmssdMinNights, (i) => 3.5 + i * 0.01));
       expect(enough.present, isTrue);
     });
 
@@ -833,7 +905,8 @@ void main() {
       final rhr = [for (var i = 0; i < n; i++) 55.0 + (i.isEven ? 0.0 : 1.0)];
       final days = illnessCusum(dates, rhr);
       // First night: have=0 baseline, need=7.
-      expect(days[0].need, 'need_baseline:have=0,need=$illnessCusumMinBaseline');
+      expect(
+          days[0].need, 'need_baseline:have=0,need=$illnessCusumMinBaseline');
       expect(days[0].cusum, isNull);
       // A night past the minimum baseline is evaluated (no need note).
       expect(days[illnessCusumMinBaseline].need, isNull);
@@ -844,14 +917,16 @@ void main() {
   // -------------------------------------------- Baevsky Stress Index (#6)
   group('baevskyStressIndex — direct coverage', () {
     test('too few clean beats → honest absent', () {
-      final m = baevskyStressIndex(<double>[for (var i = 0; i < 10; i++) 900.0]);
+      final m =
+          baevskyStressIndex(<double>[for (var i = 0; i < 10; i++) 900.0]);
       expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(m.tier, Tier.estimate);
       expect(m.note, contains('30 clean beats'));
     });
 
-    test('a narrow, near-regular RR distribution yields a finite SI + band', () {
+    test('a narrow, near-regular RR distribution yields a finite SI + band',
+        () {
       // ~300 beats around 900 ms with small bounded variation → a well-defined
       // mode and a non-zero MxDMn, so SI is finite (not the degenerate ÷0 case).
       final nn = <double>[
@@ -869,14 +944,17 @@ void main() {
       expect(v.toJson()['si'], isNotNull);
     });
 
-    test('a constant RR series has zero range → no valid SI window (absent)', () {
+    test('a constant RR series has zero range → no valid SI window (absent)',
+        () {
       // MxDMn = 0 makes SI degenerate; the impl must return absent, never ∞/0.
-      final m = baevskyStressIndex(<double>[for (var i = 0; i < 300; i++) 900.0]);
+      final m =
+          baevskyStressIndex(<double>[for (var i = 0; i < 300; i++) 900.0]);
       expect(m.present, isFalse);
       expect(m.value, isNull);
     });
 
-    test('REGRESSION: a NEAR-degenerate RR range abstains instead of reporting '
+    test(
+        'REGRESSION: a NEAR-degenerate RR range abstains instead of reporting '
         'SI 48780 / "high"', () {
       // 300 beats alternating 1000/1001 ms — plausible 1 Hz beat-timing
       // quantization at a steady sleeping HR. The guard was only mxdmnS <= 0,
@@ -904,8 +982,8 @@ void main() {
       final rr = <double>[];
       var t = 0.0;
       for (var i = 0; i < nBeats; i++) {
-        final v = 900 +
-            amplitudeMs * math.sin(2 * math.pi * 0.0917 * (t / 1000));
+        final v =
+            900 + amplitudeMs * math.sin(2 * math.pi * 0.0917 * (t / 1000));
         rr.add(v);
         t += v;
       }
@@ -922,7 +1000,9 @@ void main() {
       return times;
     }
 
-    test('finds the peak at the guided pace and reports a high ratio/score on a clean paced signal', () {
+    test(
+        'finds the peak at the guided pace and reports a high ratio/score on a clean paced signal',
+        () {
       final rr = pacedRr();
       final times = beatTimes(rr);
       final m = cardiacCoherence(rr, times, pacedHz: 0.0917);
@@ -937,7 +1017,9 @@ void main() {
       expect(m.note, contains('matches guided pace'));
     });
 
-    test('a noisy, unpaced tachogram yields a lower ratio/score than the clean paced one', () {
+    test(
+        'a noisy, unpaced tachogram yields a lower ratio/score than the clean paced one',
+        () {
       final rng = math.Random(7);
       final noisyRr = <double>[
         for (var i = 0; i < 180; i++) 900 + (rng.nextDouble() - 0.5) * 200,
@@ -1004,6 +1086,47 @@ void main() {
       // And with no recent baseline left, it says so rather than scoring.
       expect(out[21].cusum, isNull);
       expect(out[21].need, contains('need_baseline'));
+    });
+
+    test('a wear gap clears the ACCUMULATOR, not just the run counters', () {
+      // an-clinical-2. The gap guard zeroed yellowRun/normalRun but cusum is a
+      // loop-external accumulator, so an episode's charge survived an
+      // arbitrarily long gap: 5 illness nights, 70 days off-wrist, then the
+      // first scorable night back fired yellow at cusum 28.55 on a night
+      // measured z = -0.12 BELOW baseline — health_screen rendered that as
+      // "tracking above your own baseline, 0.1 standardised deviations below
+      // it". A CUSUM is evidence accumulated over CONSECUTIVE observations;
+      // across a gap there are none, so there is nothing to carry.
+      String d(int dayOffset) => DateTime.utc(2026, 1, 1)
+          .add(Duration(days: dayOffset))
+          .toIso8601String()
+          .substring(0, 10);
+      final dates = <String>[];
+      final rhr = <double?>[];
+      var off = 0;
+      for (var i = 0; i < 30; i++) {
+        dates.add(d(off++));
+        rhr.add(55 + 2.0 * math.sin(i.toDouble()));
+      }
+      for (var i = 0; i < 5; i++) {
+        dates.add(d(off++));
+        rhr.add(64); // illness episode: ends red with a large accumulator
+      }
+      off += 70; // 70-day wear gap
+      for (var i = 0; i < 14; i++) {
+        dates.add(d(off++));
+        rhr.add(55 + 2.0 * math.sin(i.toDouble())); // fully normal nights
+      }
+      final out = illnessCusum(dates, rhr);
+      expect(
+          out.sublist(30, 35).map((e) => e.state), contains(IllnessState.red),
+          reason: 'the episode itself must still fire');
+      final back = out.sublist(35);
+      // Every night back is green, and the first one that CAN be scored starts
+      // from a cleared accumulator rather than 28.55.
+      expect(back.every((e) => e.state == IllnessState.green), isTrue);
+      final firstScored = back.firstWhere((e) => e.cusum != null);
+      expect(firstScored.cusum, lessThan(1.0));
     });
   });
 }

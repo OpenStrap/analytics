@@ -121,10 +121,19 @@ List<IllnessDay> illnessCusum(
       continue;
     }
     // A break in the calendar breaks every "N nights running" counter — the
-    // runs below mean CONSECUTIVE NIGHTS, not consecutive rows.
+    // runs below mean CONSECUTIVE NIGHTS, not consecutive rows — and that
+    // includes the ACCUMULATOR. It is loop-external and only bleeds off via
+    // max(0, …) or the two-normal-nights recovery clause, so an episode's
+    // charge used to survive an arbitrarily long wear gap: 5 illness nights,
+    // 70 days off-wrist, then the first scorable night back fired yellow at
+    // cusum 28.55 on a night measured z = −0.12 BELOW baseline, and the gap
+    // guard had just zeroed normalRun so recovery could not clear it either.
+    // A CUSUM is evidence accumulated over consecutive observations; there are
+    // no observations across a gap, so there is no evidence to carry.
     if (day[i] - lastScoredDay > 1) {
       yellowRun = 0;
       normalRun = 0;
+      cusum = 0;
     }
     lastScoredDay = day[i];
 

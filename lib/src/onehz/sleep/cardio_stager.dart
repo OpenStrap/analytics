@@ -702,6 +702,15 @@ CardioStagerResult classifyCardioEpochs(
     // WAKE is autonomic-led: HR risen to/above the arousal threshold, OR a big
     // movement that ALSO carries some HR lift (truly up), OR sustained big
     // movement. Movement at sleeping HR = repositioning, NOT wake.
+    // ASYMMETRY, DELIBERATELY LEFT HERE AND HANDLED UPSTREAM. Every gate that
+    // can produce WAKE or REM needs a non-NaN HR, while the fall-through below
+    // is an unconditional NREM — so an epoch with no heart rate at all can only
+    // ever come out asleep. [minHrCoverage] catches the all-or-nothing case;
+    // between 50 % and 100 % coverage it does not. There is no fourth
+    // [SleepStage] to express "no cardiac evidence" in, so the abstention is
+    // made where the numbers are: `segmentSleep` labels a second with no HR
+    // within half an epoch 'unobserved' and keeps it out of TST, WASO and the
+    // efficiency denominator.
     final hrUp = !hr[e].isNaN && hr[e] >= hrArousal;
     final bigPrev = e > 0 && bigMove(e - 1);
     final bigMoveWake =

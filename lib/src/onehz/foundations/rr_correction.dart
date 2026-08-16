@@ -190,7 +190,15 @@ RrCorrectionResult correctRr(
       // Isolated -> spline-correct from surrounding normals.
       final corr = _splineCorrect(rrMs, isArtifact, i);
       if (corr != null) {
-        t += corr;
+        // The clock advances by the REAL interval, not the interpolated one.
+        // `corr` is our best guess at what the NN *should* have been (a missed
+        // beat splits one ~2000 ms interval into two ~1000 ms ones), but the
+        // 2000 ms still elapsed. Advancing by `corr` deleted ~1 s of record per
+        // corrected beat — 1.6 % of a night at one missed beat in sixty — which
+        // inflated cvhr_per_hour's analyzedHours divisor and shortened hrvFreq's
+        // spanSec / Lomb-Scargle time axis. Same rule as the multi-beat branch
+        // and the no-anchor fallback below.
+        t += rrMs[i];
         nn.add(corr);
         times.add(t);
         corrected++;

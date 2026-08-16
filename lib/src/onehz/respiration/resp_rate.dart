@@ -14,8 +14,19 @@
 //     fuse them into a single honest rate.
 //
 // HONESTY CEILINGS:
-//   * 1 Hz Nyquist caps any rate at 0.5 Hz = 30 br/min. We refuse to report a
-//     peak at/above the ceiling (aliasing) and tag the limit in the note.
+//   * RIIV rides the 1 Hz green ADC, whose Nyquist caps any rate at 0.5 Hz =
+//     30 br/min. We refuse to report a peak at/above that ceiling (aliasing).
+//   * RSA rides the TACHOGRAM, which is sampled once per BEAT, not once per
+//     second — so its ceiling is the beat-rate Nyquist (0.5/meanNN), ~37 br/min
+//     at HR 75 but only ~25 br/min at HR 50. [rsaRespRate] computes that
+//     ceiling per window, caps it at [respHiHz], and withholds the whole window
+//     when that ceiling falls below the classic HF band (the alias would be
+//     indistinguishable from a genuine slower rate). A rate the window cannot
+//     resolve is ABSENT, never a spurious in-band peak dressed up as a normal
+//     number.
+//   * Neither estimator can see a TRUE rate above [respHiHz] (30 br/min). Such
+//     a window yields a low peak near the ceiling, not an absence — sustained
+//     adult tachypnea is outside what this module claims to measure.
 //   * RSA is HIGH tier (continuous 24/7, the structural edge); RIIV is MED
 //     (1 Hz green is a coarse intensity proxy, not the 419 Hz waveform).
 //   * Absent / insufficient input => null + confidence 0, never a guess.
@@ -32,8 +43,28 @@ const double respHiHz = 0.5;
 
 /// RSA uses the classic HRV HF band (0.15–0.40 Hz = 9–24 br/min) where the
 /// respiratory peak lives in the RR spectrum.
+///
+/// [rsaHiHz] is the top of the *classic HF band*, NOT the search ceiling.
+/// Searching only to 0.40 Hz was a silent 24 br/min cap: a real 26–29 br/min
+/// breather has no peak inside the band, so the search returned the largest
+/// spurious in-band structure instead — measured 26.4 → 22.3 and 28.8 → 17.4,
+/// both published at confidence 0.90. [rsaRespRate] therefore searches up to
+/// the window's own resolvable ceiling (see [rsaCeilingHz]) and withholds a
+/// peak that lands there.
 const double rsaLoHz = 0.15;
 const double rsaHiHz = 0.40;
+
+/// The highest respiratory frequency an RSA window can actually resolve (Hz).
+///
+/// The tachogram is sampled once per BEAT, so its Nyquist is `0.5 / meanNN`,
+/// not 0.5 Hz. At HR 75 (NN 800 ms) that is 0.625 Hz; at HR 50 it is 0.417 Hz.
+/// [respHiHz] caps it because nothing downstream of a 1 Hz record should claim
+/// more than 30 br/min.
+double rsaCeilingHz(double meanNnSec) {
+  if (!meanNnSec.isFinite || meanNnSec <= 0) return respHiHz;
+  final nyq = 0.5 / meanNnSec;
+  return nyq < respHiHz ? nyq : respHiHz;
+}
 
 /// One respiratory-rate estimate (breaths/min) plus its provenance.
 class RespEstimate {
@@ -89,6 +120,26 @@ Metric<RespEstimate> rsaRespRate(
     );
   }
 
+  // SEARCH CEILING. The window's own beat-rate Nyquist, capped at [respHiHz].
+  // The search used to stop at [rsaHiHz] while the guard below tested against
+  // [respHiHz], so the guard was unreachable and the 24 br/min cap was silent.
+  final meanNnSec = spanSec / (nnMs.length - 1);
+  final hiHz = rsaCeilingHz(meanNnSec);
+  // The ceiling must at least cover the classic HF band. Below that, a rate
+  // inside the band the literature defines would fold back down into the band
+  // as an alias and be indistinguishable from a genuine slower one — measured:
+  // 26 br/min at NN 1400 ms folds to 16.9 br/min with a full-height peak. No
+  // spectral test can separate the two, so the honest answer is nothing at all.
+  if (hiHz < rsaHiHz) {
+    return Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'beat rate ${round6(60 / meanNnSec)} bpm resolves only to '
+          '${round6(hiHz * 60)} br/min — below the HF band, any peak could be '
+          'an alias; rate withheld',
+    );
+  }
+
   // Pimentel 2017 robustness surrogate: vary the spectral resolution (a
   // deterministic analogue of varying the AR model order) and require the HF
   // peak to be stable across them. A respiratory peak is sharp & resolution-
@@ -96,16 +147,32 @@ Metric<RespEstimate> rsaRespRate(
   final peaks = <double>[]; // br/min
   final peakHz = <double>[]; // the same peaks in Hz, index-aligned
   final peakPwr = <double>[]; // their spectral power, index-aligned
+  var atCeiling = false;
   for (final grid in const [300, 450, 700]) {
-    final ls = lombScargle(tSec, nnMs, freqGrid(rsaLoHz, rsaHiHz, grid));
+    final freqs = freqGrid(rsaLoHz, hiHz, grid);
+    final ls = lombScargle(tSec, nnMs, freqs);
     if (ls == null) continue;
-    final pk = ls.peakFreq(rsaLoHz, rsaHiHz);
+    final pk = ls.peakFreq(rsaLoHz, hiHz);
     if (pk == null) continue;
-    // Reject aliasing: a peak at/above Nyquist is not a real breathing rate.
-    if (pk >= respHiHz) continue;
+    // A peak pinned to the top of the searchable band means the true rate is
+    // at or above what this window can resolve. That is an ABSENCE, not a rate:
+    // reporting the edge would publish the ceiling as if it were a measurement.
+    final step = grid > 1 ? (hiHz - rsaLoHz) / (grid - 1) : hiHz - rsaLoHz;
+    if (pk >= hiHz - step) {
+      atCeiling = true;
+      continue;
+    }
     peaks.add(pk * 60.0);
     peakHz.add(pk);
     peakPwr.add(_powerAt(ls, pk));
+  }
+  if (atCeiling && peaks.length < 2) {
+    return Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'respiratory peak at/above the resolvable ceiling '
+          '(${round6(hiHz * 60)} br/min) — rate withheld',
+    );
   }
   if (peaks.length < 2) {
     return const Metric<RespEstimate>.absent(
@@ -155,8 +222,8 @@ Metric<RespEstimate> rsaRespRate(
     inputs_used: inputs,
     note: 'RSA HF-peak respiratory rate (Lomb-Scargle on native beat times, '
         'medoid of ${peaks.length} spectral resolutions — brpm, peak_hz and '
-        'power all come from that one grid); PRV-derived; 1 Hz Nyquist caps '
-        'rate at 30 br/min',
+        'power all come from that one grid); PRV-derived; this window could '
+        'resolve up to ${round6(hiHz * 60)} br/min',
   );
 }
 
