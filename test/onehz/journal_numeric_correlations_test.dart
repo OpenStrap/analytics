@@ -6,6 +6,8 @@
 // than a difference-of-means does: a correlation over a handful of days is
 // close to meaningless, and that is exactly when it looks most convincing.
 
+import 'dart:math' as math;
+
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
@@ -41,9 +43,10 @@ JournalNumericEffect _effect(
   List<JournalNumericCorrelation> out,
   String field,
   String outcome,
-) => out.firstWhere((e) => e.field == field).effects.firstWhere(
-  (e) => e.outcome == outcome,
-);
+) =>
+    out.firstWhere((e) => e.field == field).effects.firstWhere(
+          (e) => e.outcome == outcome,
+        );
 
 void main() {
   group('spearmanRho', () {
@@ -114,7 +117,9 @@ void main() {
             JournalNumericDay(dates[i], {'water': (i + 1).toDouble()}),
         ],
         dates: dates,
-        outcomes: {'readiness': [for (var i = 0; i < 5; i++) 50.0 + i]},
+        outcomes: {
+          'readiness': [for (var i = 0; i < 5; i++) 50.0 + i]
+        },
       );
       final e = _effect(out, 'water', 'readiness');
       expect(e.insufficient, isTrue);
@@ -138,7 +143,9 @@ void main() {
             ),
         ],
         dates: dates,
-        outcomes: {'rmssd': [for (var i = 0; i < 10; i++) 60.0 + i]},
+        outcomes: {
+          'rmssd': [for (var i = 0; i < 10; i++) 60.0 + i]
+        },
       );
       final e = _effect(out, 'caffeine', 'rmssd');
       expect(e.n, 5, reason: 'only the days the field was actually recorded');
@@ -170,13 +177,53 @@ void main() {
       // A field that wanders independently of the outcome must come back not
       // meaningful — the confidence interval straddles zero.
       final dates = _dates(20);
-      const field = <double>[4, 1, 3, 2, 5, 3, 1, 4, 2, 5,
-                             3, 2, 4, 1, 5, 2, 3, 4, 1, 5];
+      const field = <double>[
+        4,
+        1,
+        3,
+        2,
+        5,
+        3,
+        1,
+        4,
+        2,
+        5,
+        3,
+        2,
+        4,
+        1,
+        5,
+        2,
+        3,
+        4,
+        1,
+        5
+      ];
       // The same twenty outcome values, permuted to a rank correlation of
       // exactly 0 against the field above — so this test fails if the gate
       // ever starts calling an unrelated field a finding.
-      const outcome = <double?>[53, 47, 50, 49, 49, 51, 49, 48, 51, 50,
-                                52, 52, 48, 52, 47, 53, 51, 50, 48, 53];
+      const outcome = <double?>[
+        53,
+        47,
+        50,
+        49,
+        49,
+        51,
+        49,
+        48,
+        51,
+        50,
+        52,
+        52,
+        48,
+        52,
+        47,
+        53,
+        51,
+        50,
+        48,
+        53
+      ];
       final out = journalNumericCorrelations(
         journal: [
           for (var i = 0; i < dates.length; i++)
@@ -198,12 +245,15 @@ void main() {
       expect(e.rhoHigh!, greaterThan(0));
     });
 
-    test('a misaligned outcome series is reported, not truncated or thrown', () {
+    test('a misaligned outcome series is reported, not truncated or thrown',
+        () {
       final dates = _dates(10);
       final out = journalNumericCorrelations(
         journal: _days('water', [for (var i = 0; i < 10; i++) i.toDouble()]),
         dates: dates,
-        outcomes: {'rhr': const [50.0, 51.0]},
+        outcomes: {
+          'rhr': const [50.0, 51.0]
+        },
       );
       final e = _effect(out, 'water', 'rhr');
       expect(e.insufficient, isTrue);
@@ -215,7 +265,9 @@ void main() {
       final out = journalNumericCorrelations(
         journal: _days('water', [for (var i = 0; i < 14; i++) 2.0]),
         dates: dates,
-        outcomes: {'readiness': [for (var i = 0; i < 14; i++) 50.0 + i]},
+        outcomes: {
+          'readiness': [for (var i = 0; i < 14; i++) 50.0 + i]
+        },
       );
       final e = _effect(out, 'water', 'readiness');
       expect(e.insufficient, isTrue);
@@ -258,7 +310,9 @@ void main() {
               JournalNumericDay(dates[i], {'caffeine': i.toDouble()}),
           ],
           dates: dates,
-          outcomes: {'rmssd': [for (var i = 0; i < n; i++) 90.0 - 5 * i]},
+          outcomes: {
+            'rmssd': [for (var i = 0; i < n; i++) 90.0 - 5 * i]
+          },
         ).single.effects;
       }
 
@@ -358,7 +412,9 @@ void main() {
             JournalNumericDay(three[i], {'water': i.toDouble()}),
         ],
         dates: three,
-        outcomes: {'readiness': [for (var i = 0; i < 3; i++) 50.0 + i]},
+        outcomes: {
+          'readiness': [for (var i = 0; i < 3; i++) 50.0 + i]
+        },
         minN: 3,
       ).single.effects.single;
       expect(e3.rho, closeTo(1.0, 1e-9));
@@ -368,6 +424,149 @@ void main() {
         isFalse,
         reason: 'no interval means no evidence it clears zero',
       );
+    });
+
+    // -----------------------------------------------------------------------
+    // MIND-01 — Benjamini-Hochberg over the returned grid.
+    // -----------------------------------------------------------------------
+
+    test('a grid of pure noise produces per-test hits and NO findings', () {
+      // The whole reason the correction is not optional. Twenty unrelated
+      // fields against one outcome, all noise: at a per-test 0.05 gate about
+      // one of them is a "finding" every time, for every user, forever. Under
+      // BH the same grid publishes nothing.
+      const n = 40;
+      final dates = _dates(n);
+      final rng = math.Random(1);
+      final journal = [
+        for (var i = 0; i < n; i++)
+          JournalNumericDay(dates[i], {
+            for (var f = 0; f < 20; f++) 'f$f': rng.nextDouble() * 5,
+          }),
+      ];
+      final out = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: {
+          'readiness': [
+            for (var i = 0; i < n; i++) 50.0 + rng.nextDouble() * 10
+          ],
+        },
+      );
+      final effects = [for (final f in out) ...f.effects];
+      expect(effects, hasLength(20));
+      expect(
+        effects.any((e) => e.p != null && e.p! < 0.05),
+        isTrue,
+        reason: 'if no per-test hit turns up here the test has stopped '
+            'exercising the thing it guards',
+      );
+      expect(
+        effects.every((e) => !e.meaningful),
+        isTrue,
+        reason: 'pure noise must publish nothing',
+      );
+      for (final e in effects) {
+        expect(e.q!, greaterThanOrEqualTo(e.p!), reason: 'q never below p');
+      }
+    });
+
+    test('a family of one is the identity — q equals p', () {
+      final dates = _dates(12);
+      final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6];
+      final out = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < dates.length; i++)
+            JournalNumericDay(dates[i], {'caffeine': caffeine[i]}),
+        ],
+        dates: dates,
+        outcomes: {
+          'rmssd': [for (final c in caffeine) 80.0 - 6 * c]
+        },
+      );
+      final e = _effect(out, 'caffeine', 'rmssd');
+      expect(e.q, closeTo(e.p!, 1e-12));
+      expect(e.meaningful, isTrue, reason: 'a real relationship still lands');
+    });
+
+    // -----------------------------------------------------------------------
+    // MIND-04 — a 0/1 field is a tick box, not a dose.
+    // -----------------------------------------------------------------------
+
+    test('a 0/1 field routes to a difference of means, not to rho', () {
+      // Habits are custom journal fields with max == 1, so this is the habit
+      // path. "On the 9 days you did this, HRV was 4 ms higher."
+      const n = 18;
+      final dates = _dates(n);
+      final flag = [for (var i = 0; i < n; i++) i.isEven ? 1.0 : 0.0];
+      // +4 ms on the days it was ticked, with real within-group spread.
+      final hrv = [
+        for (var i = 0; i < n; i++) 60.0 + (flag[i] == 1 ? 4.0 : 0.0) + (i % 3),
+      ];
+      final out = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < n; i++)
+            JournalNumericDay(dates[i], {'meditate': flag[i]}),
+        ],
+        dates: dates,
+        outcomes: {'rmssd': hrv},
+      );
+      final e = _effect(out, 'meditate', 'rmssd');
+      expect(e.binary, isTrue);
+      expect(e.rho, isNull, reason: 'a two-valued field has no dose to rank');
+      expect(e.slopePerUnit, isNull);
+      expect(e.rhoLow, isNull);
+      expect(e.nWith, 9);
+      expect(e.nWithout, 9);
+      expect(e.delta!, closeTo(4.0, 1e-9));
+      expect(e.cohensD!, greaterThan(0.5));
+      expect(e.insufficient, isFalse);
+      expect(e.meaningful, isTrue);
+    });
+
+    test('a ticked habit with no real difference is shippable as "not yet"',
+        () {
+      // Not insufficient — we ran the comparison and it came back nothing.
+      // "No difference detectable yet" needs that distinction to be printable.
+      const n = 20;
+      final dates = _dates(n);
+      final flag = [for (var i = 0; i < n; i++) i.isEven ? 1.0 : 0.0];
+      final rng = math.Random(11);
+      final out = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < n; i++)
+            JournalNumericDay(dates[i], {'stretch': flag[i]}),
+        ],
+        dates: dates,
+        outcomes: {
+          'readiness': [
+            for (var i = 0; i < n; i++) 50.0 + rng.nextDouble() * 8
+          ],
+        },
+      );
+      final e = _effect(out, 'stretch', 'readiness');
+      expect(e.binary, isTrue);
+      expect(e.insufficient, isFalse);
+      expect(e.meaningful, isFalse);
+      expect(e.delta, isNotNull);
+    });
+
+    test('a 0/1 field with too few days on one side gives no verdict', () {
+      const n = 12;
+      final dates = _dates(n);
+      final out = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < n; i++)
+            JournalNumericDay(dates[i], {'rare': i < 2 ? 1.0 : 0.0}),
+        ],
+        dates: dates,
+        outcomes: {
+          'rhr': [for (var i = 0; i < n; i++) 50.0 + i]
+        },
+      );
+      final e = _effect(out, 'rare', 'rhr');
+      expect(e.insufficient, isTrue);
+      expect(e.meaningful, isFalse);
     });
 
     test('empty input is empty output, not a crash', () {

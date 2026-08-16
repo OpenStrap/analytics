@@ -109,6 +109,72 @@ void main() {
     });
   });
 
+  group('multiplicity — benjaminiHochberg', () {
+    test('known answer, and the step-up keeps q monotone in p', () {
+      // m = 5, q_(k) = p_(k)·m/k with a running minimum applied from the
+      // largest p downwards. The raw ratios here are
+      // [0.04, 0.025, 0.04, 0.05, 0.6] in p order — NOT monotone, and the
+      // smallest p carries the largest raw ratio. The step-up pulls it down to
+      // its neighbour, which is the part everyone drops: without it the
+      // strongest test in the family is refused while a weaker one publishes.
+      final q = benjaminiHochberg([0.01, 0.008, 0.024, 0.04, 0.6]);
+      expect(q[1]!, closeTo(0.025, 1e-12)); // raw 0.04, stepped down
+      expect(q[0]!, closeTo(0.025, 1e-12)); // 0.01·5/2
+      expect(q[2]!, closeTo(0.04, 1e-12)); // 0.024·5/3
+      expect(q[3]!, closeTo(0.05, 1e-12)); // 0.04·5/4
+      expect(q[4]!, closeTo(0.6, 1e-12));
+      // Monotone in p, which is the property the step-up buys.
+      final byP = [0, 1, 2, 3, 4]..sort((a, b) => [
+            0.01,
+            0.008,
+            0.024,
+            0.04,
+            0.6
+          ][a]
+              .compareTo([0.01, 0.008, 0.024, 0.04, 0.6][b]));
+      for (var k = 1; k < byP.length; k++) {
+        expect(q[byP[k]]!, greaterThanOrEqualTo(q[byP[k - 1]]!));
+      }
+    });
+
+    test('a family of one is the identity', () {
+      expect(benjaminiHochberg([0.03]).single!, closeTo(0.03, 1e-12));
+    });
+
+    test('a null p stays null and does NOT count toward the family size', () {
+      // A test we abstained from is not a test we performed. Counting it would
+      // punish every other test for a comparison that never ran.
+      final q = benjaminiHochberg([0.01, null, 0.02]);
+      expect(q[1], isNull);
+      expect(q[0]!, closeTo(0.02, 1e-12), reason: 'm = 2, not 3');
+    });
+
+    test('q never goes above 1 or below its own p', () {
+      final q = benjaminiHochberg([0.9, 0.95, 0.99]);
+      for (final v in q) {
+        expect(v!, lessThanOrEqualTo(1.0));
+      }
+    });
+
+    test('empty in, empty out', () {
+      expect(benjaminiHochberg(const []), isEmpty);
+    });
+  });
+
+  group('normalTwoSidedP', () {
+    test('matches the standard normal at the landmarks', () {
+      expect(normalTwoSidedP(0), closeTo(1.0, 1e-6));
+      expect(normalTwoSidedP(1.959964), closeTo(0.05, 1e-5));
+      expect(normalTwoSidedP(2.575829), closeTo(0.01, 1e-5));
+      expect(normalTwoSidedP(-1.959964), closeTo(0.05, 1e-5),
+          reason: 'two-sided: the sign cannot matter');
+    });
+
+    test('a non-finite z is no evidence, not a certainty', () {
+      expect(normalTwoSidedP(double.nan), 1.0);
+    });
+  });
+
   test('RrSeries beat-time reconstruction', () {
     final rr = RrSeries([1000, 1800, 2600], [1000, 800, 800]);
     expect(rr.beatTimesMs(0), [1000.0, 1800.0, 2600.0]);

@@ -58,6 +58,14 @@ const double kMinObservedFractionForSleep = 0.5;
 /// offset). Worst-case misalignment is under one epoch in either direction.
 const int _hrEvidenceHalfWinSec = 15;
 
+/// How long a wake run must last to be counted as an awakening (SLP-03).
+///
+/// Five minutes is a CHOICE — it is the bar Webster's rescoring already uses
+/// elsewhere in this package for a genuine sustained awakening, and it is not
+/// a physiological boundary. Anything shorter is inside the noise of a 1 Hz
+/// wrist. Published in the JSON so the number on screen can state its own bar.
+const int kSustainedAwakeningSec = 300;
+
 /// Single-source sleep segmentation result. Every accounting figure is derived
 /// from the per-second [stages] labels (asleep = stage != wake), so the parts
 /// are mutually consistent. When no sleep qualifies, see [SleepSegmentation.absent].
@@ -128,6 +136,26 @@ class SleepSegmentation {
   /// Wake seconds within the window (stage == wake). Null when absent.
   final int? wakeSec;
 
+  /// Sustained awakenings AT LEAST this long: runs of wake between sleep onset
+  /// and final offset lasting ≥ [kSustainedAwakeningSec]. Null when absent.
+  ///
+  /// AT LEAST is not hedging. A 1 Hz wrist cannot see the 3–15 s cortical
+  /// arousals PSG counts at all, and our wake specificity is 29–52 %, so the
+  /// true number of awakenings is HIGHER than this — never lower. This is not
+  /// an arousal index and must never be rendered as one.
+  ///
+  /// A run TERMINATES at an unobserved second; it never merges across one. Two
+  /// two-minute wakes with a charging gap between them are two short wakes we
+  /// did not count, not one sustained awakening we invented.
+  final int? sustainedAwakenings;
+
+  /// Longest unbroken stretch of sleep (s) inside the window. Null when absent.
+  ///
+  /// Same rule, and this is where it matters most: the run ends at an
+  /// unobserved second as surely as it ends at a wake one. A naive longest-run
+  /// that draws through a three-hour hole prints a 5 h stretch nobody watched.
+  final int? longestSleepRunSec;
+
   /// 0..1 confidence — the mean of a van Hees window term and a staging term.
   /// There is no HR-consensus term; no such step exists (see [segmentSleep]).
   /// 0 when absent.
@@ -153,6 +181,8 @@ class SleepSegmentation {
     required this.deepSec,
     required this.remSec,
     required this.wakeSec,
+    required this.sustainedAwakenings,
+    required this.longestSleepRunSec,
     required this.confidence,
     this.absenceReason,
   });
@@ -172,13 +202,14 @@ class SleepSegmentation {
     deepSec: null,
     remSec: null,
     wakeSec: null,
+    sustainedAwakenings: null,
+    longestSleepRunSec: null,
     confidence: 0,
   );
 
   /// Absent BECAUSE the window was too thinly observed to stand behind — the
   /// caller has a reason to show, not a hole.
-  static SleepSegmentation unobservedWindow(String reason) =>
-      SleepSegmentation(
+  static SleepSegmentation unobservedWindow(String reason) => SleepSegmentation(
         window: null,
         stages: const <SleepStage>[],
         stages4: const <String>[],
@@ -192,6 +223,8 @@ class SleepSegmentation {
         deepSec: null,
         remSec: null,
         wakeSec: null,
+        sustainedAwakenings: null,
+        longestSleepRunSec: null,
         confidence: 0,
         absenceReason: reason,
       );
@@ -204,13 +237,17 @@ class SleepSegmentation {
         'waso_sec': wasoSec,
         'in_bed_sec': inBedSec,
         'unobserved_sec': unobservedSec,
-        'efficiency_pct':
-            efficiencyPct == null ? null : round6(efficiencyPct!),
+        'efficiency_pct': efficiencyPct == null ? null : round6(efficiencyPct!),
         'nrem_sec': nremSec,
         'light_sec': lightSec,
         'deep_sec': deepSec,
         'rem_sec': remSec,
         'wake_sec': wakeSec,
+        // SLP-03. The 5-minute bar is a CHOICE, not physiology — it ships with
+        // the count so a screen can say what it counted.
+        'sustained_awakenings': sustainedAwakenings,
+        'awakening_min_sec': kSustainedAwakeningSec,
+        'longest_sleep_run_sec': longestSleepRunSec,
         'epochs': stages.length,
         'confidence': round6(confidence),
         if (absenceReason != null) 'absence_reason': absenceReason,
@@ -432,6 +469,33 @@ SleepSegmentation segmentSleep(
       if (observed[i] && perSec[i] == SleepStage.wake) waso++;
     }
   }
+
+  // SLP-03 — the SHAPE of the night, off the same per-second labels everything
+  // else here comes from, so there is one definition of where a run ends.
+  //
+  // Three states, not two: asleep / wake / UNOBSERVED. Both runs terminate at
+  // an unobserved second. Merging across one is how a naive longest-run bridges
+  // a three-hour charging hole and prints a 5 h unbroken stretch, and how two
+  // short wakes either side of a gap become one "sustained awakening".
+  var sustainedAwakenings = 0;
+  var longestSleepRun = 0;
+  var sleepRun = 0;
+  var wakeRun = 0;
+  for (var i = 0; i < perSec.length; i++) {
+    final asleep = observed[i] && perSec[i] != SleepStage.wake;
+    final awake = observed[i] && perSec[i] == SleepStage.wake;
+    sleepRun = asleep ? sleepRun + 1 : 0;
+    if (sleepRun > longestSleepRun) longestSleepRun = sleepRun;
+    // Awakenings are WASO only — the settling before onset and the lie-in after
+    // final offset are not awakenings.
+    final inWaso = firstSleep >= 0 && i > firstSleep && i < lastSleep;
+    if (awake && inWaso) {
+      wakeRun++;
+      if (wakeRun == kSustainedAwakeningSec) sustainedAwakenings++;
+    } else {
+      wakeRun = 0;
+    }
+  }
   if (tst == 0) {
     // Nothing in the window staged as sleep. A forced window deliberately skips
     // the 3 h and index gates, so this used to publish tst 0 / efficiency 0 % as
@@ -496,6 +560,8 @@ SleepSegmentation segmentSleep(
     deepSec: deep,
     remSec: rem,
     wakeSec: wake,
+    sustainedAwakenings: sustainedAwakenings,
+    longestSleepRunSec: longestSleepRun,
     confidence: conf,
   );
 }
@@ -609,9 +675,7 @@ _SleepGroup? _pickMainSleepGroup(
   var bestScore = winner.asleepMin + alignmentBonusFor(winner);
   for (final g in groups.skip(1)) {
     final score = g.asleepMin + alignmentBonusFor(g);
-    if (score > bestScore ||
-        (score == bestScore &&
-            g.start < winner.start)) {
+    if (score > bestScore || (score == bestScore && g.start < winner.start)) {
       winner = g;
       bestScore = score;
     }

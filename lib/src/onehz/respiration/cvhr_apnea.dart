@@ -48,12 +48,25 @@ class CvhrResult {
 
   /// Mean dip width (s) — NULL when no cycle was detected. See [meanDepthMs].
   final double? meanWidthSec;
+
+  /// [p25, p50, p75] of the per-cycle dip depths (ms). NULL when no cycle was
+  /// detected. The mean alone hides the shape: a night of a few deep dips and a
+  /// night of many shallow ones can share it. These are the raw quartiles of
+  /// the same per-cycle list the means come from — no adjective attached, no
+  /// threshold, and specifically no category.
+  final List<double>? depthQuartilesMs;
+
+  /// [p25, p50, p75] of the per-cycle widths (s) — the cycle LENGTH spread.
+  /// See [depthQuartilesMs].
+  final List<double>? widthQuartilesSec;
   const CvhrResult({
     required this.cycleCount,
     required this.cvhrPerHour,
     required this.analyzedHours,
     required this.meanDepthMs,
     required this.meanWidthSec,
+    this.depthQuartilesMs,
+    this.widthQuartilesSec,
   });
   Map<String, dynamic> toJson() => {
         'cycle_count': cycleCount,
@@ -61,8 +74,18 @@ class CvhrResult {
         'analyzed_hours': round6(analyzedHours),
         'mean_depth_ms': meanDepthMs == null ? null : round6(meanDepthMs!),
         'mean_width_sec': meanWidthSec == null ? null : round6(meanWidthSec!),
+        'depth_quartiles_ms':
+            depthQuartilesMs?.map(round6).toList(growable: false),
+        'width_quartiles_sec':
+            widthQuartilesSec?.map(round6).toList(growable: false),
       };
 }
+
+/// [p25, p50, p75] of [xs], or null when empty. Same linear-interpolated
+/// percentile the rest of the package uses.
+List<double>? _quartiles(List<double> xs) => xs.isEmpty
+    ? null
+    : [percentile(xs, 25)!, percentile(xs, 50)!, percentile(xs, 75)!];
 
 /// CVHR / ACAT apnea screen on a cleaned NN series.
 ///
@@ -168,6 +191,8 @@ Metric<CvhrResult> cvhrApneaScreen(
       analyzedHours: analyzedHours,
       meanDepthMs: depths.isEmpty ? null : mean(depths),
       meanWidthSec: widths.isEmpty ? null : mean(widths),
+      depthQuartilesMs: _quartiles(depths),
+      widthQuartilesSec: _quartiles(widths),
     ),
     confidence: conf,
     tier: Tier.high,
@@ -217,14 +242,19 @@ void _scoreSegment(
   }
   // Baseline-subtracted bradycardic excursion (clip negatives — we only score
   // the NN-up bradycardia, not the tachycardia trough).
-  final exc = [for (var j = 0; j < nGrid; j++) math.max(0.0, smooth[j] - base[j])];
+  final exc = [
+    for (var j = 0; j < nGrid; j++) math.max(0.0, smooth[j] - base[j])
+  ];
 
   // Prominence threshold: a dip must clear a robust noise floor AND a fraction
   // of the typical excursion amplitude. We anchor it BELOW the median positive
   // excursion (Hayano's adaptive amplitude criterion is permissive enough to
   // capture the whole bradycardia run, not just its tip) — a threshold at the
   // peak would clip the run width to a few seconds and miss the cycle.
-  final posExc = [for (final e in exc) if (e > 0) e];
+  final posExc = [
+    for (final e in exc)
+      if (e > 0) e
+  ];
   final excP75 = (posExc.isNotEmpty ? percentile(posExc, 75) : null) ?? 0;
   // half of the upper-quartile excursion: well inside each genuine dip's run.
   final prom = math.max(0.5 * excP75, 5.0); // ms

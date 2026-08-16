@@ -13,6 +13,8 @@ library onehz;
 // Layer: input types & math.
 export 'src/onehz/types.dart';
 export 'src/onehz/util.dart';
+// Per-device dispatch seam: unknown family refuses, never falls back to gen4.
+export 'src/onehz/device.dart';
 
 // Layer 0: foundations.
 export 'src/onehz/foundations/rr_correction.dart';

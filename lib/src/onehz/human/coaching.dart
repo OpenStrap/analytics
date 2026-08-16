@@ -1,7 +1,8 @@
 import 'dart:math' as math;
 
 import '../types.dart';
-import '../util.dart' show mean, theilSen;
+import '../util.dart'
+    show averageRanks, benjaminiHochberg, mean, normalTwoSidedP, theilSen;
 
 class SleepNeed {
   final double needSec;
@@ -199,120 +200,6 @@ Metric<StrainTarget> strainTarget({
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: const ['recovery', 'load'],
-  );
-}
-
-// NOTE: `sex` and `age` used to be required here and in [physiologicalAge] and
-// neither formula ever read them — a required argument that promises an
-// adjustment the maths does not do. Dropped. Add them back WITH the adjustment.
-Metric<double> vo2maxEstimate({
-  required double? restingHr,
-  required double? maxHr,
-}) {
-  // Uth-Sørensen-Overgaard-Pedersen 2004: VO2max ≈ 15.3 · (HRmax / HRrest).
-  // The ratio is only defined for a STRICTLY POSITIVE resting HR — a 0 (the
-  // package's off-skin sentinel, see types.dart HrSample) divides to Infinity,
-  // which Metric.toJson emits raw and jsonEncode then throws on. `maxHr <=
-  // restingHr` does not catch it, so guard the denominator explicitly and
-  // abstain. Non-finite inputs abstain for the same reason.
-  if (restingHr == null ||
-      maxHr == null ||
-      !restingHr.isFinite ||
-      !maxHr.isFinite ||
-      restingHr <= 0 ||
-      maxHr <= restingHr) {
-    return const Metric<double>.absent(
-      tier: Tier.estimate,
-      inputs_used: ['resting_hr', 'max_hr'],
-      note:
-          'VO2max needs a positive resting HR below HRmax — "—" (never imputed)',
-    );
-  }
-  final vo2 = 15.3 * (maxHr / restingHr);
-  return Metric<double>(
-    value: vo2,
-    confidence: 0.45,
-    tier: Tier.estimate,
-    inputs_used: const ['resting_hr', 'max_hr'],
-    note: 'Uth-style resting VO2max estimate from HRmax:RHR',
-  );
-}
-
-class PhysioAge {
-  final double physioAge;
-  final double deltaYears;
-  const PhysioAge({required this.physioAge, required this.deltaYears});
-  Map<String, dynamic> toJson() => {
-        'physio_age': physioAge,
-        'delta_years': deltaYears,
-      };
-}
-
-Metric<PhysioAge> physiologicalAge({
-  required double chronologicalAge,
-  required double? vo2max,
-  required double? restingHr,
-  required double? rmssd,
-  required double? sleepDurationH,
-  required double? sleepEfficiency,
-  required double? dailySteps,
-}) {
-  // ABSTAIN when NOTHING physiological was supplied. `score` starts at the
-  // chronological age and only the blocks below move it, so with every
-  // physiological input null this used to return a PRESENT metric reading
-  // "physioAge == your age, delta 0" — a fabricated result — while claiming six
-  // inputs it never saw. A physiological age with no physiology in it is not an
-  // estimate, it is the birth date restated.
-  final used = <String>[
-    if (vo2max != null) 'vo2max',
-    if (restingHr != null) 'resting_hr',
-    if (rmssd != null) 'rmssd',
-    if (sleepDurationH != null) 'sleep_duration',
-    if (sleepEfficiency != null) 'sleep_efficiency',
-    if (dailySteps != null) 'steps',
-  ];
-  if (used.isEmpty) {
-    return const Metric<PhysioAge>.absent(
-      tier: Tier.estimate,
-      inputs_used: ['profile'],
-      note: 'no physiological input present — "—" (never imputed; '
-          'chronological age alone is not a physiological age)',
-    );
-  }
-
-  var score = chronologicalAge;
-  if (vo2max != null) {
-    score -= ((vo2max - 35.0) / 5.0).clamp(-8.0, 8.0);
-  }
-  if (restingHr != null) {
-    score += ((restingHr - 60.0) / 6.0).clamp(-5.0, 8.0);
-  }
-  if (rmssd != null) {
-    score -= ((rmssd - 35.0) / 12.0).clamp(-4.0, 6.0);
-  }
-  if (sleepDurationH != null) {
-    // Deviation from the ~7.5 h optimum ages you in BOTH directions — under- and
-    // over-sleep both associate with worse outcomes. (Was `(7.5 - h)`, which
-    // wrongly made oversleep look biologically YOUNGER.)
-    score += (7.5 - sleepDurationH).abs().clamp(0.0, 3.0);
-  }
-  if (sleepEfficiency != null) {
-    score += ((88.0 - sleepEfficiency) / 6.0).clamp(-2.0, 3.0);
-  }
-  if (dailySteps != null) {
-    score -= ((dailySteps - 7000.0) / 3000.0).clamp(-3.0, 3.0);
-  }
-  score = score.clamp(18.0, 95.0);
-  return Metric<PhysioAge>(
-    value: PhysioAge(physioAge: score, deltaYears: score - chronologicalAge),
-    // Confidence tracks how much physiology actually went in: one input is a
-    // hint, all six is the intended estimate.
-    confidence: (0.15 + 0.035 * used.length).clamp(0.15, 0.35),
-    tier: Tier.estimate,
-    // inputs_used reports what was ACTUALLY used, never the full menu.
-    inputs_used: ['profile', ...used],
-    note: 'directional physiological-age estimate from ${used.length}/6 '
-        'physiological inputs',
   );
 }
 
@@ -549,10 +436,46 @@ class JournalNumericEffect {
   /// way. Distinct from a computed-but-weak relationship.
   final bool insufficient;
 
-  /// Strong enough AND separated from zero to be worth showing: |rho| clears
-  /// the floor and the confidence interval excludes 0. A rho alone is not
-  /// evidence — over ten days, |rho| ≈ 0.5 arises constantly from noise.
+  /// Strong enough AND surviving the multiplicity correction to be worth
+  /// showing: the effect size clears its floor (|rho| ≥ minAbsRho on the dose
+  /// path, |d| ≥ minCohensD on the 0/1 path) AND [q] ≤ the FDR level. A rho
+  /// alone is not evidence — over ten days, |rho| ≈ 0.5 arises constantly from
+  /// noise — and a per-test p is not evidence either once 36 of them run at
+  /// once.
   final bool meaningful;
+
+  /// This field only ever took the values 0 and 1 on the paired days, so it was
+  /// routed to a DIFFERENCE OF MEANS, not to a rank correlation. A tick-box is
+  /// a group membership, not a dose: rho and "slope per unit" on it are a group
+  /// difference wearing the wrong clothes. On this path [rho], [slopePerUnit]
+  /// and the rho interval are null and [delta]/[cohensD] carry the answer.
+  final bool binary;
+
+  /// 0/1 path only: mean(outcome | field = 1) − mean(outcome | field = 0), in
+  /// the outcome's own units. Null on the dose path.
+  final double? delta;
+
+  /// 0/1 path only: Cohen's d = [delta] / pooled within-group SD. Null on the
+  /// dose path, and null when both sides are exactly constant.
+  final double? cohensD;
+
+  /// 0/1 path only: days with the field at 1, and at 0. Both null otherwise.
+  final int? nWith;
+  final int? nWithout;
+
+  /// Two-sided p for this single test, before any correction. Null when no test
+  /// could be run. NOT a publication gate on its own — see [q].
+  final double? p;
+
+  /// Benjamini-Hochberg (1995) FDR-adjusted p over THE WHOLE GRID returned by
+  /// one call — every field × every outcome. This is the number the "meaningful"
+  /// verdict is gated on. Null when [p] is null.
+  ///
+  /// Why it is not optional: 9 built-in numeric fields × 4 outcomes is 36
+  /// simultaneous tests. At a per-test 0.05 gate that is ~2 findings from pure
+  /// noise for every user, every load — a machine for manufacturing confident
+  /// nonsense out of a journal.
+  final double? q;
 
   const JournalNumericEffect({
     required this.outcome,
@@ -563,6 +486,13 @@ class JournalNumericEffect {
     required this.n,
     required this.insufficient,
     required this.meaningful,
+    this.binary = false,
+    this.delta,
+    this.cohensD,
+    this.nWith,
+    this.nWithout,
+    this.p,
+    this.q,
   });
 }
 
@@ -570,31 +500,6 @@ class JournalNumericCorrelation {
   final String field;
   final List<JournalNumericEffect> effects;
   const JournalNumericCorrelation(this.field, this.effects);
-}
-
-/// Average ranks, 1-based, ties sharing their mean rank.
-///
-/// Tie handling is not a detail here: journal fields are full of ties (mood is
-/// 1–5, most people log the same 2 coffees most days), and ranking ties
-/// arbitrarily would invent an ordering the user never reported.
-List<double> _averageRanks(List<double> xs) {
-  final idx = List<int>.generate(xs.length, (i) => i)
-    ..sort((a, b) => xs[a].compareTo(xs[b]));
-  final ranks = List<double>.filled(xs.length, 0);
-  var i = 0;
-  while (i < idx.length) {
-    var j = i;
-    while (j + 1 < idx.length && xs[idx[j + 1]] == xs[idx[i]]) {
-      j++;
-    }
-    // Ranks are 1-based, so positions i..j map to ranks i+1..j+1.
-    final shared = (i + 1 + j + 1) / 2.0;
-    for (var k = i; k <= j; k++) {
-      ranks[idx[k]] = shared;
-    }
-    i = j + 1;
-  }
-  return ranks;
 }
 
 /// Pearson correlation. Null when either side has no spread.
@@ -616,7 +521,50 @@ double? _pearson(List<double> a, List<double> b) {
 
 /// Spearman's rho — Pearson on average ranks, so ties are handled correctly.
 double? spearmanRho(List<double> a, List<double> b) =>
-    _pearson(_averageRanks(a), _averageRanks(b));
+    _pearson(averageRanks(a), averageRanks(b));
+
+/// Per-field relationship between numeric journal entries and each outcome.
+///
+/// [outcomes] values must be POSITIONALLY ALIGNED to [dates], exactly as in
+/// [journalCorrelations]; a series of a different length is reported as
+/// insufficient rather than silently truncated.
+///
+/// Two-sided permutation p for a difference of means between two labelled
+/// groups: reshuffle the labels [b] times and count how often the shuffled
+/// |difference| reaches the observed one.
+///
+/// Distribution-free, which is the point — the alternative at these sample
+/// sizes is a normal approximation to Welch's t over eight days, which is
+/// anticonservative exactly where the answer matters. Seeded, so the same
+/// journal always yields the same p; the +1s are the standard bias correction
+/// that keeps p away from a fabricated 0.
+double _permTwoSampleP(List<double> ys, List<bool> inGroup, int b, int seed) {
+  double diff(List<bool> g) {
+    var s1 = 0.0, s0 = 0.0;
+    var n1 = 0, n0 = 0;
+    for (var i = 0; i < ys.length; i++) {
+      if (g[i]) {
+        s1 += ys[i];
+        n1++;
+      } else {
+        s0 += ys[i];
+        n0++;
+      }
+    }
+    if (n1 == 0 || n0 == 0) return 0.0;
+    return s1 / n1 - s0 / n0;
+  }
+
+  final obs = diff(inGroup).abs();
+  final rng = math.Random(seed);
+  final shuffled = [...inGroup];
+  var ge = 0;
+  for (var k = 0; k < b; k++) {
+    shuffled.shuffle(rng);
+    if (diff(shuffled).abs() >= obs - 1e-12) ge++;
+  }
+  return (ge + 1) / (b + 1);
+}
 
 /// Per-field relationship between numeric journal entries and each outcome.
 ///
@@ -628,12 +576,33 @@ double? spearmanRho(List<double> a, List<double> b) =>
 /// requirement because a correlation over a handful of points is close to
 /// meaningless — with 5 days, |rho| > 0.8 happens by chance often enough to
 /// fill a screen with confident nonsense.
+///
+/// TWO STATISTICS, chosen by what the field actually is:
+///   * a field that only ever took 0 and 1 is a TICK BOX — a habit, in this
+///     app, since habits are just custom fields with `max == 1`. It gets a
+///     difference of means with Cohen's d, the same comparison the tag path
+///     runs, because "the difference it made" is the only question a yes/no
+///     can answer. A rank correlation and a "slope per unit" on a two-valued
+///     field is a group difference wearing the wrong clothes.
+///   * anything else carries a dose and gets Spearman.
+///
+/// MULTIPLICITY. Every test in the grid this call returns is corrected together
+/// by Benjamini-Hochberg at [fdrAlpha], and `meaningful` is gated on the
+/// resulting q, never on the raw p. With one field and one outcome the
+/// correction is the identity, so a single test behaves exactly as it did.
+/// Across the built-in grid (9 fields × 4 outcomes) it is the difference
+/// between a screen of findings and a screen of noise.
 List<JournalNumericCorrelation> journalNumericCorrelations({
   required List<JournalNumericDay> journal,
   required List<String> dates,
   required Map<String, List<double?>> outcomes,
   int minN = 8,
   double minAbsRho = 0.35,
+  double minCohensD = 0.5,
+  int minPerSide = 3,
+  double fdrAlpha = 0.05,
+  int permutations = 999,
+  int permutationSeed = 20260817,
 }) {
   final byDate = <String, Map<String, double>>{
     for (final d in journal) d.date: d.values,
@@ -641,24 +610,49 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
   final fields = <String>{for (final d in journal) ...d.values.keys}.toList()
     ..sort();
 
-  JournalNumericEffect none(String outcome, int n) => JournalNumericEffect(
-        outcome: outcome,
-        rho: null,
-        slopePerUnit: null,
-        rhoLow: null,
-        rhoHigh: null,
-        n: n,
-        insufficient: true,
-        meaningful: false,
-      );
+  // One row per (field, outcome) in emission order. Built first, gated second:
+  // the FDR correction needs the whole family before any verdict can be given.
+  final rows = <({
+    String field,
+    String outcome,
+    int n,
+    double? rho,
+    double? slope,
+    double? lo,
+    double? hi,
+    bool binary,
+    double? delta,
+    double? cohensD,
+    int? nWith,
+    int? nWithout,
+    double? p,
+    bool floorOk,
+    bool insufficient,
+  })>[];
 
-  final out = <JournalNumericCorrelation>[];
+  void addNone(String field, String outcome, int n) => rows.add((
+        field: field,
+        outcome: outcome,
+        n: n,
+        rho: null,
+        slope: null,
+        lo: null,
+        hi: null,
+        binary: false,
+        delta: null,
+        cohensD: null,
+        nWith: null,
+        nWithout: null,
+        p: null,
+        floorOk: false,
+        insufficient: true,
+      ));
+
   for (final field in fields) {
-    final effects = <JournalNumericEffect>[];
     for (final entry in outcomes.entries) {
       final series = entry.value;
       if (series.length != dates.length) {
-        effects.add(none(entry.key, 0));
+        addNone(field, entry.key, 0);
         continue;
       }
 
@@ -675,9 +669,63 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
       }
 
       final n = xs.length;
-      final rho = n >= minN ? spearmanRho(xs, ys) : null;
+      if (n < minN) {
+        addNone(field, entry.key, n);
+        continue;
+      }
+
+      // 0/1 FIELD → difference of means (see the doc comment).
+      final isBinary = xs.every((v) => v == 0.0 || v == 1.0) &&
+          xs.contains(0.0) &&
+          xs.contains(1.0);
+      if (isBinary) {
+        final inGroup = [for (final v in xs) v == 1.0];
+        final withIt = <double>[];
+        final without = <double>[];
+        for (var i = 0; i < n; i++) {
+          (inGroup[i] ? withIt : without).add(ys[i]);
+        }
+        if (withIt.length < minPerSide || without.length < minPerSide) {
+          addNone(field, entry.key, n);
+          continue;
+        }
+        final mw = mean(withIt)!;
+        final mo = mean(without)!;
+        final delta = mw - mo;
+        final dof = n - 2;
+        final pooledVar = dof > 0
+            ? ((withIt.length - 1) * _sampleVar(withIt, mw) +
+                    (without.length - 1) * _sampleVar(without, mo)) /
+                dof
+            : 0.0;
+        final pooledSd = pooledVar > 0 ? math.sqrt(pooledVar) : 0.0;
+        final d = pooledSd > 0 ? delta / pooledSd : null;
+        rows.add((
+          field: field,
+          outcome: entry.key,
+          n: n,
+          rho: null,
+          slope: null,
+          lo: null,
+          hi: null,
+          binary: true,
+          delta: delta,
+          cohensD: d,
+          nWith: withIt.length,
+          nWithout: without.length,
+          p: _permTwoSampleP(ys, inGroup, permutations, permutationSeed),
+          // Both sides exactly constant leaves d undefined; the per-side floor
+          // is already the tag path's zero-spread rule, so a real gap between
+          // two constants still counts.
+          floorOk: d != null ? d.abs() >= minCohensD : delta.abs() > 0,
+          insufficient: false,
+        ));
+        continue;
+      }
+
+      final rho = spearmanRho(xs, ys);
       if (rho == null) {
-        effects.add(none(entry.key, n));
+        addNone(field, entry.key, n);
         continue;
       }
 
@@ -688,17 +736,16 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
       // days. So the saturated value is pulled in by 1/(2n): the interval
       // still excludes zero, but it widens as the sample shrinks, which is the
       // honest reading of a perfect correlation over very few days.
-      double? lo, hi;
+      double? lo, hi, p;
       if (n > 3) {
         final ceiling = 1.0 - 1.0 / (2.0 * n);
         final r = rho.clamp(-ceiling, ceiling);
         final zr = 0.5 * math.log((1 + r) / (1 - r));
         // Bonett & Wright (2000) standard error, NOT Fisher's 1/sqrt(n−3).
         // That one is derived for Pearson's r under bivariate normality; ranks
-        // are neither, and it runs narrow for rho. Since `meaningful` is gated
-        // on this interval excluding zero, the narrower SE would let weaker
-        // relationships through — the error points the wrong way for a
-        // function whose job is to refuse.
+        // are neither, and it runs narrow for rho. Since the verdict is gated
+        // on this, the narrower SE would let weaker relationships through —
+        // the error points the wrong way for a function whose job is to refuse.
         final se = math.sqrt((1.0 + r * r / 2.0) / (n - 3));
         double tanh(double v) {
           final e = math.exp(2 * v);
@@ -707,24 +754,62 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
 
         lo = tanh(zr - 1.96 * se);
         hi = tanh(zr + 1.96 * se);
+        // The same z the interval is built from, read as a two-sided p. So at
+        // a family of one, "q ≤ 0.05" and the old "the 95% interval excludes
+        // zero" are the same test — the correction only ever tightens it.
+        p = normalTwoSidedP(zr / se);
       }
 
-      final separated = lo != null && hi != null && (lo > 0) == (hi > 0);
-      effects.add(
-        JournalNumericEffect(
-          outcome: entry.key,
-          rho: rho,
-          slopePerUnit: theilSen(ys, xs),
-          rhoLow: lo,
-          rhoHigh: hi,
-          n: n,
-          insufficient: false,
-          meaningful: rho.abs() >= minAbsRho && separated,
-        ),
-      );
+      rows.add((
+        field: field,
+        outcome: entry.key,
+        n: n,
+        rho: rho,
+        slope: theilSen(ys, xs),
+        lo: lo,
+        hi: hi,
+        binary: false,
+        delta: null,
+        cohensD: null,
+        nWith: null,
+        nWithout: null,
+        p: p,
+        floorOk: rho.abs() >= minAbsRho,
+        insufficient: false,
+      ));
     }
-    out.add(JournalNumericCorrelation(field, effects));
   }
+
+  final qs = benjaminiHochberg([for (final r in rows) r.p]);
+  final byField = <String, List<JournalNumericEffect>>{};
+  for (var i = 0; i < rows.length; i++) {
+    final r = rows[i];
+    final q = qs[i];
+    byField.putIfAbsent(r.field, () => []).add(
+          JournalNumericEffect(
+            outcome: r.outcome,
+            rho: r.rho,
+            slopePerUnit: r.slope,
+            rhoLow: r.lo,
+            rhoHigh: r.hi,
+            n: r.n,
+            insufficient: r.insufficient,
+            meaningful: r.floorOk && q != null && q <= fdrAlpha,
+            binary: r.binary,
+            delta: r.delta,
+            cohensD: r.cohensD,
+            nWith: r.nWith,
+            nWithout: r.nWithout,
+            p: r.p,
+            q: q,
+          ),
+        );
+  }
+
+  final out = [
+    for (final field in fields)
+      JournalNumericCorrelation(field, byField[field] ?? const []),
+  ];
   out.sort((a, b) => a.field.compareTo(b.field));
   return out;
 }

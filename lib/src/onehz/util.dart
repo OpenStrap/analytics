@@ -329,7 +329,97 @@ List<int> calendarDays(List<String> dates) {
     final d = DateTime.tryParse(dates[i]);
     out[i] = d == null
         ? i
-        : DateTime.utc(d.year, d.month, d.day).millisecondsSinceEpoch ~/ 86400000;
+        : DateTime.utc(d.year, d.month, d.day).millisecondsSinceEpoch ~/
+            86400000;
+  }
+  return out;
+}
+
+/// Average ranks, 1-based, ties sharing their mean rank.
+///
+/// Tie handling is not a detail wherever this is used: journal fields are full
+/// of ties (mood is 1–5, most people log the same 2 coffees most days) and so
+/// are quantised daily metrics. Ranking ties arbitrarily invents an ordering
+/// nobody reported.
+List<double> averageRanks(List<double> xs) {
+  final idx = List<int>.generate(xs.length, (i) => i)
+    ..sort((a, b) => xs[a].compareTo(xs[b]));
+  final ranks = List<double>.filled(xs.length, 0);
+  var i = 0;
+  while (i < idx.length) {
+    var j = i;
+    while (j + 1 < idx.length && xs[idx[j + 1]] == xs[idx[i]]) {
+      j++;
+    }
+    // Ranks are 1-based, so positions i..j map to ranks i+1..j+1.
+    final shared = (i + 1 + j + 1) / 2.0;
+    for (var k = i; k <= j; k++) {
+      ranks[idx[k]] = shared;
+    }
+    i = j + 1;
+  }
+  return ranks;
+}
+
+/// Two-sided p for a standard-normal z. `2·(1 − Φ(|z|))`.
+///
+/// Numerical Recipes' `erfcc` — a Chebyshev fit to erfc with fractional error
+/// under 1.2e-7 everywhere, which is four orders of magnitude finer than any
+/// gate that reads it. No special-function dependency, no table.
+double normalTwoSidedP(double zScore) {
+  if (!zScore.isFinite) return 1.0;
+  final x = zScore.abs() / math.sqrt2;
+  final t = 1.0 / (1.0 + 0.5 * x);
+  final ans = t *
+      math.exp(-x * x -
+          1.26551223 +
+          t *
+              (1.00002368 +
+                  t *
+                      (0.37409196 +
+                          t *
+                              (0.09678418 +
+                                  t *
+                                      (-0.18628806 +
+                                          t *
+                                              (0.27886807 +
+                                                  t *
+                                                      (-1.13520398 +
+                                                          t *
+                                                              (1.48851587 +
+                                                                  t *
+                                                                      (-0.82215223 +
+                                                                          t * 0.17087277)))))))));
+  return clamp(ans, 0.0, 1.0);
+}
+
+/// Benjamini-Hochberg (1995) step-up FDR adjustment over a family of p-values.
+///
+/// Returns q-values POSITIONALLY ALIGNED to [ps]; a null p (a test that could
+/// not be run) stays null and does not enter the family size — a test we
+/// abstained from is not a test we performed.
+///
+/// WHY THIS IS NOT OPTIONAL where it is used: a per-test 0.05 gate over a grid
+/// of 36 simultaneous tests produces ~2 "findings" from pure noise, every time,
+/// for every user. BH controls the expected FRACTION of the published findings
+/// that are false, which is the quantity a screen full of "this moves your
+/// recovery" rows is actually promising.
+///
+/// The step-up enforcement (running minimum from the largest p downwards) is
+/// the part everyone drops: without it the q-values are not monotone in p and a
+/// weaker test can be published while a stronger one is refused.
+List<double?> benjaminiHochberg(List<double?> ps) {
+  final idx = <int>[
+    for (var i = 0; i < ps.length; i++)
+      if (ps[i] != null) i
+  ]..sort((a, b) => ps[a]!.compareTo(ps[b]!));
+  final m = idx.length;
+  final out = List<double?>.filled(ps.length, null);
+  var running = 1.0;
+  for (var k = m - 1; k >= 0; k--) {
+    final q = ps[idx[k]]! * m / (k + 1);
+    running = math.min(running, q);
+    out[idx[k]] = running;
   }
   return out;
 }

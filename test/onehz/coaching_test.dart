@@ -1,7 +1,10 @@
-// Coaching surface — synthetic known-answer tests, incl. a regression for the
-// physiological-age oversleep bug. Covers PR #11's untested coaching API.
-import 'dart:convert';
-
+// Coaching surface — synthetic known-answer tests. Covers PR #11's untested
+// coaching API.
+//
+// vo2maxEstimate and physiologicalAge and their tests are GONE (CV-02): the
+// first was 15.3·maxHr/rhr with maxHr a constant per user, i.e. k/RHR — the
+// RHR chart with the wrong unit on the axis — and the second then counted the
+// same RHR twice, once through that VO2max and once directly.
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/src/onehz/types.dart';
 import 'package:openstrap_analytics/src/onehz/human/coaching.dart';
@@ -334,101 +337,6 @@ void main() {
     });
   });
 
-  group('vo2maxEstimate', () {
-    test('Uth ratio 15.3×maxHr/restingHr on a known value', () {
-      final m =
-          vo2maxEstimate(restingHr: 50, maxHr: 190);
-      expect(m.present, isTrue);
-      expect(m.tier, Tier.estimate);
-      expect(m.confidence, closeTo(0.45, 1e-9));
-      expect(m.value!, closeTo(15.3 * 190 / 50, 1e-6)); // 58.14
-    });
-
-    test('absent when maxHr <= restingHr (no divide-by-invalid)', () {
-      expect(
-          vo2maxEstimate(restingHr: 190, maxHr: 180)
-              .present,
-          isFalse);
-    });
-
-    test('absent on null restingHr / null maxHr (no divide-by-zero)', () {
-      expect(
-          vo2maxEstimate(restingHr: null, maxHr: 190)
-              .present,
-          isFalse);
-      expect(
-          vo2maxEstimate(restingHr: 50, maxHr: null)
-              .present,
-          isFalse);
-    });
-  });
-
-  group('physiologicalAge — sleep deviation (regression)', () {
-    PhysioAge run(double h) => physiologicalAge(
-          chronologicalAge: 30,
-          vo2max: null,
-          restingHr: null,
-          rmssd: null,
-          sleepDurationH: h,
-          sleepEfficiency: null,
-          dailySteps: null,
-        ).value!;
-
-    test('oversleep does NOT make you younger', () {
-      expect(run(10.0).physioAge, greaterThan(30.0));
-    });
-    test('undersleep ages you', () {
-      expect(run(5.0).physioAge, greaterThan(30.0));
-    });
-    test('optimal ~7.5h is neutral', () {
-      expect(run(7.5).physioAge, closeTo(30.0, 0.01));
-    });
-    test('symmetry: 5h and 10h age you by the same amount', () {
-      // Both are 2.5h from the 7.5h optimum → identical penalty.
-      expect(run(5.0).physioAge, closeTo(run(10.0).physioAge, 1e-9));
-    });
-
-    test('baseline case: better-than-average biomarkers lower physio age', () {
-      final m = physiologicalAge(
-        chronologicalAge: 40,
-        vo2max: 50, // above 35 → subtracts
-        restingHr: 48, // below 60 → subtracts
-        rmssd: 60, // above 35 → subtracts
-        sleepDurationH: 7.5, // optimal → neutral
-        sleepEfficiency: 94, // above 88 → subtracts
-        dailySteps: 12000, // above 7000 → subtracts
-      );
-      expect(m.present, isTrue);
-      expect(m.tier, Tier.estimate);
-      expect(m.value!.physioAge, lessThan(40.0));
-      expect(m.value!.deltaYears, lessThan(0.0));
-      expect(m.value!.deltaYears, closeTo(m.value!.physioAge - 40.0, 1e-9));
-    });
-
-    test('physio age is clamped to [18,95]', () {
-      final young = physiologicalAge(
-        chronologicalAge: 18,
-        vo2max: 80,
-        restingHr: 40,
-        rmssd: 120,
-        sleepDurationH: 7.5,
-        sleepEfficiency: 99,
-        dailySteps: 20000,
-      );
-      expect(young.value!.physioAge, greaterThanOrEqualTo(18.0));
-      final old = physiologicalAge(
-        chronologicalAge: 95,
-        vo2max: 10,
-        restingHr: 100,
-        rmssd: 5,
-        sleepDurationH: 3,
-        sleepEfficiency: 60,
-        dailySteps: 0,
-      );
-      expect(old.value!.physioAge, lessThanOrEqualTo(95.0));
-    });
-  });
-
   group('journalCorrelations', () {
     test('insufficient sample (<2 per side) is gated as insufficient', () {
       // Only one tagged day for "coffee" → cannot compare.
@@ -504,99 +412,6 @@ void main() {
         },
       );
       expect(out, isEmpty);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // REGRESSION: physiologicalAge must ABSTAIN with no physiology, and must
-  // report the inputs it ACTUALLY used.
-  // -------------------------------------------------------------------------
-  group('physiologicalAge — honesty envelope (regression)', () {
-    test('every physiological input null => ABSENT, not "your age"', () {
-      // PRE-FIX: score started at chronologicalAge, nothing moved it, and the
-      // function returned a PRESENT metric (physioAge 30, delta 0, conf 0.35)
-      // claiming six inputs it had never seen.
-      final m = physiologicalAge(
-        chronologicalAge: 30,
-        vo2max: null,
-        restingHr: null,
-        rmssd: null,
-        sleepDurationH: null,
-        sleepEfficiency: null,
-        dailySteps: null,
-      );
-      expect(m.present, isFalse);
-      expect(m.value, isNull);
-      expect(m.confidence, 0);
-      expect(m.toJson()['value'], '—');
-      expect(m.inputs_used, ['profile']);
-    });
-
-    test('inputs_used lists only the inputs actually supplied', () {
-      // PRE-FIX this was a hardcoded six-entry list in EVERY partial case.
-      final m = physiologicalAge(
-        chronologicalAge: 30,
-        vo2max: null,
-        restingHr: 55,
-        rmssd: null,
-        sleepDurationH: 7.5,
-        sleepEfficiency: null,
-        dailySteps: null,
-      );
-      expect(m.present, isTrue);
-      expect(m.inputs_used, ['profile', 'resting_hr', 'sleep_duration']);
-      expect(m.inputs_used, isNot(contains('vo2max')));
-      expect(m.inputs_used, isNot(contains('rmssd')));
-      expect(m.inputs_used, isNot(contains('steps')));
-    });
-
-    test('confidence scales with how much physiology went in', () {
-      Metric<PhysioAge> build(int n) => physiologicalAge(
-            chronologicalAge: 40,
-            vo2max: n >= 1 ? 50 : null,
-            restingHr: n >= 2 ? 48 : null,
-            rmssd: n >= 3 ? 60 : null,
-            sleepDurationH: n >= 4 ? 7.5 : null,
-            sleepEfficiency: n >= 5 ? 94 : null,
-            dailySteps: n >= 6 ? 12000 : null,
-          );
-      expect(build(6).confidence, greaterThan(build(1).confidence));
-      expect(build(6).inputs_used, hasLength(7)); // profile + 6
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // REGRESSION: vo2maxEstimate must not divide by a zero resting HR.
-  // -------------------------------------------------------------------------
-  group('vo2maxEstimate — zero resting HR (regression)', () {
-    test('restingHr == 0 (the off-skin sentinel) ABSTAINS, never Infinity', () {
-      // PRE-FIX `maxHr <= restingHr` did not catch it: 15.3 * (190/0) produced
-      // value: Infinity, which Metric.toJson emits raw and jsonEncode throws on.
-      final m =
-          vo2maxEstimate(restingHr: 0, maxHr: 190);
-      expect(m.present, isFalse);
-      expect(m.value, isNull);
-      expect(() => jsonEncode(m.toJson()), returnsNormally);
-    });
-
-    test('a negative or non-finite resting HR also abstains', () {
-      expect(
-          vo2maxEstimate(restingHr: -5, maxHr: 190)
-              .present,
-          isFalse);
-      expect(
-          vo2maxEstimate(
-                  restingHr: double.nan, maxHr: 190)
-              .present,
-          isFalse);
-    });
-
-    test('a valid pair still computes', () {
-      final m =
-          vo2maxEstimate(restingHr: 50, maxHr: 190);
-      expect(m.present, isTrue);
-      expect(m.value!.isFinite, isTrue);
-      expect(() => jsonEncode(m.toJson()), returnsNormally);
     });
   });
 
