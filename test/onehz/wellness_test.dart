@@ -44,9 +44,36 @@ void main() {
       final np = m.value!.nonparam!;
       expect(np.interdailyStability, greaterThan(0.7));
       expect(np.intradailyVariability, lessThan(0.5));
-      expect(np.relativeAmplitude, greaterThan(0.05));
+      expect(np.relativeAmplitude!, greaterThan(0.05));
       // The warmest 10-h window should centre near the peak.
-      expect(np.m10, greaterThan(np.l5));
+      expect(np.m10!, greaterThan(np.l5!));
+    });
+
+    test('an unobserved hour-of-day leaves M10/L5/RA ABSENT, not grand-mean',
+        () {
+      // Same clean 3-day cosine, but the strap is off 03:00-06:00 every day —
+      // three hours-of-day are never observed, so the averaged 24-h profile is
+      // incomplete and there is no warmest/coolest window to report.
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 3 * 24 * 6; i++) {
+        final tMs = i * 10 * 60 * 1000.0;
+        final tHours = tMs / 3.6e6;
+        final hod = tHours % 24;
+        if (hod >= 3 && hod < 6) continue;
+        samples.add(
+            AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi / 24 * tHours)));
+      }
+      final np = tempCircadian(samples, epochMin: 60).value!.nonparam!;
+      expect(np.m10, isNull);
+      expect(np.l5, isNull);
+      expect(np.m10OnsetHour, isNull);
+      expect(np.l5OnsetHour, isNull);
+      expect(np.relativeAmplitude, isNull);
+      // IS/IV still stand — they do not need every hour-of-day.
+      expect(np.interdailyStability, greaterThan(0.0));
+      final j = np.toJson();
+      expect(j.containsKey('m10'), isFalse);
+      expect(j.containsKey('relative_amplitude'), isFalse);
     });
 
     test('activity de-masking drops high-motion epochs', () {
@@ -329,11 +356,10 @@ void main() {
       expect(m.drivers!.first.label, 'HRV');
       // HRV dropped => negative contribution => below 50.
       expect(m.value!.score, lessThan(50));
-      expect(m.value!.meaningful, isTrue);
       expect(m.inputs_used, contains('HRV'));
     });
 
-    test('all-at-baseline => ~50 and NOT meaningful (SWC gate)', () {
+    test('all-at-baseline => ~50', () {
       final m = readinessComposite([
         hrvInput(60.0, around(60.0)),
         rhrInput(55.0, around(55.0)),
@@ -341,7 +367,7 @@ void main() {
         tempInput(2000.0, around(2000.0)),
       ]);
       expect(m.value!.score, closeTo(50, 8));
-      expect(m.value!.meaningful, isFalse);
+      expect(m.value!.toJson().containsKey('meaningful'), isFalse);
     });
 
     test('weights renormalize over present inputs; absent => "—"', () {

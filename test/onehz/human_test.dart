@@ -88,23 +88,6 @@ void main() {
       expect(mIrr.value!.sri, lessThan(40));
     });
 
-    test('forgiving streak survives one grace miss but not two', () {
-      // met,met,MISS,met,met  with grace=1 => one run of length 4, alive.
-      final s1 = forgivingStreak([true, true, false, true, true], grace: 1);
-      expect(s1.current, 4);
-      expect(s1.graceUsed, 1);
-      expect(s1.alive, isTrue);
-
-      // met,met,MISS,MISS,met  grace=1 => second miss breaks; trailing run = 1.
-      final s2 = forgivingStreak([true, true, false, false, true], grace: 1);
-      expect(s2.current, 1);
-      expect(s2.best, 2, reason: 'first run had 2 met days before the break');
-
-      // No grace: a single miss breaks immediately.
-      final s0 = forgivingStreak([true, true, false, true], grace: 0);
-      expect(s0.best, 2);
-      expect(s0.current, 1);
-    });
   });
 
   group('sleep debt — honest when no free night', () {

@@ -191,13 +191,23 @@ Metric<Chronotype> chronotype(
   int totalDaysObserved = 0,
 }) {
   const inputs = ['mid_sleep_free', 'sleep_duration'];
-  if (freeMidSleepH.length < minFreeDays ||
-      freeSleepDurH.length != freeMidSleepH.length ||
-      totalDaysObserved < minTotalDays) {
-    return const Metric<Chronotype>.absent(
+  // The two lists are index-paired free nights. A length mismatch is a CALLER
+  // bug (one list gated on the sleep window, the other on the accounting block),
+  // not a coverage problem — saying "you need 14 days" to someone who has 40 is
+  // a false statement about their data, so it gets its own note.
+  if (freeSleepDurH.length != freeMidSleepH.length) {
+    return Metric<Chronotype>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'chronotype needs ≥14 days with ≥2 free days',
+      note: 'free-day mid-sleep and sleep-duration nights are not paired '
+          '(${freeMidSleepH.length} vs ${freeSleepDurH.length})',
+    );
+  }
+  if (freeMidSleepH.length < minFreeDays || totalDaysObserved < minTotalDays) {
+    return Metric<Chronotype>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'chronotype needs ≥$minTotalDays days with ≥$minFreeDays free days',
     );
   }
   // CIRCULAR median (see the helpers at the top): a free-day mid-sleep set

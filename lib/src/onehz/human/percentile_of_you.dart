@@ -1,5 +1,7 @@
-// HUMAN LAYER — Percentile-of-you, records, and forgiving streaks.
-// Catalog §D "Percentile-of-you + records + streaks" [PUB order-statistics].
+// HUMAN LAYER — Percentile-of-you and records.
+// Catalog §D "Percentile-of-you + records" [PUB order-statistics]. The streak
+// half of that catalog line is deliberately NOT implemented: no streaks in this
+// product, so there is nothing here to wire one up from.
 //
 // n-of-1 only: a value's rank is computed against the SAME USER's recent
 // history (a robust empirical CDF), never a population leaderboard. Records are
@@ -173,57 +175,4 @@ Metric<RecordCheck> personalRecord(
     inputs_used: inputs,
     note: 'record only if it beats your prior extreme by > MDC',
   );
-}
-
-class Streak {
-  final int current; // current run length (days meeting the goal)
-  final int best; // longest run in the supplied series
-  final int graceUsed; // grace days consumed inside the current run
-  final bool alive; // is the current streak still alive at the last day
-  const Streak(this.current, this.best, this.graceUsed, this.alive);
-  Map<String, dynamic> toJson() => {
-        'current': current,
-        'best': best,
-        'grace_used': graceUsed,
-        'alive': alive,
-      };
-}
-
-/// Forgiving streak over a chronological [met] boolean series (oldest→newest):
-/// `met[i]` = did the day meet the goal. A run survives up to [grace] missed
-/// days *within* it (Phillips/Windred-style "don't break on one bad night"),
-/// but a miss still does not extend the count. Grace resets per run.
-///
-/// Definition: scanning forward, a run continues across a miss as long as the
-/// cumulative misses in the run ≤ [grace]; the (grace+1)-th miss ends the run.
-/// `current` counts MET days in the live run; `alive` is whether the run that
-/// includes the last day has not yet exceeded its grace.
-Streak forgivingStreak(List<bool> met, {int grace = 1}) {
-  if (met.isEmpty) return const Streak(0, 0, 0, false);
-  var best = 0;
-  var runMet = 0; // met days in the current run
-  var runMiss = 0; // misses spent in the current run
-  var runGrace = 0;
-  // Track the run that reaches the end for `current`/`alive`.
-  for (var i = 0; i < met.length; i++) {
-    if (met[i]) {
-      runMet++;
-    } else {
-      if (runMiss < grace) {
-        runMiss++;
-        runGrace = runMiss;
-      } else {
-        // Run breaks; start fresh AFTER this miss.
-        best = runMet > best ? runMet : best;
-        runMet = 0;
-        runMiss = 0;
-        runGrace = 0;
-      }
-    }
-  }
-  best = runMet > best ? runMet : best;
-  // The trailing run defines current/alive: it is alive iff it never exceeded
-  // its grace budget (which is always true here — exceeding it starts a new run).
-  final alive = runMet > 0;
-  return Streak(runMet, best, runGrace, alive);
 }

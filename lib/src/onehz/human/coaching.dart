@@ -202,11 +202,12 @@ Metric<StrainTarget> strainTarget({
   );
 }
 
+// NOTE: `sex` and `age` used to be required here and in [physiologicalAge] and
+// neither formula ever read them — a required argument that promises an
+// adjustment the maths does not do. Dropped. Add them back WITH the adjustment.
 Metric<double> vo2maxEstimate({
   required double? restingHr,
   required double? maxHr,
-  required Sex sex,
-  required double? age,
 }) {
   // Uth-Sørensen-Overgaard-Pedersen 2004: VO2max ≈ 15.3 · (HRmax / HRrest).
   // The ratio is only defined for a STRICTLY POSITIVE resting HR — a 0 (the
@@ -249,7 +250,6 @@ class PhysioAge {
 
 Metric<PhysioAge> physiologicalAge({
   required double chronologicalAge,
-  required Sex sex,
   required double? vo2max,
   required double? restingHr,
   required double? rmssd,

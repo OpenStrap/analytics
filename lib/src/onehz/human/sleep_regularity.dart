@@ -1,11 +1,9 @@
-// HUMAN LAYER — Sleep Regularity Index + sleep debt vs personal need.
-// Catalog §A: True SRI [PUB Phillips 2017; Windred 2023] and sleep debt
-// vs personal need (Kitamura 2016 OSD) [PUB].
+// HUMAN LAYER — sleep debt vs personal need.
+// Catalog §A: sleep debt vs personal need (Kitamura 2016 OSD) [PUB].
 //
-// SRI = 200·(P_agreement) − 100, where P_agreement is the probability that a
-// person is in the SAME state (asleep/awake) at two time-points exactly 24 h
-// apart, averaged over all epochs. This is the TRUE epoch-by-epoch concordance,
-// NOT the SD-of-midsleep shortcut (catalog explicitly forbids the shortcut).
+// SRI does NOT live here despite the file name — the live one is `phillipsSri`
+// in sleep/sri.dart. This file used to carry a second SRI header and an unused
+// result class after the implementation was deleted; both are gone.
 //
 // Sleep debt: Kitamura's "optimal sleep duration" is estimated from the
 // rebound on unconstrained (free) nights; debt = OSD − recent habitual sleep.
@@ -14,21 +12,6 @@
 
 import '../types.dart';
 import '../util.dart';
-
-class Sri {
-  final double sri; // -100..100, higher = more regular
-  final int epochsPerDay; // epochs in 24 h (sample rate)
-  final int comparedPairs; // # of (t, t+24h) comparisons used
-  final String band; // coarse within-context label
-  const Sri(this.sri, this.epochsPerDay, this.comparedPairs, this.band);
-  Map<String, dynamic> toJson() => {
-        'sri': round6(sri),
-        'epochs_per_day': epochsPerDay,
-        'compared_pairs': comparedPairs,
-        'band': band,
-      };
-}
-
 
 class SleepDebt {
   final double? osdHours; // estimated personal optimal sleep duration (h)

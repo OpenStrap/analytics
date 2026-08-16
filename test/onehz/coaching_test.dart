@@ -337,7 +337,7 @@ void main() {
   group('vo2maxEstimate', () {
     test('Uth ratio 15.3×maxHr/restingHr on a known value', () {
       final m =
-          vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
+          vo2maxEstimate(restingHr: 50, maxHr: 190);
       expect(m.present, isTrue);
       expect(m.tier, Tier.estimate);
       expect(m.confidence, closeTo(0.45, 1e-9));
@@ -346,18 +346,18 @@ void main() {
 
     test('absent when maxHr <= restingHr (no divide-by-invalid)', () {
       expect(
-          vo2maxEstimate(restingHr: 190, maxHr: 180, sex: Sex.male, age: 30)
+          vo2maxEstimate(restingHr: 190, maxHr: 180)
               .present,
           isFalse);
     });
 
     test('absent on null restingHr / null maxHr (no divide-by-zero)', () {
       expect(
-          vo2maxEstimate(restingHr: null, maxHr: 190, sex: Sex.male, age: 30)
+          vo2maxEstimate(restingHr: null, maxHr: 190)
               .present,
           isFalse);
       expect(
-          vo2maxEstimate(restingHr: 50, maxHr: null, sex: Sex.male, age: 30)
+          vo2maxEstimate(restingHr: 50, maxHr: null)
               .present,
           isFalse);
     });
@@ -366,7 +366,6 @@ void main() {
   group('physiologicalAge — sleep deviation (regression)', () {
     PhysioAge run(double h) => physiologicalAge(
           chronologicalAge: 30,
-          sex: Sex.male,
           vo2max: null,
           restingHr: null,
           rmssd: null,
@@ -392,7 +391,6 @@ void main() {
     test('baseline case: better-than-average biomarkers lower physio age', () {
       final m = physiologicalAge(
         chronologicalAge: 40,
-        sex: Sex.male,
         vo2max: 50, // above 35 → subtracts
         restingHr: 48, // below 60 → subtracts
         rmssd: 60, // above 35 → subtracts
@@ -410,7 +408,6 @@ void main() {
     test('physio age is clamped to [18,95]', () {
       final young = physiologicalAge(
         chronologicalAge: 18,
-        sex: Sex.female,
         vo2max: 80,
         restingHr: 40,
         rmssd: 120,
@@ -421,7 +418,6 @@ void main() {
       expect(young.value!.physioAge, greaterThanOrEqualTo(18.0));
       final old = physiologicalAge(
         chronologicalAge: 95,
-        sex: Sex.male,
         vo2max: 10,
         restingHr: 100,
         rmssd: 5,
@@ -522,7 +518,6 @@ void main() {
       // claiming six inputs it had never seen.
       final m = physiologicalAge(
         chronologicalAge: 30,
-        sex: Sex.male,
         vo2max: null,
         restingHr: null,
         rmssd: null,
@@ -541,7 +536,6 @@ void main() {
       // PRE-FIX this was a hardcoded six-entry list in EVERY partial case.
       final m = physiologicalAge(
         chronologicalAge: 30,
-        sex: Sex.male,
         vo2max: null,
         restingHr: 55,
         rmssd: null,
@@ -559,7 +553,6 @@ void main() {
     test('confidence scales with how much physiology went in', () {
       Metric<PhysioAge> build(int n) => physiologicalAge(
             chronologicalAge: 40,
-            sex: Sex.male,
             vo2max: n >= 1 ? 50 : null,
             restingHr: n >= 2 ? 48 : null,
             rmssd: n >= 3 ? 60 : null,
@@ -580,7 +573,7 @@ void main() {
       // PRE-FIX `maxHr <= restingHr` did not catch it: 15.3 * (190/0) produced
       // value: Infinity, which Metric.toJson emits raw and jsonEncode throws on.
       final m =
-          vo2maxEstimate(restingHr: 0, maxHr: 190, sex: Sex.male, age: 30);
+          vo2maxEstimate(restingHr: 0, maxHr: 190);
       expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(() => jsonEncode(m.toJson()), returnsNormally);
@@ -588,19 +581,19 @@ void main() {
 
     test('a negative or non-finite resting HR also abstains', () {
       expect(
-          vo2maxEstimate(restingHr: -5, maxHr: 190, sex: Sex.male, age: 30)
+          vo2maxEstimate(restingHr: -5, maxHr: 190)
               .present,
           isFalse);
       expect(
           vo2maxEstimate(
-                  restingHr: double.nan, maxHr: 190, sex: Sex.male, age: 30)
+                  restingHr: double.nan, maxHr: 190)
               .present,
           isFalse);
     });
 
     test('a valid pair still computes', () {
       final m =
-          vo2maxEstimate(restingHr: 50, maxHr: 190, sex: Sex.male, age: 30);
+          vo2maxEstimate(restingHr: 50, maxHr: 190);
       expect(m.present, isTrue);
       expect(m.value!.isFinite, isTrue);
       expect(() => jsonEncode(m.toJson()), returnsNormally);

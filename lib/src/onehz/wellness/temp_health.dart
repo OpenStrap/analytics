@@ -159,11 +159,11 @@ class OvulationEvent {
 /// just before the rise (i-1).
 ///
 /// UNITS: [threshold] is in WHATEVER UNIT [nightlyTemp] carries — this function
-/// is unit-agnostic and cannot check. It was documented as "ADC counts" while
-/// the live caller passes z-SCORES, so the default 1.0 silently became "one
-/// whole SD above the max of the prior 6 nights" rather than the classic rule's
-/// ~0.2 F. Pass a [threshold] appropriate to the series you hand in, and set
-/// [inputLabel] so the envelope names it.
+/// is unit-agnostic and cannot check, so there is NO default: it used to be 1.0
+/// (documented as ADC counts) while the caller passed z-scores, which silently
+/// turned the classic ~0.2 °F rule into "one whole SD above the prior 6 nights"
+/// and confirmed ovulation essentially never. Pass the threshold in the unit of
+/// the series you hand in, and set [inputLabel] so the envelope names it.
 ///
 /// HONESTY: confirmation ONLY — this NEVER predicts a future ovulation. Returns
 /// all detected events over the series. `relative` tier — never an absolute
@@ -171,9 +171,9 @@ class OvulationEvent {
 Metric<List<OvulationEvent>> menstrualCoverline(
   List<String> dates,
   List<double?> nightlyTemp, {
+  required double threshold,
   int lookback = 6,
   int confirm = 3,
-  double threshold = 1.0,
   String inputLabel = 'nightly_skin_temp',
 }) {
   final inputs = [inputLabel];

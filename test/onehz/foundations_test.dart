@@ -220,45 +220,12 @@ void main() {
       expect(robustBaseline([1, 2], minValid: 3).sufficient, isFalse);
       expect(robustBaseline([1, 2, 3], minValid: 3).sufficient, isTrue);
     });
-    test('lambda from half-life: half-life => 0.5 effective at one HL', () {
-      final lam = lambdaFromHalfLife(1); // 1 - 2^-1 = 0.5
-      expect(lam, closeTo(0.5, 1e-12));
-    });
-    test('gap-aware EWMA converges and flags gaps', () {
-      final t = <double>[0, 1000, 2000, 3000, 100000];
-      final v = <double>[10, 10, 10, 10, 20];
-      final e = gapAwareEwma(t, v, halfLifeMs: 1000, maxGapMs: 10000);
-      expect(e.first.value, 10);
-      expect(e.last.gap, isTrue); // the big jump is a flagged gap
-      // clamped: one late sample can't fully take over (<= 0.5 weight).
-      expect(e.last.value, lessThan(20));
-      expect(e.last.value, greaterThan(10));
-    });
-    test(
-        'REGRESSION: gap-aware EWMA never extrapolates outside the data on a '
-        'duplicate or non-monotonic timestamp', () {
-      // dt <= 0 made lambda = 1 - 2^(-dt/H) NEGATIVE, so the update ran
-      // BACKWARDS: [0,1000,500] with values [10,10,20] produced 5.857 — below
-      // every input (all >= 10).
-      final e = gapAwareEwma([0, 1000, 500], [10, 10, 20], halfLifeMs: 1000);
-      expect(e.length, 3);
-      for (final p in e) {
-        expect(p.value, greaterThanOrEqualTo(10.0));
-        expect(p.value, lessThanOrEqualTo(20.0));
-      }
-      // No elapsed time => no new weight => the estimate does not move.
-      expect(e.last.value, closeTo(10.0, 1e-12));
-      // Duplicate timestamps behave the same way.
-      final dup = gapAwareEwma([0, 0, 0], [10, 50, 50], halfLifeMs: 1000);
-      expect(dup.map((p) => p.value), everyElement(closeTo(10.0, 1e-12)));
-    });
-    test('MDC gate: small change suppressed, large surfaced', () {
+    test('MDC: a dispersion-free baseline has no detectable change', () {
       final b = robustBaseline([10, 11, 9, 10, 12, 8, 10, 11, 9, 10]);
-      expect(changeExceedsMdc(0.1, b), isFalse);
-      expect(changeExceedsMdc(50, b), isTrue);
-      // no dispersion known => never claim a change.
-      final flat = robustBaseline([5, 5, 5]);
-      expect(changeExceedsMdc(99, flat), isFalse);
+      expect(mdc(b)!, greaterThan(0.1));
+      expect(mdc(b)!, lessThan(50));
+      // no dispersion known => no MDC => never claim a change.
+      expect(mdc(robustBaseline([5, 5, 5])), isNull);
     });
   });
 
@@ -284,13 +251,6 @@ void main() {
       final r = inverseVarianceFuse(
           [const FusionInput(1, 1, trusted: false, label: 'x')]);
       expect(r.value, isNull);
-    });
-    test('quality->variance and GUM weighted-sum uncertainty', () {
-      expect(varianceFromQuality(1.0, 4), 4);
-      expect(varianceFromQuality(0.5, 4), 8); // worse quality => more variance
-      // y = 0.5*x1 + 0.5*x2, each u=2 => u_c = sqrt(1+1)=1.414
-      expect(gumWeightedSumUncertainty([0.5, 0.5], [2, 2])!,
-          closeTo(1.41421, 1e-4));
     });
   });
 

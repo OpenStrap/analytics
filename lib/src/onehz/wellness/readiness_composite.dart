@@ -3,8 +3,11 @@
 // ★ CANONICAL recovery/readiness (ARCHITECTURE_V2 `recovery.score`). ★
 // Per the "one source per concept" invariant there is exactly ONE headline
 // readiness, and this is it: disclosed weights (HRV>RHR>RR>temp) + ranked
-// drivers + personal-baseline robust z-scores (median+MAD `robustZ`) + an
-// SWC/TE gate that will say "no meaningful change". The other readiness
+// drivers + personal-baseline robust z-scores (median+MAD `robustZ`). The
+// SWC/TE "no meaningful change" flag is GONE — it was computed and serialized
+// for months with no reader, so a flat night rendered exactly like a real one
+// while the code claimed otherwise. If a surface wants to say "flat", add the
+// gate back WITH the surface. The other readiness
 // function — `glassBoxReadiness` in human/readiness_glassbox.dart — is the
 // DEPRECATED duplicate (ARCHITECTURE_V2 "DROP: the duplicate readiness
 // composite"); it is kept exported for back-compat but is INTERNAL and must not
@@ -25,10 +28,7 @@
 //      dropped, never zero-imputed).
 //   4. The composite z is mapped to a 0..100 score via a logistic so typical
 //      days land near 50.
-//   5. SWC/TE gate: if |composite z| is below the smallest-worthwhile-change of
-//      the dominant input, we report "no meaningful change" (flat) — the
-//      credibility signal is the willingness to say nothing.
-//   6. ALWAYS attach the per-input contribution breakdown |w_i·z_i| ranked.
+//   5. ALWAYS attach the per-input contribution breakdown |w_i·z_i| ranked.
 //
 // HONESTY: glass-box index (weights disclosed); "—" when no inputs present;
 // every score carries its drivers; never names a driver below its MDC.
@@ -68,27 +68,22 @@ ReadinessInput tempInput(double? v, List<double> base) =>
 class Readiness {
   final double score; // 0..100 glass-box readiness
   final double compositeZ; // weighted, sign-oriented composite z
-  final bool meaningful; // passed the SWC gate (else "flat")
-  const Readiness(this.score, this.compositeZ, this.meaningful);
+  const Readiness(this.score, this.compositeZ);
   Map<String, dynamic> toJson() => {
         'score': round6(score),
         'composite_z': round6(compositeZ),
-        'meaningful': meaningful,
       };
 }
 
 /// Compute the honest readiness composite.
 ///
 /// Each present input with a usable robust baseline contributes a sign-oriented
-/// robust z. Weights are renormalized over present inputs. [swcMultiplier] sets
-/// the smallest-worthwhile-change gate (Hopkins 0.2 of the composite scale,
-/// i.e. of unit SD here since z is standardized).
+/// robust z. Weights are renormalized over present inputs.
 /// Required minimum baseline points (per input) before readiness can compute.
 const int readinessCompositeMinBaseline = 3;
 
 Metric<Readiness> readinessComposite(
   List<ReadinessInput> inputs, {
-  double swcMultiplier = 0.2,
   int minBaseline = readinessCompositeMinBaseline,
 }) {
   final used = <String>[];
@@ -160,10 +155,6 @@ Metric<Readiness> readinessComposite(
   // Rank by |contribution| (the deterministic-narrative driver ordering).
   normDrivers.sort((a, b) => b.contribution.abs().compareTo(a.contribution.abs()));
 
-  // SWC gate: standardized composite z has unit SD by construction, so the SWC
-  // is swcMultiplier (×1). Below it => not a meaningful change ("flat").
-  final meaningful = composite.abs() > swcMultiplier;
-
   // Map composite z -> 0..100 via logistic; ~50 at z=0, scale so ±2 z ~ 12/88.
   final score = 100 / (1 + math.exp(-composite));
 
@@ -171,13 +162,13 @@ Metric<Readiness> readinessComposite(
   final conf = clamp(0.3 + 0.15 * used.length, 0.3, 0.9);
 
   return Metric<Readiness>(
-    value: Readiness(score, composite, meaningful),
+    value: Readiness(score, composite),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: used,
     drivers: normDrivers,
     note: 'GLASS-BOX readiness: disclosed weights HRV>RHR>RR>temp, renormalized '
-        'over present inputs; SWC-gated (meaningful=$meaningful). Drivers are '
-        'definitional within the formula (correction, not inferred cause).',
+        'over present inputs. Drivers are definitional within the formula '
+        '(correction, not inferred cause).',
   );
 }

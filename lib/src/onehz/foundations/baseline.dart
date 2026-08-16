@@ -1,10 +1,9 @@
 // FOUNDATION — robust personal baseline.
 //
 // median + MAD (Leys 2013; Iglewicz-Hoaglin modified-z, flag |M|>3.5),
-// clamped gap-aware EWMA (Roberts 1959; λ ↔ half-life), coverage-gate
-// (Plews 2014: require ≥minValid of window), and a SWC/MDC gate so we only
-// surface a change beyond the metric's minimal detectable change (Hopkins
-// 2000). MAD=0 is guarded for quantized data.
+// coverage-gate (Plews 2014: require ≥minValid of window), and an MDC gate so
+// we only surface a change beyond the metric's minimal detectable change
+// (Hopkins 2000). MAD=0 is guarded for quantized data.
 //
 // HONESTY: insufficient coverage => baseline absent (null), never an
 // optimistic guess.
@@ -59,75 +58,6 @@ RobustBaseline robustBaseline(List<double> window, {int minValid = 3}) {
   );
 }
 
-/// Convert an EWMA half-life (in samples) to the smoothing factor λ.
-/// λ = 1 - 2^(-1/halfLife).
-double lambdaFromHalfLife(double halfLifeSamples) {
-  if (halfLifeSamples <= 0) return 1;
-  return 1 - math.pow(2, -1 / halfLifeSamples).toDouble();
-}
-
-class EwmaPoint {
-  final double value; // smoothed estimate at this step
-  final bool gap; // true if this step was a (clamped) gap fill
-  const EwmaPoint(this.value, this.gap);
-}
-
-/// Gap-aware, clamped EWMA over a possibly-irregular series.
-///
-/// [series] (time-ordered) values with their times (ms). On a gap larger than
-/// [maxGapMs], the update is CLAMPED: λ is not allowed to fully reset the
-/// estimate (we cap the effective weight) and the point is flagged as a gap —
-/// we never invent intervening data. λ derived from [halfLifeMs].
-List<EwmaPoint> gapAwareEwma(
-  List<double> timesMs,
-  List<double> values, {
-  required double halfLifeMs,
-  double maxGapMs = 0,
-}) {
-  final n = values.length;
-  if (n == 0 || timesMs.length != n) return const [];
-  final out = <EwmaPoint>[];
-  double? est;
-  double? lastT;
-  for (var i = 0; i < n; i++) {
-    if (est == null) {
-      est = values[i];
-      out.add(EwmaPoint(est, false));
-      lastT = timesMs[i];
-      continue;
-    }
-    final dt = timesMs[i] - lastT!;
-    if (dt <= 0 || halfLifeMs <= 0 || !dt.isFinite) {
-      // Duplicate or non-monotonic timestamp: NO time has elapsed, so the
-      // estimate earns no new weight (λ = 0). Letting λ = 1 − 2^(−dt/H) go
-      // negative here EXTRAPOLATES the estimate outside the data (Roberts 1959
-      // requires λ ∈ [0,1]). We also keep lastT at the latest time already
-      // seen so an out-of-order sample cannot corrupt the next dt.
-      out.add(EwmaPoint(est, false));
-      continue;
-    }
-    // Time-aware λ: half-life expressed in ms => decay over the elapsed dt.
-    var lambda = 1 - math.pow(2, -dt / halfLifeMs).toDouble();
-    final isGap = maxGapMs > 0 && dt > maxGapMs;
-    if (isGap) {
-      // Clamp: a long gap should not let one new sample dominate. Cap λ at 0.5.
-      lambda = math.min(lambda, 0.5);
-    }
-    est = lambda * values[i] + (1 - lambda) * est;
-    out.add(EwmaPoint(est, isGap));
-    lastT = timesMs[i];
-  }
-  return out;
-}
-
-/// Smallest Worthwhile Change (Hopkins 2000): 0.2 × between-subject SD. For an
-/// n-of-1 context we use the personal baseline scale (SD-equivalent) as the
-/// dispersion, so SWC = swcMultiplier × scale.
-double? swc(RobustBaseline baseline, {double swcMultiplier = 0.2}) {
-  if (baseline.scale == null) return null;
-  return swcMultiplier * baseline.scale!;
-}
-
 /// Minimal Detectable Change: MDC = 1.96 × √2 × typical-error.
 /// We approximate the typical error by the baseline scale unless a measured
 /// [typicalError] is supplied. Returns null if no dispersion is known.
@@ -137,13 +67,4 @@ double? mdc(RobustBaseline baseline, {double? typicalError}) {
   // honest estimate of the metric's noise => no MDC => never claim a change.
   if (te == null || te <= 0) return null;
   return 1.96 * math.sqrt2 * te;
-}
-
-/// Gate a candidate change: surface it only if |Δ| exceeds the MDC (or, when
-/// no MDC is known, never claim a change). Returns true => report the change.
-bool changeExceedsMdc(double delta, RobustBaseline baseline,
-    {double? typicalError}) {
-  final m = mdc(baseline, typicalError: typicalError);
-  if (m == null) return false; // can't justify a claim => stay silent
-  return delta.abs() > m;
 }

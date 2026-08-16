@@ -8,7 +8,9 @@
 // surfaces — so a single noisy night never cries wolf.
 //
 // Robustness: covariance is estimated from a trailing window via median/MAD
-// (diagonal robust scale) + Spearman-style rank correlation off-diagonal, then
+// (diagonal robust scale) + a Pearson correlation off-diagonal taken on the
+// already-robustly-standardized columns (NOT a rank correlation — one outlier
+// night in the window still moves it), then
 // regularized (ridge) so a near-singular small-sample covariance can't blow up
 // the distance. Features are sign-ORIENTED so "bad" is always positive
 // (HRV is negated: a DROP in HRV is the illness direction).
@@ -73,8 +75,8 @@ const _featLabels = ['RHR', 'HRV(↓)', 'temp', 'resp'];
 /// [dates] labels; [feats] per-night features (same length). [baselineDays]
 /// trailing window for the covariance cloud; [minBaseline] min valid nights
 /// before any distance is computed; [chiSqGate] threshold on Mahalanobis²
-/// (default 9.21 ≈ χ²_{0.99,2}, conservative); [persistDays] consecutive
-/// candidate nights required to flag; [ridge] covariance regularizer fraction.
+/// (see below — no fixed default); [persistDays] consecutive candidate nights
+/// required to flag; [ridge] covariance regularizer fraction.
 ///
 /// [chiSqGate] OPTIONAL fixed Mahalanobis² threshold. When null (default) the
 /// gate is DIMENSION-AWARE: a conservative χ²_{0.999, dof} upper quantile keyed

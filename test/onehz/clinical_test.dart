@@ -503,11 +503,6 @@ void main() {
       expect(StrainScorer.banisterY(x, female: true),
           closeTo(0.86 * math.exp(1.67 * x), 1e-12));
     });
-    test('Edwards zone-sum is the weighted dot product', () {
-      // zones [10,5,0,0,0] -> 10*1 + 5*2 = 20
-      final m = edwardsTrimp([10, 5, 0, 0, 0]);
-      expect(m.value!, 20);
-    });
     test('CTL>ATL after a long steady block, then ATL spikes on a hard day',
         () {
       final steady = <double>[for (var i = 0; i < 60; i++) 50.0];

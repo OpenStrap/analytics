@@ -28,11 +28,15 @@ import '../clinical/cosinor.dart';
 class CircadianNonparam {
   final double interdailyStability; // IS, 0..1 (higher = more stable)
   final double intradailyVariability; // IV, ~0..2 (higher = more fragmented)
-  final double m10; // mean of most-active (warmest) 10 h
-  final double m10OnsetHour; // start hour-of-day of the M10 window
-  final double l5; // mean of least-active (coolest) 5 h
-  final double l5OnsetHour; // start hour-of-day of the L5 window
-  final double relativeAmplitude; // RA = (M10-L5)/(M10+L5)
+  // M10/L5/RA are the windows of the AVERAGED 24 h profile, so they only exist
+  // when every epoch-of-day was observed at least once. With the strap off over
+  // a charging window they are null — IS/IV still stand, the window statistics
+  // do not.
+  final double? m10; // mean of most-active (warmest) 10 h
+  final double? m10OnsetHour; // start hour-of-day of the M10 window
+  final double? l5; // mean of least-active (coolest) 5 h
+  final double? l5OnsetHour; // start hour-of-day of the L5 window
+  final double? relativeAmplitude; // RA = (M10-L5)/(M10+L5)
   final int epochsPerDay;
   final int nDays;
   const CircadianNonparam({
@@ -49,11 +53,12 @@ class CircadianNonparam {
   Map<String, dynamic> toJson() => {
         'interdaily_stability': round6(interdailyStability),
         'intradaily_variability': round6(intradailyVariability),
-        'm10': round6(m10),
-        'm10_onset_hour': round6(m10OnsetHour),
-        'l5': round6(l5),
-        'l5_onset_hour': round6(l5OnsetHour),
-        'relative_amplitude': round6(relativeAmplitude),
+        if (m10 != null) 'm10': round6(m10!),
+        if (m10OnsetHour != null) 'm10_onset_hour': round6(m10OnsetHour!),
+        if (l5 != null) 'l5': round6(l5!),
+        if (l5OnsetHour != null) 'l5_onset_hour': round6(l5OnsetHour!),
+        if (relativeAmplitude != null)
+          'relative_amplitude': round6(relativeAmplitude!),
         'epochs_per_day': epochsPerDay,
         'n_days': nDays,
       };
@@ -229,8 +234,11 @@ CircadianNonparam? _nonparam(
 
   // M10 / L5 on the averaged 24-h profile (warmest 10 h, coolest 5 h windows).
   // Use the epoch-of-day profile, circularly. epochs in 10h / 5h windows:
+  // An INCOMPLETE profile (some hour-of-day never observed — a charging window,
+  // a strap-off morning) has no M10/L5: the grand mean is not the warmest 10 h
+  // and midnight is not an onset. Absent, not seeded.
   final per = profile.length == epochsPerDay ? profile : null;
-  double m10 = grand, l5 = grand, m10On = 0, l5On = 0;
+  double? m10, l5, m10On, l5On;
   if (per != null) {
     final w10 = (epochsPerDay * 10 / 24).round();
     final w5 = (epochsPerDay * 5 / 24).round();
@@ -258,8 +266,8 @@ CircadianNonparam? _nonparam(
       }
     }
   }
-  final denom = m10 + l5;
-  final ra = denom != 0 ? (m10 - l5) / denom : 0.0;
+  final denom = (m10 == null || l5 == null) ? null : m10 + l5;
+  final ra = (denom == null || denom == 0) ? null : (m10! - l5!) / denom;
 
   return CircadianNonparam(
     interdailyStability: is_,

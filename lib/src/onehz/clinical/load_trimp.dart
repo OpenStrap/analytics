@@ -151,29 +151,10 @@ Metric<double> strainScoreMetric(
   );
 }
 
-/// Edwards zone-sum TRIMP. [zoneMinutes] minutes in each of the 5 HR zones
-/// (50–60/60–70/70–80/80–90/90–100 %HRmax); weights 1..5.
-Metric<double> edwardsTrimp(List<double> zoneMinutes) {
-  const inputs = ['zone_minutes'];
-  if (zoneMinutes.length != 5) {
-    return const Metric<double>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'Edwards TRIMP needs 5 zone minutes',
-    );
-  }
-  var t = 0.0;
-  for (var i = 0; i < 5; i++) {
-    t += zoneMinutes[i] * (i + 1);
-  }
-  return Metric<double>(
-    value: t,
-    confidence: 0.6,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: 'Edwards zone-sum TRIMP',
-  );
-}
+// A second, top-level `edwardsTrimp` used to sit here binning minutes on
+// %HRmax while `StrainScorer.zoneWeight` below bins the SAME cut-offs on %HRR.
+// Nothing called it and the two disagreed by ~25 % on the same HR stream, so it
+// is deleted — StrainScorer is the one Edwards TRIMP.
 
 // ════════════════════════════════════════════════════════════════════════════
 // StrainScorer — Edwards/Banister TRIMP → 0–100 strain ("Effort").
