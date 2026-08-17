@@ -123,6 +123,122 @@ void main() {
     });
   });
 
+  // These pin the numbers the 2026-08-16 audit measured, so the +10.6% gain
+  // cannot be re-derived from a comment and the physiological interval bounds
+  // cannot be quietly dropped again. Every expectation below is a MEASUREMENT
+  // of the shipping algorithm, not a target.
+  group('Tier A — the gain is 1.00 and the raw count is already exact', () {
+    test('gain is 1.00 — the default is not a population fudge factor', () {
+      // Was 1.11, claiming to fix "raw 90 -> ~100". Measured, it manufactured
+      // a +10.6% over-count on gait the raw counter already got right.
+      expect(StepParams.gain, 1.00);
+    });
+
+    test('raw/truth is 1.00 at 60, 80, 100, 120, 140 and 180 spm', () {
+      // The whole basis for removing the gain: there is no under-count to
+      // correct anywhere in the human cadence range. Exact figures measured on
+      // 300 s of _walk at 0.25 g, 100 Hz.
+      for (final (spm, want) in const [
+        (60, 299),
+        (80, 399),
+        (100, 498),
+        (120, 598),
+        (140, 698),
+        (180, 898),
+      ]) {
+        final truth = (300 * spm / 60).round();
+        final (x, y, z) = _walk(300.0, spm / 60.0);
+        final got = livePedometer(x, y, z).steps;
+        expect(got, want, reason: '$spm spm');
+        expect(got / truth, closeTo(1.00, 0.005), reason: '$spm spm raw/truth');
+      }
+    });
+
+    test('the residual deficit is a FLAT -0.9% chunk-boundary loss, not a gain',
+        () {
+      // still -> N steps at 110 spm -> still, counted in 60 s chunks the way
+      // calcSteps does. A gain error would scale with N and an offset would
+      // shrink with it; this does neither, because it is ~2 steps lost per
+      // minute boundary while the state machine re-earns CONFIRM. It is 0.9%,
+      // it is known, and it is deliberately not chased.
+      int chunked(int n) {
+        final walkS = n / (110 / 60.0);
+        final (wx, wy, wz) = _walk(walkS, 110 / 60.0);
+        final sig = <double>[
+          ...List<double>.filled(300, 1.0),
+          for (var i = 0; i < wx.length; i++)
+            math.sqrt(wx[i] * wx[i] + wy[i] * wy[i] + wz[i] * wz[i]),
+          ...List<double>.filled(300, 1.0),
+        ];
+        final minutes = <List<double>>[
+          for (var i = 0; i < sig.length; i += 6000)
+            sig.sublist(i, math.min(i + 6000, sig.length))
+        ];
+        return calcSteps(minutes);
+      }
+
+      expect(chunked(100), 100); // one chunk, no boundary, no loss
+      expect(chunked(1000), 991); // -0.9%
+      expect(chunked(10000), 9910); // -0.9% — flat, 10x the bout
+    });
+  });
+
+  group('Tier A — step-interval bounds (0.2-2.0 s, from AN-2554)', () {
+    int stepsAt(double spm, double durationS,
+        {double amp = 0.30, double fs = 100, double? tellRate}) {
+      final (x, y, z) = _walk(durationS, spm / 60.0, fs: fs, ampG: amp);
+      return livePedometer(x, y, z, sampleRateHz: tellRate ?? fs).steps;
+    }
+
+    test('the bounds are the ones the note states, and they are named', () {
+      expect(StepParams.minStepIntervalS, 0.2); // max ~5 steps/s
+      expect(StepParams.maxStepIntervalS, 2.0); // min ~0.5 steps/s
+    });
+
+    test('faster than 5 steps/s is rejected outright', () {
+      // PRE-FIX these counted at raw/truth 1.00 (320 spm -> 638/640) and 0.95
+      // (350 spm -> 666/700): nothing bounded the rhythm, and the only thing
+      // that eventually broke lock was the width of the centred peak window.
+      expect(stepsAt(305, 120), 0);
+      expect(stepsAt(320, 120), 0);
+      expect(stepsAt(350, 120), 0);
+    });
+
+    test('the ceiling sits exactly at the stated 5 steps/s, not below it', () {
+      // A sprint cadence a human can actually produce must still count — the
+      // guard is physiology, not a convenient way to lose the hard cases.
+      expect(stepsAt(250, 120), 498);
+      expect(stepsAt(300, 120), 598);
+    });
+
+    test('40 spm still counts — it is inside physiology, so nothing rejects it',
+        () {
+      // The audit flagged "1.00 at 40 spm with no floor". 40 spm is 0.67
+      // steps/s, above the note's 0.5 steps/s minimum, so the correct floor
+      // does NOT reject it. Pinning that so the bound does not get tightened
+      // into a slow-walk deleter.
+      expect(stepsAt(40, 600, fs: 50), 399);
+    });
+
+    test('slower than 0.5 steps/s is rejected — at the buffer\'s REAL rate', () {
+      // This is the case that proves the bounds are computed from the sample
+      // rate rather than a hardcoded 100. `maxMinTimeout` is 120 SAMPLES, so
+      // it already covers the slow end at 100 Hz but stretches to 2.4 s at
+      // 50 Hz and lets 20-28 spm through. Told the truth, the 2.0 s bound
+      // rejects them; told "100 Hz" about a 50 Hz buffer, the same signal
+      // reads a full 250 steps.
+      expect(stepsAt(25, 600, fs: 50), 0);
+      expect(stepsAt(28, 600, fs: 50), 0);
+      expect(stepsAt(25, 600, fs: 50, tellRate: 100), 250);
+    });
+
+    test('the bounds cost nothing inside the walking band', () {
+      // The guards must not pay for themselves with real steps.
+      expect(stepsAt(110, 600, fs: 50, amp: 0.25), 1098);
+      expect(stepsAt(120, 300, amp: 0.25), 598);
+    });
+  });
+
   group('Calibration', () {
     test('credible walking bout seeds + refines the model', () {
       const live = PedometerResult(220, 120, 110.0, 0.25, 0.8);

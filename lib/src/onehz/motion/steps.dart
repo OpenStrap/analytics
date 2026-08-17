@@ -12,11 +12,13 @@
 // So we split the problem the only honest way:
 //
 //   TIER A — [pedometer] / [livePedometer]: a real step counter on the 100 Hz
-//     foreground stream. The locked Analog Devices AN-2554 "full step detection"
-//     algorithm, ported VERBATIM from the OpenStrap backend
-//     (openstrap-analytics/src/steps.ts) where it was calibrated on a 100-step
-//     ground-truth walk (raw ×1.11 gain). Its CONFIRM=8 regularity gate rejects
-//     waving/typing/handling and reads 0 at rest. Directly testable: walk N
+//     foreground stream, ported from the OpenStrap backend
+//     (openstrap-analytics/src/steps.ts). See [StepParams] for what it actually
+//     is and is not — it is NOT AN-2554 verbatim, and the ×1.11 "calibration"
+//     it used to carry was measured to be a fabricated +10.6%. Its CONFIRM=8
+//     regularity gate rejects IRREGULAR handling and reads 0 at rest; it does
+//     NOT reject rhythmic arm work (measured: a steady 1.8 Hz stir over 300 s
+//     of no locomotion counts 538 steps at 108 spm). Directly testable: walk N
 //     steps with the app open and compare.
 //
 //   TIER B — [dailyActiveMinutes]: a 24/7 MOVEMENT-VOLUME index from the 1 Hz
@@ -100,32 +102,95 @@ class PedometerResult {
       };
 }
 
-/// Locked AN-2554 parameters — ported VERBATIM from the OpenStrap backend
-/// pedometer (`openstrap-analytics/src/steps.ts`), which was calibrated against
-/// a 100-step ground-truth walk on our ~100 Hz wrist IMU. Do not retune without
-/// a fresh ground-truth calibration.
+/// WHAT THIS ALGORITHM ACTUALLY IS — the citation, corrected.
+///
+/// It is NOT AN-2554, despite what this file said for a long time. It is:
+///
+///   * AN-2554's *structure* — centred-window max/min peak search judged
+///     against a dynamic threshold that is refreshed from recent (max+min)/2 —
+///     but on Euclidean magnitude √(x²+y²+z²), where AN-2554 uses the sum of
+///     absolutes, and retuned for 100 Hz where AN-2554 is specified at 50 Hz;
+///   * plus Zhao's ADXL345 Analog Dialogue pedometer's confirm/"regulation"
+///     mechanic ([confirm] consecutive valid pairs before anything is credited,
+///     then free-running until the run breaks) — also a 50 Hz design;
+///   * plus [sens] and [confirm], which appear in NEITHER source. They are
+///     ours. Do not defend them by citation.
+///
+/// What IS taken straight from AN-2554 is the pair of physiological step-
+/// interval bounds ([minStepIntervalS] / [maxStepIntervalS]) — max ~5 steps/s
+/// running, min ~0.5 steps/s very slow walking. Those were missing from this
+/// port until they were added back.
+///
+/// Neither ancestor is validated evidence: AN-2554's "~97% on a wrist" is a
+/// vendor figure on an unpublished protocol, and Zhao's note has no validation
+/// at all. Every independent free-living wrist evaluation puts peak detection
+/// between 60% and 230% error. Treat this as a counter that is accurate on the
+/// walking it supervises, not as an all-day step source.
 class StepParams {
-  static const int fs = 100; // assembled IMU sample rate (Hz)
+  /// Default assembled IMU sample rate (Hz). No longer decorative: it is the
+  /// default for [pedometer]'s `sampleRateHz`, which the interval bounds below
+  /// are converted through. Every other constant here is in SAMPLES.
+  static const double fs = 100;
   static const int filter = 8; // low-pass moving-average taps
   static const int window = 33; // centered peak window (~0.33 s @100 Hz)
   static const double sens = 0.10; // g — dead-zone around the dynamic threshold
   static const int thrOrder = 4; // dynamic-threshold smoothing buffer
   static const int confirm = 8; // consecutive possible steps before counting
   static const int maxMinTimeout = 120; // samples to find a min after a max
-  static const double gain = 1.11; // calibration: raw 90 → ~100 ground truth
+
+  /// AN-2554's step-interval window: a human runs at most ~5 steps/s and walks
+  /// at slowest ~0.5 steps/s, so a peak-to-peak interval outside 0.2–2.0 s is
+  /// not gait and breaks the run. Distinct from [maxMinTimeout], which bounds
+  /// the max→min HALF cycle, not the interval between steps.
+  static const double minStepIntervalS = 0.2;
+  static const double maxStepIntervalS = 2.0;
+
+  /// Per-user calibration trim. **Default 1.00, and it must stay 1.00 as a
+  /// default** — a population fudge factor is not a calibration.
+  ///
+  /// This was 1.11 and it was shipping a measured +10.6% over-count. The
+  /// docstring claimed "raw 90 → ~100 ground truth"; on clean synthetic gait
+  /// the raw count is exact — raw/truth 1.00 at 60, 80, 100, 120, 140 and
+  /// 180 spm. The 90→100 figure is only reproducible at ~0.050 g peak
+  /// amplitude, on the [sens] dead-zone cliff where a 100-step walk counts
+  /// 0 → 56 → 98 → 100 across 0.048–0.055 g: n=1, at the least reproducible
+  /// operating point in the parameter space.
+  ///
+  /// The real systematic deficit on a still→walk→still bout is a FLAT −0.9%,
+  /// identical from a 20-step bout to a 10,000-step one. Flat means it is
+  /// neither a gain error (which would scale) nor an offset (which would
+  /// shrink): it is per-minute CHUNK-BOUNDARY loss inside [calcSteps], which
+  /// restarts the state machine every minute and pays [confirm] again. Fixing
+  /// that means changing how [calcSteps] segments minutes; it is 0.9% and it is
+  /// deliberately not chased. Do not re-derive a gain from it.
+  ///
+  /// A real strap on a real wrist may still need trimming — that is what this
+  /// knob is for. Measure it against ground truth, per user, and store it with
+  /// the user; never bake a population constant back in here.
+  static const double gain = 1.00;
 }
 
-/// AN-2554 time-domain step count over ONE contiguous accelerometer-MAGNITUDE
-/// signal (g, ~100 Hz, gravity INCLUDED). Raw count — no calibration gain.
+/// Time-domain step count over ONE contiguous accelerometer-MAGNITUDE signal
+/// (g, gravity INCLUDED). Raw count — no calibration gain. See [StepParams] for
+/// what this algorithm is (it is not AN-2554 verbatim).
 ///
-/// Faithful port of `pedometer()` from the backend:
 ///   low-pass (trailing MA) → centered-window max/min extrema → dynamic
-///   threshold ± [StepParams.sens]/2 dead-zone → [StepParams.confirm]
-///   consecutive "possible steps" before counting (the regularity gate that
-///   rejects waving/typing/handling — validated to read 0 at rest).
-int pedometer(List<double> sig) {
+///   threshold ± [StepParams.sens]/2 dead-zone → step-interval bounds
+///   ([StepParams.minStepIntervalS]…[StepParams.maxStepIntervalS]) →
+///   [StepParams.confirm] consecutive "possible steps" before counting (the
+///   regularity gate — it rejects IRREGULAR handling and reads 0 at rest, but
+///   it does NOT reject rhythmic arm work).
+///
+/// [sampleRateHz] is the rate of THIS buffer. It is used only to convert the
+/// step-interval bounds into samples — every other constant is in samples and
+/// the peak window is wide enough that 50–200 Hz all count correctly (measured;
+/// 25 Hz collapses to 0.29 of truth at 110 spm and no bound saves that).
+int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) {
   final n = sig.length;
-  if (n < StepParams.window) return 0;
+  if (n < StepParams.window || sampleRateHz <= 0) return 0;
+  // Step-interval bounds in SAMPLES, from the buffer's real rate.
+  final minGap = StepParams.minStepIntervalS * sampleRateHz;
+  final maxGap = StepParams.maxStepIntervalS * sampleRateHz;
   const filter = StepParams.filter;
   // low-pass: trailing moving average
   final lp = List<double>.filled(n, 0);
@@ -170,6 +235,7 @@ int pedometer(List<double> sig) {
   var stateMax = true; // 'max' → looking for a max; else looking for a min
   var curMax = 0.0;
   var curMaxIdx = -1;
+  var lastStepIdx = -1; // peak index of the last credited pair (interval anchor)
   for (var k = 0; k < candI.length; k++) {
     final ci = candI[k], cMax = candMax[k], cv = candV[k];
     if (stateMax) {
@@ -190,10 +256,26 @@ int pedometer(List<double> sig) {
         stateMax = true;
         poss = 0;
         regulation = false;
+        lastStepIdx = -1;
         continue;
       }
       final mx = curMax, mn = cv;
       if (mx > dynVal + StepParams.sens / 2 && mn < dynVal - StepParams.sens / 2) {
+        // Step-interval bound (AN-2554). The interval between two steps is the
+        // gap between their peaks; outside 0.2–2.0 s no human produced both, so
+        // this pair cannot CONTINUE the run — it can only start a new one.
+        // Without it the counter tracks 250, 300 and 320 spm at raw/truth 1.00
+        // and only loses lock near 350 spm, by accident of the peak window's
+        // width. Checked here rather than above the amplitude test so a noise
+        // pair can never move the anchor.
+        final gap = lastStepIdx < 0 ? null : curMaxIdx - lastStepIdx;
+        lastStepIdx = curMaxIdx;
+        if (gap != null && (gap < minGap || gap > maxGap)) {
+          poss = 0;
+          regulation = false;
+          stateMax = true;
+          continue;
+        }
         if (mx - mn > StepParams.sens) {
           dyn.add((mx + mn) / 2);
           if (dyn.length > StepParams.thrOrder) dyn.removeAt(0);
@@ -220,27 +302,37 @@ int pedometer(List<double> sig) {
   return steps;
 }
 
-/// Daily total: AN-2554 over each per-minute contiguous magnitude signal,
-/// summed and scaled by the calibration [StepParams.gain]. Faithful port of
-/// `calcSteps()`. Per-minute chunking is the configuration the gain was
-/// calibrated under — keep it.
-int calcSteps(List<List<double>> minuteSignals) {
+/// Daily total: [pedometer] over each per-minute contiguous magnitude signal,
+/// summed and scaled by [StepParams.gain] (1.00 by default — see there).
+///
+/// KNOWN, DELIBERATELY UNFIXED: the per-minute chunking costs a flat −0.9%.
+/// The state machine restarts at every boundary and has to re-earn
+/// [StepParams.confirm], losing ~2 steps per minute of continuous walking.
+/// Measured on still→walk→still bouts of 20 / 100 / 1000 / 10000 steps: −0.9%
+/// at every size. It is not a gain error and must not be "corrected" with one.
+/// Fixing it properly means carrying state across chunk boundaries, i.e.
+/// changing how this function segments minutes.
+int calcSteps(
+  List<List<double>> minuteSignals, {
+  double sampleRateHz = StepParams.fs,
+}) {
   var total = 0;
   for (final sig in minuteSignals) {
-    total += pedometer(sig);
+    total += pedometer(sig, sampleRateHz: sampleRateHz);
   }
   return (total * StepParams.gain).round();
 }
 
-/// Convenience wrapper for the live foreground stream: AN-2554 over a tri-axial
-/// buffer (g, gravity included). Returns the count + an estimated cadence over
-/// the buffer span. The RAW (pre-gain) count is in [PedometerResult.steps];
-/// apply [StepParams.gain] at the display/daily-sum layer (as [calcSteps] does).
+/// Convenience wrapper for the live foreground stream: [pedometer] over a
+/// tri-axial buffer (g, gravity included). Returns the count + an estimated
+/// cadence over the buffer span. The RAW (pre-gain) count is in
+/// [PedometerResult.steps]; apply [StepParams.gain] at the display/daily-sum
+/// layer (as [calcSteps] does).
 PedometerResult livePedometer(
   List<double> x,
   List<double> y,
   List<double> z, {
-  double sampleRateHz = 100.0,
+  double sampleRateHz = StepParams.fs,
 }) {
   final n = math.min(x.length, math.min(y.length, z.length));
   if (n < StepParams.window || sampleRateHz <= 0) return PedometerResult.none;
@@ -248,7 +340,7 @@ PedometerResult livePedometer(
     for (var i = 0; i < n; i++)
       math.sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i])
   ];
-  final steps = pedometer(mag);
+  final steps = pedometer(mag, sampleRateHz: sampleRateHz);
   final durationS = n / sampleRateHz;
   if (steps <= 0) return PedometerResult(0, durationS, 0, 0, 0);
   // Cadence over the buffer span. For a dedicated walk this is the walking
