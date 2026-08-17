@@ -19,6 +19,33 @@
 //     calibration is supplied (restingHr + maxHr), in which case the HR branch
 //     uses %HR-reserve (still an estimate, ESTIMATE tier).
 //   * Never asserts absolute EE without calibration.
+//
+// ---------------------------------------------------------------------------
+// MT-05 OFFLINE VALIDATION — 2026-08-17. STILL UNCALLED, AND IT MUST STAY THAT
+// WAY UNTIL THE THRESHOLDS MOVE. The proposal was to use the branch label to
+// split the day's minutes and SUBTRACT the non-locomotor ones from active
+// energy. Run over a real gen4 capture (671k 1 Hz rows, 9 days) against the
+// user's own LABELLED sessions, with Brage's defaults below and the
+// minute-majority aggregation the proposal calls for:
+//
+//   labelled 83-min WALK  -> 17-21% of its minutes called NON-LOCOMOTOR
+//   labelled 50-min RUN   -> 22%
+//   labelled TENNIS       -> 35-83%
+//
+// So it eats a fifth of a known walk, and a fifth of a known walk's calories is
+// what the wiring would delete. A sweep (accelHi 0.15->0.04, hrHi 0.4/0.6) can
+// push the walk down to 4-5%, but that is a fit to one person's nine days on
+// one device family, and one unlabelled session in the same capture swings
+// between 8% and 100% non-locomotor across the same grid.
+//
+// The root cause is not the numbers, it is the input: Brage's branch thresholds
+// were developed on high-rate hip/chest accelerometry, and our accel channel is
+// ONE GRAVITY VECTOR PER SECOND — a low-passed orientation, not raw
+// acceleration. |‖a‖−1| computed off it is a different quantity from ENMO and
+// no threshold sweep converts one into the other. Fixing this needs a motion
+// input the branch model can actually read, or per-user calibration (which is
+// what Brage's own equation assumed), not a constant.
+// ---------------------------------------------------------------------------
 
 import '../types.dart';
 import '../util.dart';
@@ -95,8 +122,7 @@ Metric<EnergyFusion> branchedEnergyFusion(
       note: 'HR/ENMO/ts must be equal-length and time-aligned',
     );
   }
-  final calibrated =
-      restingHr != null && maxHr != null && maxHr > restingHr;
+  final calibrated = restingHr != null && maxHr != null && maxHr > restingHr;
   final pts = <EnergyPoint>[];
   var load = 0.0;
   var usable = 0;

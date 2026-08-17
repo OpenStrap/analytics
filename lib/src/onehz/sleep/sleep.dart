@@ -35,3 +35,4 @@ export 'cardio_stager.dart';
 export 'cpc.dart';
 export 'circadian_np.dart';
 export 'cycles.dart';
+export 'night_hrv_shape.dart';

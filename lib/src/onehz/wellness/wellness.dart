@@ -2,7 +2,8 @@
 //
 // Built on the foundations (types/util/baseline/fusion) and clinical (cosinor,
 // illness_cusum) layers. MED-tier, RELATIVE-honest methods:
-//   - tempCircadian        : relative skin-temp cosinor + IS/IV/RA/L5/M10
+//   - tempCircadian        : relative skin-temp cosinor + IS/IV, PER-FAMILY
+//                            (gen4 ADC vs gen5 centi-°C); M10/L5/RA withheld
 //   - tempIllnessFlag      : Smarr nightly relative-temp z, CYCLE-AWARE
 //   - menstrualCoverline   : 3-over-6 retrospective ovulation CONFIRMATION
 //   - multivariateAnomaly  : robust Mahalanobis {RHR↑,HRV↓,temp↑,resp↑} + gates
@@ -22,9 +23,12 @@ library wellness;
 // depend on just this barrel.
 export '../types.dart';
 export '../util.dart';
+// tempCircadian dispatches on device family, so its callers need the seam.
+export '../device.dart';
 
 export 'temp_circadian.dart';
 export 'temp_health.dart';
+export 'cycle_lengths.dart';
 export 'anomaly.dart';
 export 'changepoint.dart';
 export 'readiness_composite.dart';

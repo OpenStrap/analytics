@@ -1,5 +1,12 @@
 // SLEEP/CIRCADIAN — Cardiopulmonary Coupling (CPC). WITHDRAWN.
 //
+// IF YOU GOT HERE FROM A GREP: this function has zero callers ON PURPOSE. it is
+// not an oversight, not half-wired, not waiting for someone with time. every
+// sweep of this repo re-proposes it, because a tested function with no caller
+// reads as a loose end from the outside and as a decision only once you open
+// the file. you have opened the file. the reason is below, and edge's
+// compute/onehz_pipeline.dart records the same verdict where the call would go.
+//
 // Thomas et al. 2005 (Sleep) derives CPC from the cross-spectral coherence of
 // TWO signals: the RR tachogram, and an ECG-DERIVED RESPIRATION (EDR) surrogate
 // taken from the R-wave amplitude — a separate channel that is modulated by
@@ -27,6 +34,12 @@
 // Wiring it back up means changing the signature to take an actual respiration
 // channel (PPG AC amplitude / RIIV, cf. respiration/resp_rate.dart) and
 // validating the result against something. Until then there is no number here.
+//
+// RSA-derived respiration DOES NOT QUALIFY as that channel. it comes out of the
+// same tachogram, so it reproduces exactly the failure above with more steps.
+// the input has to be independent of the beat times or the coupling spectrum
+// collapses again, and shipping the collapse under a clinical-sounding name is
+// republishing `lf_hf` — already charted — as a second, fake metric.
 
 import '../types.dart';
 import '../util.dart';

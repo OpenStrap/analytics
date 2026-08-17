@@ -14,6 +14,31 @@
 // Dose bands follow Pietilä's graded effects (light/moderate/heavy) expressed
 // as deviations from the PERSONAL baseline (median+MAD), not absolute bpm/ms —
 // we never hard-code another person's effect sizes onto this user's scale.
+//
+// TWO OF THE THREE FUNCTIONS IN THIS FILE STAY UNCALLED. that is the decision,
+// not a gap in the wiring. `roughNight` is the one that may ship.
+//
+// `alcoholNightFlag` — do not wire it. it is unsupervised classification with
+// no labels entering it: the real export has 0 journal rows, so there is no
+// ground truth on this user at all, and an AUC computed over the 8-14 labelled
+// nights a keen user might produce has a confidence interval spanning roughly
+// 0.5-1.0. printing "AUC 0.81" next to it does not rescue that, it prints the
+// refusal in small type. and the signature is admittedly non-specific — see the
+// honesty rule above — so the classifier is being asked to do the exact thing
+// every party to this concedes it cannot. the product reason outranks both: a
+// phone is sometimes shared or seen over a shoulder, a wrong "looks like a
+// drinking night" is an accusation, and for anyone in recovery an app that
+// comments on drinking is not a neutral object. the MOST this may ever do is
+// overlay the nights the user DID log onto the existing rhr/rmssd charts —
+// descriptive marks on her own record, no centroid, no distance, no AUC, no
+// classification. note the stated reason it "was never wired" is factually
+// wrong wherever you read it: it already builds robustBaseline/modZ per user
+// and gates on mdc(), so any proposed "replacement" is what it already does.
+//
+// `NightSignature` — the input struct. it may only be used if it REPLACES
+// `multivariateAnomaly`, never alongside it. two anomaly surfaces on the same
+// nocturnal channels means the same night gets flagged twice by two different
+// rules, and the user has no way to tell they are one observation.
 
 import '../types.dart';
 import '../util.dart';

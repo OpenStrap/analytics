@@ -63,6 +63,7 @@ import 'package:openstrap_protocol/openstrap_protocol.dart';
 }
 
 void main() {
+  _resp01Tests();
   // -------------------------------------------------------------------------
   // 1. SYNTHETIC KNOWN-ANSWER
   // -------------------------------------------------------------------------
@@ -114,7 +115,8 @@ void main() {
       // Nyquist is ~21 br/min — below the HF band itself. A 26 br/min breather
       // folds to a full-height peak at 16.9 br/min that no spectral test can
       // tell from a genuine 16.9. The honest output is nothing.
-      final s = syntheticRsaRr(modHz: 26 / 60.0, hrBpm: 43, ampMs: 40, beats: 600);
+      final s =
+          syntheticRsaRr(modHz: 26 / 60.0, hrBpm: 43, ampMs: 40, beats: 600);
       final corr = correctRr(s.rr);
       final m = rsaRespRate(corr.nn, corr.nnTimesMs,
           artifactFraction: 1 - corr.cleanFraction);
@@ -133,8 +135,8 @@ void main() {
     });
 
     test('RSA: absent on too-few beats -> null + confidence 0', () {
-      final m = rsaRespRate([800, 810, 790], [800, 1610, 2400],
-          artifactFraction: 0);
+      final m =
+          rsaRespRate([800, 810, 790], [800, 1610, 2400], artifactFraction: 0);
       expect(m.present, isFalse);
       expect(m.confidence, 0);
     });
@@ -212,7 +214,8 @@ void main() {
       var s = 0;
       while (s < totalSec) {
         // Sinusoidal HR modulation: 60 ± 6 bpm, period = cycleSec.
-        final hr = 60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
+        final hr =
+            60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
         final r = 60000.0 / hr; // ms
         nn.add(r);
         t += r;
@@ -241,7 +244,8 @@ void main() {
       var t = 0.0;
       var s = 0;
       while (s < cycleSec * 14) {
-        final hr = 60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
+        final hr =
+            60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
         final r = 60000.0 / hr;
         nn.add(r);
         t += r;
@@ -259,8 +263,8 @@ void main() {
       final holed = cvhrApneaScreen(nn, gapped, artifactFraction: 0);
 
       expect(holed.present, isTrue, reason: holed.note);
-      expect(holed.value!.analyzedHours,
-          closeTo(whole.value!.analyzedHours, 0.02),
+      expect(
+          holed.value!.analyzedHours, closeTo(whole.value!.analyzedHours, 0.02),
           reason: 'the 2 h hole is not observed time');
       expect(holed.value!.cvhrPerHour, closeTo(whole.value!.cvhrPerHour, 3.0),
           reason: 'pre-fix this fell by a third');
@@ -379,10 +383,8 @@ void main() {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
 
       final rrMs = <double>[];
       final green = <double>[];
@@ -505,8 +507,94 @@ void main() {
       final m = rsaRespRate(corr.nn, corr.nnTimesMs,
           artifactFraction: 1 - corr.cleanFraction);
       final j = m.value!.toJson();
-      expect((j['peak_hz'] as double) * 60.0,
-          closeTo(j['brpm'] as double, 1e-4));
+      expect(
+          (j['peak_hz'] as double) * 60.0, closeTo(j['brpm'] as double, 1e-4));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// RESP-01 / RESP-02 (gate half) — the 30-night personal CVHR distribution.
+// ---------------------------------------------------------------------------
+void _resp01Tests() {
+  CvhrNight night(int day, double perHour,
+          {double hours = 7, bool irregular = false}) =>
+      CvhrNight(
+        dayKey: '2026-01-${day.toString().padLeft(2, '0')}',
+        cvhrPerHour: perHour,
+        analyzedHours: hours,
+        irregularRhythm: irregular,
+      );
+
+  group('RESP-01 personal distribution', () {
+    test('under 5 qualifying nights is ABSENT with a machine-readable note',
+        () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 4; d++) night(d, 10),
+      ]);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.note, contains('need_baseline:nights=4/5'));
+    });
+
+    test('thin nights (<4 analyzed hours) never weigh on the screen', () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        for (var d = 6; d <= 10; d++) night(d, 90, hours: 1),
+      ]);
+      expect(m.present, isTrue);
+      expect(m.value!.nightsUsed, 5);
+      expect(m.value!.nightsExcludedThin, 5);
+      expect(m.value!.weightedMean, closeTo(10, 1e-9));
+    });
+
+    test(
+        'RESP-02 cross-gate: irregular-rhythm nights are EXCLUDED, not weighted',
+        () {
+      final withAf = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        night(6, 200, irregular: true),
+      ]);
+      expect(withAf.value!.nightsUsed, 5);
+      expect(withAf.value!.nightsExcludedIrregular, 1);
+      // the AF night's 200/h moved nothing
+      expect(withAf.value!.weightedMean, closeTo(10, 1e-9));
+    });
+
+    test('nights are weighted by their OWN analyzed hours', () {
+      final m = cvhrPersonalDistribution([
+        night(1, 20, hours: 8),
+        night(2, 10, hours: 4),
+        night(3, 10, hours: 4),
+        night(4, 10, hours: 4),
+        night(5, 10, hours: 4),
+      ]);
+      // unweighted mean would be 12.0; hours-weighted is 20*8+10*16 over 24
+      expect(m.value!.weightedMean, closeTo((20 * 8 + 10 * 16) / 24, 1e-9));
+    });
+
+    test('the only comparison is against the user own retained spread', () {
+      final quiet = cvhrPersonalDistribution([
+        for (var d = 1; d <= 10; d++) night(d, 10),
+      ]);
+      expect(quiet.value!.aboveOwnUsual, isFalse);
+      final rising = cvhrPersonalDistribution([
+        for (var d = 1; d <= 8; d++) night(d, 5),
+        night(9, 40),
+        night(10, 40),
+        night(11, 40),
+      ]);
+      expect(rising.value!.aboveOwnUsual, isTrue);
+      // and it still refuses to be an AHI or a severity
+      expect(rising.toJson().toString(), isNot(contains('ahi')));
+    });
+
+    test('a re-derived day counts once', () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        night(5, 10),
+      ]);
+      expect(m.value!.nightsUsed, 5);
     });
   });
 }

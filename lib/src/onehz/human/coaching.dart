@@ -135,6 +135,22 @@ class StrainTarget {
       };
 }
 
+/// A BAND, NOT AN INSTRUCTION — and it must stay that way.
+///
+/// nocturnal RMSSD and RHR are the best-validated things this band produces
+/// (CCC 0.94, MAPE ~8% vs ECG over 536 nights), which is precisely why turning
+/// them into "do not train hard today" is tempting and why the request keeps
+/// arriving. the step from "today's ln-RMSSD is below your 7-day rolling mean"
+/// to a training prescription requires an effect on training OUTCOME that has
+/// not been established outside small athlete cohorts under daily supervision.
+/// the inputs validate; the instruction does not.
+///
+/// so this returns a range and a `rationale` that describes drivers, and it
+/// emits no verb. never "skip your session", never "train hard today", never a
+/// session type attached to a recovery state, never a rest day. anything in the
+/// imperative mood does not ship. two facts and no verb is the only honest
+/// extension. `glassBoxReadiness` sits under the same rule for the same reason
+/// — nothing to build there either, it already complies.
 Metric<StrainTarget> strainTarget({
   required double? recovery0to100,
   required double? ctl,
@@ -499,7 +515,66 @@ class JournalNumericEffect {
 class JournalNumericCorrelation {
   final String field;
   final List<JournalNumericEffect> effects;
-  const JournalNumericCorrelation(this.field, this.effects);
+
+  /// Days between the journal entry and the outcome it was matched against
+  /// (MIND-02). 0 = the same day label, +1 = the following morning's outcome.
+  /// Surfaced so a screen can say WHICH night it means — "yesterday's coffee
+  /// against last night's HRV" is a different sentence from "today's mood
+  /// against last night's HRV", and a user who has already seen a finding is
+  /// entitled to know the alignment changed.
+  final int lagDays;
+  const JournalNumericCorrelation(this.field, this.effects, {this.lagDays = 0});
+}
+
+/// PER-FIELD outcome lag, in days (MIND-02).
+///
+/// The bug this fixes: `_targetDayWindow` searches back 12 h from midnight, so
+/// readiness / rmssd / efficiency labelled date D come from the night ENDING on
+/// the morning of D. The journal row is written at bedtime of D and describes
+/// the DAYTIME of D. Correlating them at lag 0 compares today's coffee against
+/// a night that was over before it was drunk.
+///
+/// It is per-field and NEVER a global shift, because the fields point in
+/// opposite directions. Mood, sleep quality, soreness and stress are
+/// RETROSPECTIVE — they describe the state the finished night produced, and
+/// lag 0 is already correct for them; a blanket +1 would break the ones that
+/// work today. Caffeine, alcohol, water and steps are BEHAVIOUR during the day
+/// and land on the night that follows, so they take +1.
+///
+/// A field not listed here keeps lag 0 — a custom field could be either kind,
+/// and quietly re-aligning something we cannot classify is the same mistake in
+/// the other direction.
+///
+/// NO LAG SCAN. Trying {0,+1,+2} triples the grid and multiplies exactly the
+/// multiplicity problem the Benjamini-Hochberg correction above just paid to
+/// fix. One fixed constant, disclosed.
+const Map<String, int> journalFieldLagDays = {
+  'caffeine': 1,
+  'caffeine_at_min': 1,
+  'alcohol': 1,
+  'water': 1,
+  'steps': 1,
+  'nicotine': 1,
+  'late_meal': 1,
+  'screen_time': 1,
+  'mood': 0,
+  'sleep_quality': 0,
+  'soreness': 0,
+  'stress': 0,
+  'energy': 0,
+};
+
+/// The day label [days] after [label] (`YYYY-MM-DD`), or null when the label is
+/// not a date we can shift. UTC arithmetic: a DST boundary must not turn +1 day
+/// into +23 h and round to 0.
+String? shiftDayLabel(String label, int days) {
+  if (days == 0) return label;
+  final d = DateTime.tryParse('${label}T00:00:00Z');
+  if (d == null) return null;
+  final s = d.add(Duration(days: days));
+  return '${s.year.toString().padLeft(4, '0')}-'
+      '${s.month.toString().padLeft(2, '0')}-'
+      '${s.day.toString().padLeft(2, '0')}';
 }
 
 /// Pearson correlation. Null when either side has no spread.
@@ -603,9 +678,13 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
   double fdrAlpha = 0.05,
   int permutations = 999,
   int permutationSeed = 20260817,
+  Map<String, int> fieldLagDays = journalFieldLagDays,
 }) {
   final byDate = <String, Map<String, double>>{
     for (final d in journal) d.date: d.values,
+  };
+  final indexByDate = <String, int>{
+    for (var i = 0; i < dates.length; i++) dates[i]: i,
   };
   final fields = <String>{for (final d in journal) ...d.values.keys}.toList()
     ..sort();
@@ -657,13 +736,26 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
       }
 
       // Pairwise-complete: a day counts only when the field was recorded AND
-      // the outcome exists for it.
+      // the outcome LAG DAYS LATER exists for it. A journal day whose lagged
+      // outcome is not in the series is DROPPED, which lowers n — never
+      // back-filled with the same day's outcome, which is the mispairing this
+      // whole change exists to remove.
+      final lag = fieldLagDays[field] ?? 0;
       final xs = <double>[];
       final ys = <double>[];
       for (var i = 0; i < dates.length; i++) {
         final v = byDate[dates[i]]?[field];
-        final y = series[i];
-        if (v == null || y == null) continue;
+        if (v == null) continue;
+        final int? at;
+        if (lag == 0) {
+          at = i;
+        } else {
+          final label = shiftDayLabel(dates[i], lag);
+          at = label == null ? null : indexByDate[label];
+        }
+        if (at == null) continue;
+        final y = series[at];
+        if (y == null) continue;
         xs.add(v);
         ys.add(y);
       }
@@ -808,7 +900,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
 
   final out = [
     for (final field in fields)
-      JournalNumericCorrelation(field, byField[field] ?? const []),
+      JournalNumericCorrelation(field, byField[field] ?? const [],
+          lagDays: fieldLagDays[field] ?? 0),
   ];
   out.sort((a, b) => a.field.compareTo(b.field));
   return out;

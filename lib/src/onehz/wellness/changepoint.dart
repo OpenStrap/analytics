@@ -21,6 +21,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import '../foundations/baseline.dart';
 
 // ---------------------------------------------------------------------------
 // 1. Online CUSUM change detector (two-sided)
@@ -172,6 +173,31 @@ Metric<Segmentation> segmentChangePoints(
   _binSeg(x, prefix, prefixSq, 0, n, minSeg, penalty, cps);
   cps.sort();
 
+  // EFFECT-SIZE GATE (MT-10). Statistical significance is not a finding: a
+  // step the instrument cannot resolve is not a step. Each surviving boundary
+  // must move the mean by at least the MDC of the segment BEFORE it — the
+  // quiet regime is the only honest noise estimate, since the full series
+  // contains the shift itself. No dispersion in the pre-segment ⇒ no MDC ⇒ the
+  // boundary is dropped, never waved through.
+  var dropped = 0;
+  var changed = true;
+  while (changed && cps.isNotEmpty) {
+    changed = false;
+    final edges = [0, ...cps, n];
+    for (var i = 1; i < edges.length - 1; i++) {
+      final lo = edges[i - 1], cut = edges[i], hi = edges[i + 1];
+      final before = x.sublist(lo, cut);
+      final step = (mean(x.sublist(cut, hi))! - mean(before)!).abs();
+      final gate = mdc(robustBaseline(before, minValid: minSeg));
+      if (gate == null || step < gate) {
+        cps.remove(cut);
+        dropped++;
+        changed = true;
+        break; // means around the merge moved; re-evaluate from scratch
+      }
+    }
+  }
+
   // Build segments + means.
   final bounds = [0, ...cps, n];
   final segments = <List<int>>[];
@@ -187,8 +213,15 @@ Metric<Segmentation> segmentChangePoints(
     tier: Tier.estimate,
     inputs_used: inputs,
     note:
-        'binary segmentation w/ BIC-penalized change-in-mean; min-seg=$minSeg. '
-        'Run on SMOOTHED aggregates only — do not celebrate regression-to-mean.',
+        'binary segmentation w/ BIC-penalized change-in-mean; min-seg=$minSeg; '
+        'below-MDC boundaries dropped=$dropped. Run on SMOOTHED aggregates '
+        'only — do not celebrate regression-to-mean. RETROSPECTIVE ONLY: no '
+        'forward alerting, and a boundary is a date that can MOVE when more '
+        'data arrives. The penalty is σ̂² of the FULL series, so a series '
+        'containing one big real shift inflates its own penalty and the '
+        'detector UNDER-SPLITS by construction — an empty result is not '
+        'evidence of stability. It cannot separate infection from a training '
+        'block, a heat wave, a new medication, altitude or a cycle phase.',
   );
 }
 

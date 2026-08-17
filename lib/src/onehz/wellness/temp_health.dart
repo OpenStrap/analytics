@@ -168,6 +168,21 @@ class OvulationEvent {
 /// HONESTY: confirmation ONLY — this NEVER predicts a future ovulation. Returns
 /// all detected events over the series. `relative` tier — never an absolute
 /// temperature.
+///
+/// UNCALLED TODAY, AND THE CONDITION FOR CALLING IT IS A THRESHOLD. edge
+/// unwired it after passing z-scores against a 1.0 default (see the note at the
+/// old call site in local_repository_impl.dart). restoring it needs a threshold
+/// defensible IN THE UNIT PASSED, ON THIS SENSOR, with a stated basis — not a
+/// number chosen because it makes events appear. nobody has one yet.
+///
+/// AN EMPTY EVENT LIST IS NOT AN ANSWER ABOUT HER BODY. the temperature channel
+/// is populated at ~1.5% of a sleep window on real data, so a null coverline
+/// result is dominated by measurement failure, not physiology. the app may make
+/// a statement about its own detector and never about her ovulation. the word
+/// "anovulatory", and every paraphrase of it, stays out of this codebase and
+/// out of the copy. whatever renders this either says nothing in the no-event
+/// state or states the coverage it had IN THE SAME SENTENCE, with no
+/// cycle-level interpretation — not in a footnote, not on a second screen.
 Metric<List<OvulationEvent>> menstrualCoverline(
   List<String> dates,
   List<double?> nightlyTemp, {

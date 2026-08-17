@@ -17,6 +17,9 @@ export 'sleep_regularity.dart';
 export 'event_detection.dart';
 export 'coaching.dart';
 export 'weekday_effect.dart';
+export 'alertness_forecast.dart';
+export 'session_cost.dart';
+export 'overreaching_conjunction.dart';
 // readiness_glassbox.dart is DEPRECATED/INTERNAL (duplicate readiness). The
 // canonical readiness is wellness/readiness_composite.dart. Kept exported only
 // for back-compat — do NOT surface as the headline.

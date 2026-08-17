@@ -87,6 +87,8 @@ void main() {
       final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6];
       final rmssd = [for (final c in caffeine) 80.0 - 6 * c];
       final out = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: [
           for (var i = 0; i < dates.length; i++)
             JournalNumericDay(dates[i], {'caffeine': caffeine[i]}),
@@ -112,6 +114,8 @@ void main() {
       // not surface as a finding just because rho happens to be 1.
       final dates = _dates(5);
       final out = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: [
           for (var i = 0; i < 5; i++)
             JournalNumericDay(dates[i], {'water': (i + 1).toDouble()}),
@@ -305,6 +309,8 @@ void main() {
       List<JournalNumericEffect> run(int n) {
         final dates = _dates(n);
         return journalNumericCorrelations(
+          // MIND-02: this test is about the statistic, not the alignment.
+          fieldLagDays: const {},
           journal: [
             for (var i = 0; i < n; i++)
               JournalNumericDay(dates[i], {'caffeine': i.toDouble()}),
@@ -347,6 +353,8 @@ void main() {
       };
 
       final permissive = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: journal,
         dates: dates,
         outcomes: outcomes,
@@ -355,6 +363,8 @@ void main() {
       expect(permissive.meaningful, isTrue);
 
       final strict = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: journal,
         dates: dates,
         outcomes: outcomes,
@@ -378,6 +388,8 @@ void main() {
       // Default floor of 8 refuses five days outright.
       expect(
         journalNumericCorrelations(
+          // MIND-02: this test is about the statistic, not the alignment.
+          fieldLagDays: const {},
           journal: journal,
           dates: dates,
           outcomes: outcomes,
@@ -388,6 +400,8 @@ void main() {
       // Lowered below the pair count, rho is computed and — because 5 > 3 —
       // still carries an interval.
       final e = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: journal,
         dates: dates,
         outcomes: outcomes,
@@ -407,6 +421,8 @@ void main() {
       // interval at all and therefore no verdict.
       final three = _dates(3);
       final e3 = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: [
           for (var i = 0; i < 3; i++)
             JournalNumericDay(three[i], {'water': i.toDouble()}),
@@ -475,6 +491,8 @@ void main() {
       final dates = _dates(12);
       final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6];
       final out = journalNumericCorrelations(
+        // MIND-02: this test is about the statistic, not the alignment.
+        fieldLagDays: const {},
         journal: [
           for (var i = 0; i < dates.length; i++)
             JournalNumericDay(dates[i], {'caffeine': caffeine[i]}),
@@ -578,6 +596,85 @@ void main() {
         ),
         isEmpty,
       );
+    });
+  });
+
+  // MIND-02 — the journal row for day D describes the DAYTIME of D, but the
+  // outcome labelled D comes from the night that ENDED on the morning of D. So
+  // a behaviour field has to be matched against D+1, and a retrospective field
+  // must NOT be.
+  group('MIND-02 per-field lag', () {
+    test('a behaviour field is matched against the FOLLOWING night', () {
+      final dates = _dates(14);
+      // Coffee on day i wrecks the night that follows, i.e. the outcome
+      // labelled i+1. Same-day pairing sees a scrambled series and nothing
+      // else — that is the bug, reproduced here as the control.
+      final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2];
+      final rmssd = <double?>[
+        null, // day 0's outcome belongs to the night before the log starts
+        for (var i = 0; i + 1 < caffeine.length; i++) 80.0 - 6 * caffeine[i],
+      ];
+      final journal = [
+        for (var i = 0; i < dates.length; i++)
+          JournalNumericDay(dates[i], {'caffeine': caffeine[i]}),
+      ];
+
+      final lagged = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: {'rmssd': rmssd},
+      );
+      final e = _effect(lagged, 'caffeine', 'rmssd');
+      expect(e.rho, closeTo(-1.0, 1e-9));
+      expect(e.meaningful, isTrue);
+      expect(lagged.first.lagDays, 1, reason: 'disclosed, not silent');
+
+      // The old alignment cannot see it at all.
+      final sameDay = journalNumericCorrelations(
+        journal: journal,
+        dates: dates,
+        outcomes: {'rmssd': rmssd},
+        fieldLagDays: const {},
+      );
+      expect(_effect(sameDay, 'caffeine', 'rmssd').rho!.abs(), lessThan(0.9));
+    });
+
+    test('a retrospective field is NOT shifted', () {
+      // mood on day D describes the daytime of D, which the night ending that
+      // morning produced. A blanket +1 would break the fields that are already
+      // right, which is why the constant is per-field.
+      expect(journalFieldLagDays['mood'], 0);
+      expect(journalFieldLagDays['sleep_quality'], 0);
+      expect(journalFieldLagDays['caffeine'], 1);
+      expect(journalFieldLagDays['alcohol'], 1);
+      // An unlisted (custom) field is not silently re-aligned either.
+      expect(journalFieldLagDays['a_field_we_invented'], isNull);
+    });
+
+    test('a lagged day with no outcome the next day is DROPPED, not backfilled',
+        () {
+      final dates = _dates(12);
+      final out = <double?>[for (var i = 0; i < 12; i++) 50.0 + i];
+      out[6] = null; // the night after day 5 was never judged
+      final res = journalNumericCorrelations(
+        journal: [
+          for (var i = 0; i < dates.length; i++)
+            JournalNumericDay(dates[i], {'water': i.toDouble()}),
+        ],
+        dates: dates,
+        outcomes: {'readiness': out},
+      );
+      // 12 journal days; day 11 has no day-12 outcome in the series, and day 5
+      // loses its (null) one. 10 pairs, never 12.
+      expect(_effect(res, 'water', 'readiness').n, 10);
+    });
+
+    test('shiftDayLabel crosses a month and a DST boundary correctly', () {
+      expect(shiftDayLabel('2026-01-31', 1), '2026-02-01');
+      expect(shiftDayLabel('2026-03-29', 1), '2026-03-30'); // EU DST Sunday
+      expect(shiftDayLabel('2026-12-31', 1), '2027-01-01');
+      expect(shiftDayLabel('d0', 1), isNull);
+      expect(shiftDayLabel('d0', 0), 'd0');
     });
   });
 }

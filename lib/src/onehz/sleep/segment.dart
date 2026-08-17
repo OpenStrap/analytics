@@ -58,6 +58,94 @@ const double kMinObservedFractionForSleep = 0.5;
 /// offset). Worst-case misalignment is under one epoch in either direction.
 const int _hrEvidenceHalfWinSec = 15;
 
+/// Ceiling on [SleepSegmentation.confidence]. Four-class staging from RR and
+/// wrist motion sits at κ 0.21–0.53 across every consumer device measured, and
+/// REM and light both show elevated HRV — so no amount of coverage makes this
+/// night certain. The confidence this file publishes is a fraction of THIS
+/// ceiling, never of 1.0.
+const double kMaxSleepConfidence = 0.6;
+
+/// SLP-13 — the narrowest half-width a stage interval may ever have (s).
+///
+/// A CHOICE, and the same five minutes [kSustainedAwakeningSec] already uses:
+/// without it a night with `deep_sec == 0` would publish the interval 0–0,
+/// which is the exact false precision the intervals exist to remove. A stage
+/// the overlay did not fire on is "under five minutes", not "none".
+const int kStageIntervalFloorSec = 300;
+
+/// SLP-13 — relative half-widths at the two ends of the confidence range.
+///
+/// These are OUR numbers for OUR segmenter, scaled by each night's own
+/// [SleepSegmentation.confidence]. They are deliberately NOT a published κ
+/// converted into minutes: one literature figure applied uniformly to every
+/// night is itself a fabricated precision, it hides the difference between a
+/// fully-covered night and one scraping the observed floor, and it is the kind
+/// of number that gets quoted back at us as if we had measured it.
+///
+/// Deep is wider than REM at both ends because it is not the same class of
+/// estimate: REM comes out of the stager's own four-class decision, while the
+/// Light/Deep boundary is the UNVALIDATED HR-depth overlay (see [stages4]).
+const double _remRelHalfBest = 0.30;
+const double _remRelHalfWorst = 0.55;
+const double _deepRelHalfBest = 0.45;
+const double _deepRelHalfWorst = 0.75;
+
+/// SLP-13 — a stage duration as the INTERVAL it actually is.
+///
+/// [pointSec] is the exact figure the stager counted. It is kept so Investigate
+/// (density 3) can show what was counted, and so nothing downstream has to
+/// re-derive it — but a normal screen renders [loSec]–[hiSec] and never
+/// [pointSec] on its own.
+class StageInterval {
+  final int pointSec;
+  final int loSec;
+  final int hiSec;
+  const StageInterval(this.pointSec, this.loSec, this.hiSec);
+  Map<String, dynamic> toJson() =>
+      {'point_sec': pointSec, 'lo_sec': loSec, 'hi_sec': hiSec};
+}
+
+/// SLP-13 — the intervals a screen may publish for tonight's stage minutes.
+///
+/// [confidence] is that night's own [SleepSegmentation.confidence] (0 ..
+/// [kMaxSleepConfidence]); a better-observed night gets a narrower interval and
+/// a night at the observed floor gets a wide one. Intervals clamp to [0,
+/// tstSec] — no stage can exceed the sleep it is a part of.
+({StageInterval light, StageInterval deep, StageInterval rem}) stageIntervals({
+  required int lightSec,
+  required int deepSec,
+  required int remSec,
+  required int tstSec,
+  required double confidence,
+}) {
+  final t = clamp(confidence / kMaxSleepConfidence, 0.0, 1.0);
+  double rel(double best, double worst) => worst + (best - worst) * t;
+  final deepHalf = math.max(
+    (rel(_deepRelHalfBest, _deepRelHalfWorst) * deepSec).round(),
+    kStageIntervalFloorSec,
+  );
+  final remHalf = math.max(
+    (rel(_remRelHalfBest, _remRelHalfWorst) * remSec).round(),
+    kStageIntervalFloorSec,
+  );
+  // Light and Deep are the two sides of ONE binary decision inside NREM: a
+  // second the overlay wrongly called deep is a second of light, and vice
+  // versa. So light inherits deep's ABSOLUTE half-width — applying deep's
+  // RELATIVE width to the (usually much larger) light figure would claim the
+  // overlay's error grows with the stage it did not misclassify.
+  return (
+    light: _interval(lightSec, deepHalf, tstSec),
+    deep: _interval(deepSec, deepHalf, tstSec),
+    rem: _interval(remSec, remHalf, tstSec),
+  );
+}
+
+StageInterval _interval(int sec, int halfSec, int tstSec) => StageInterval(
+      sec,
+      math.max(0, sec - halfSec),
+      math.min(tstSec, sec + halfSec),
+    );
+
 /// How long a wake run must last to be counted as an awakening (SLP-03).
 ///
 /// Five minutes is a CHOICE — it is the bar Webster's rescoring already uses
@@ -231,6 +319,23 @@ class SleepSegmentation {
 
   bool get present => window != null;
 
+  /// SLP-13 — tonight's stage minutes as INTERVALS, from this night's own
+  /// [confidence]. Null when the night is absent. The exact seconds stay on
+  /// [lightSec]/[deepSec]/[remSec] for Investigate; everything user-facing
+  /// should be reading this instead.
+  ({StageInterval light, StageInterval deep, StageInterval rem})?
+      get stageRanges {
+    final l = lightSec, d = deepSec, r = remSec, t = tstSec;
+    if (l == null || d == null || r == null || t == null) return null;
+    return stageIntervals(
+      lightSec: l,
+      deepSec: d,
+      remSec: r,
+      tstSec: t,
+      confidence: confidence,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
         'window': window?.toJson(),
         'tst_sec': tstSec,
@@ -254,7 +359,16 @@ class SleepSegmentation {
         // Deep is a LOW-CONFIDENCE, unvalidated HR-depth overlay (see
         // walch_stager STEP 2). Carry the flag so the UI badges it honestly.
         'deep_low_confidence': true,
+        // SLP-13 — the interval each stage figure should actually be shown as,
+        // derived from THIS night's confidence. `*_sec` above stays the exact
+        // count for Investigate; these are what a normal screen renders.
+        'light_range_sec': _rangeJson(stageRanges?.light),
+        'deep_range_sec': _rangeJson(stageRanges?.deep),
+        'rem_range_sec': _rangeJson(stageRanges?.rem),
       };
+
+  static List<int>? _rangeJson(StageInterval? r) =>
+      r == null ? null : [r.loSec, r.hiSec];
 }
 
 /// THE single-source sleep segmentation.
@@ -527,7 +641,8 @@ SleepSegmentation segmentSleep(
   final rrCov = clamp(rrSeconds.length / inBed, 0.0, 1.0);
   final stagingConf = (0.35 + 0.25 * rrCov) * hrCov;
   final windowConf = wm.confidence > 0 ? wm.confidence : 0.45;
-  final conf = clamp((windowConf + stagingConf) / 2.0, 0.0, 0.6);
+  final conf =
+      clamp((windowConf + stagingConf) / 2.0, 0.0, kMaxSleepConfidence);
 
   return SleepSegmentation(
     window: SleepWindow(

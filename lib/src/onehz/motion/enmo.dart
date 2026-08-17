@@ -274,8 +274,7 @@ EnmoResult enmoSeries(
   // out of 24. Divide by the elapsed minute SPAN instead, which at least counts
   // interior holes; pass [expectedMinutes] (e.g. 1440 for a calendar day) to
   // count the unworn ends too.
-  final spanMinutes =
-      minutes.isEmpty ? 0 : keys.last - keys.first + 1;
+  final spanMinutes = minutes.isEmpty ? 0 : keys.last - keys.first + 1;
   final denom = expectedMinutes ?? spanMinutes;
   final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
   return EnmoResult(ref, minutes, coverage);
@@ -309,9 +308,25 @@ class IntensityBands {
 /// Cut-points are personal percentiles (50/75/90) of the user's MOVING
 /// minutes (ENMO above [sedentaryEnmo]); minutes at/under that floor are
 /// "sedentary". Honest: this is percentile-of-you, never a MET threshold.
+///
+/// THE CUT-POINTS MUST BE FROZEN. Without [frozenCuts] this takes percentiles
+/// OF ITS OWN INPUT, which means fed one day it labels the top decile of a rest
+/// day "vigorous" and a deconditioning period silently lowers the vigorous
+/// threshold to meet it — the same defect `personalDynFloor` is already frozen
+/// to avoid. Pass cut-points established once over a pooled history and
+/// persisted; the self-percentile path stays only for computing that pool the
+/// first time (and for tests), and its note says so.
+///
+/// SO: THE CONDITION FOR CALLING THIS AT ALL is that [frozenCuts] exists and is
+/// persisted. it has zero callers today for exactly that reason — nothing in
+/// edge stores a cut-point triple yet. wiring it on the self-percentile path
+/// "just to see it on screen" ships a label that redefines itself every time
+/// the user's week changes, which is worse than no label. build the pool and
+/// the column first, then call this with them.
 Metric<IntensityBands> relativeIntensityBands(
   List<double> enmoPerMin, {
   double sedentaryEnmo = 0.01,
+  ({double light, double moderate, double vigorous})? frozenCuts,
 }) {
   const inputs = ['enmo_per_min'];
   if (enmoPerMin.isEmpty) {
@@ -321,13 +336,42 @@ Metric<IntensityBands> relativeIntensityBands(
       note: 'no ENMO minutes',
     );
   }
+  if (frozenCuts != null) {
+    // Monotone or the labelling is nonsense (a "vigorous" cut under the
+    // "moderate" one makes every moderate minute vigorous). Refuse rather than
+    // reorder them: whatever produced them is wrong and should hear about it.
+    if (!(frozenCuts.light < frozenCuts.moderate &&
+        frozenCuts.moderate < frozenCuts.vigorous)) {
+      return const Metric<IntensityBands>.absent(
+        tier: Tier.relative,
+        inputs_used: inputs,
+        note: 'frozen cut-points not strictly increasing',
+      );
+    }
+    return _labelWithCuts(
+      enmoPerMin,
+      sedentaryEnmo,
+      frozenCuts.light,
+      frozenCuts.moderate,
+      frozenCuts.vigorous,
+      // The anchoring quality belongs to whoever froze the cuts, not to this
+      // day's minute count, so it is not re-derived from this input.
+      0.8,
+      'RELATIVE within-user intensity vs FROZEN personal cut-points; NOT METs',
+    );
+  }
   final moving = enmoPerMin.where((e) => e > sedentaryEnmo).toList();
   // Need a moving distribution to set personal cut-points.
   if (moving.length < 4) {
     final labels = [
       for (final e in enmoPerMin) e > sedentaryEnmo ? 'light' : 'sedentary'
     ];
-    final counts = <String, int>{'sedentary': 0, 'light': 0, 'moderate': 0, 'vigorous': 0};
+    final counts = <String, int>{
+      'sedentary': 0,
+      'light': 0,
+      'moderate': 0,
+      'vigorous': 0
+    };
     for (final l in labels) {
       counts[l] = counts[l]! + 1;
     }
@@ -340,9 +384,30 @@ Metric<IntensityBands> relativeIntensityBands(
           'too few moving minutes for personal cut-points; RELATIVE, not METs',
     );
   }
-  final light = percentile(moving, 50)!;
-  final moderate = percentile(moving, 75)!;
-  final vigorous = percentile(moving, 90)!;
+  return _labelWithCuts(
+    enmoPerMin,
+    sedentaryEnmo,
+    percentile(moving, 50)!,
+    percentile(moving, 75)!,
+    percentile(moving, 90)!,
+    // confidence scales with how much moving data anchors the percentiles.
+    clamp(moving.length / 60.0, 0.3, 0.8),
+    'RELATIVE within-user intensity (50/75/90th moving pct OF THIS INPUT — '
+    'cut-points not frozen); NOT METs',
+  );
+}
+
+/// The labelling half, shared by the frozen-cut and self-percentile paths so
+/// the two can never band the same minute differently.
+Metric<IntensityBands> _labelWithCuts(
+  List<double> enmoPerMin,
+  double sedentaryEnmo,
+  double light,
+  double moderate,
+  double vigorous,
+  double confidence,
+  String note,
+) {
   final labels = <String>[];
   final counts = <String, int>{
     'sedentary': 0,
@@ -364,13 +429,11 @@ Metric<IntensityBands> relativeIntensityBands(
     labels.add(l);
     counts[l] = counts[l]! + 1;
   }
-  // confidence scales with how much moving data anchors the percentiles.
-  final conf = clamp(moving.length / 60.0, 0.3, 0.8);
   return Metric<IntensityBands>(
     value: IntensityBands(light, moderate, vigorous, labels, counts),
-    confidence: conf,
+    confidence: confidence,
     tier: Tier.relative,
-    inputs_used: inputs,
-    note: 'RELATIVE within-user intensity (50/75/90th moving pct); NOT METs',
+    inputs_used: const ['enmo_per_min'],
+    note: note,
   );
 }

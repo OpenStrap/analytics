@@ -25,4 +25,5 @@ export 'sport.dart';
 export 'calories.dart';
 export 'auto_detect.dart';
 export 'hr_zones.dart';
+export 'observed_max_hr.dart';
 export 'hr_recovery.dart';

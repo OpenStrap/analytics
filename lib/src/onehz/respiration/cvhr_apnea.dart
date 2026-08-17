@@ -203,6 +203,205 @@ Metric<CvhrResult> cvhrApneaScreen(
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RESP-01 — the 30-night PERSONAL DISTRIBUTION.
+//
+// The per-night index above is not shippable on its own: single-night CVHR has
+// substantial night-to-night variability, it fires on AF, on periodic breathing
+// at altitude and on any arousal-rich fragmented night, and it is BLUNTED by
+// beta-blockers, autonomic neuropathy and diabetes — so it misses real apnea
+// too. Both directions are harm. What survives that is one statement about a
+// user's OWN recent nights against their OWN earlier ones.
+//
+// WHAT THIS MAY NEVER BECOME: an AHI, a severity band, a per-night value on a
+// screen, a finding about the user, or a notification. A quiet screen means
+// NOTHING — that line is permanent copy, not a tooltip.
+//
+// RESP-02 (gate half) — nights where `irregular_rhythm_flag` fired are EXCLUDED
+// here, not down-weighted. AF produces the same cyclic RR pattern this screen
+// scores, so an AF night's index is not a weak apnea signal, it is a different
+// signal wearing the same shape. The corroboration half of RESP-02 (10-second
+// ENMO) is deliberately not built: it is new accel work, and its absence costs
+// this aggregate nothing.
+
+/// One stored night, as the aggregate needs it. Straight off `day_result`.
+class CvhrNight {
+  /// Local day label the night is filed under (used only for ordering/dedupe).
+  final String dayKey;
+
+  /// `respiration.cvhr_apnea.cvhr_per_hour` for that night.
+  final double cvhrPerHour;
+
+  /// `respiration.cvhr_apnea.analyzed_hours` — the OBSERVED, gap-excluded hours
+  /// behind [cvhrPerHour], and this night's weight.
+  final double analyzedHours;
+
+  /// Whether `irregular_rhythm_flag` fired on that day. Null counts as NOT
+  /// fired: the flag predates nothing here, but a night we cannot ask about is
+  /// not a night we may silently drop from the denominator.
+  final bool irregularRhythm;
+
+  const CvhrNight({
+    required this.dayKey,
+    required this.cvhrPerHour,
+    required this.analyzedHours,
+    this.irregularRhythm = false,
+  });
+}
+
+/// The result of the 30-night screen. Deliberately holds NO per-night value.
+class CvhrDistribution {
+  /// Nights that passed every gate and are behind [recentWeightedMean].
+  final int nightsUsed;
+
+  /// Nights dropped because `irregular_rhythm_flag` fired (RESP-02 cross-gate).
+  final int nightsExcludedIrregular;
+
+  /// Nights dropped for having under [minAnalyzedHoursPerNight] observed hours.
+  final int nightsExcludedThin;
+
+  /// Analyzed-hours-weighted mean cvhr/h over the whole retained window. This
+  /// is the user's OWN usual level — it is not a threshold and has no published
+  /// normal range.
+  final double weightedMean;
+
+  /// The same weighted mean over the most recent third of the retained nights.
+  final double recentWeightedMean;
+
+  /// [p25, p50, p75] of the retained nights' indices — the spread the recent
+  /// mean is being read against.
+  final List<double> quartiles;
+
+  /// True when the recent nights sit above the retained distribution's own p75.
+  /// This is the ONLY comparative statement the screen makes, and it is a
+  /// statement about this user's own history, not about apnea.
+  final bool aboveOwnUsual;
+
+  const CvhrDistribution({
+    required this.nightsUsed,
+    required this.nightsExcludedIrregular,
+    required this.nightsExcludedThin,
+    required this.weightedMean,
+    required this.recentWeightedMean,
+    required this.quartiles,
+    required this.aboveOwnUsual,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'nights_used': nightsUsed,
+        'nights_excluded_irregular': nightsExcludedIrregular,
+        'nights_excluded_thin': nightsExcludedThin,
+        'weighted_mean': round6(weightedMean),
+        'recent_weighted_mean': round6(recentWeightedMean),
+        'quartiles': quartiles.map(round6).toList(growable: false),
+        'above_own_usual': aboveOwnUsual,
+      };
+}
+
+/// A night needs this many OBSERVED hours before it may weigh on the screen.
+const double minAnalyzedHoursPerNight = 4.0;
+
+/// And this many such nights must exist before the screen says anything.
+const int minNightsForCvhrDistribution = 5;
+
+/// Nights considered, newest-first, once the gates have run.
+const int cvhrDistributionWindowNights = 30;
+
+/// RESP-01 — the 30-night personal CVHR distribution.
+///
+/// [nights] in any order; the newest [cvhrDistributionWindowNights] retained
+/// nights are used. Returns ABSENT — never a partial number — until at least
+/// [minNightsForCvhrDistribution] nights clear both gates.
+Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
+  const inputs = ['cvhr_apnea', 'irregular_rhythm_flag'];
+  // Newest first, one row per day (a re-derive can leave two).
+  final byDay = <String, CvhrNight>{};
+  for (final n in nights) {
+    byDay[n.dayKey] = n;
+  }
+  final sorted = byDay.values.toList()
+    ..sort((a, b) => b.dayKey.compareTo(a.dayKey));
+
+  var excludedIrregular = 0;
+  var excludedThin = 0;
+  final kept = <CvhrNight>[];
+  for (final n in sorted) {
+    if (kept.length >= cvhrDistributionWindowNights) break;
+    if (!n.cvhrPerHour.isFinite || !n.analyzedHours.isFinite) continue;
+    // RESP-02 cross-gate FIRST: an AF night is not a thin night, and counting
+    // it as one would misreport why the screen is quiet.
+    if (n.irregularRhythm) {
+      excludedIrregular++;
+      continue;
+    }
+    if (n.analyzedHours < minAnalyzedHoursPerNight) {
+      excludedThin++;
+      continue;
+    }
+    kept.add(n);
+  }
+
+  if (kept.length < minNightsForCvhrDistribution) {
+    return Metric<CvhrDistribution>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: 'need_baseline:nights=${kept.length}/'
+          '$minNightsForCvhrDistribution with ≥'
+          '${minAnalyzedHoursPerNight.round()} analyzed hours '
+          '(excluded ${excludedIrregular} for irregular rhythm, '
+          '${excludedThin} too thinly observed)',
+    );
+  }
+
+  double weighted(List<CvhrNight> xs) {
+    var num = 0.0, den = 0.0;
+    for (final n in xs) {
+      num += n.cvhrPerHour * n.analyzedHours;
+      den += n.analyzedHours;
+    }
+    return den > 0 ? num / den : 0.0;
+  }
+
+  final indices = [for (final n in kept) n.cvhrPerHour];
+  // "Recent" is the newest third of the retained nights (≥2 by construction:
+  // 5 nights ⇒ 2). One night is not a comparison.
+  final recentCount = math.max(2, (kept.length / 3).round());
+  final recent = kept.take(recentCount).toList();
+  final all = weighted(kept);
+  final rec = weighted(recent);
+  final q = [
+    percentile(indices, 25)!,
+    percentile(indices, 50)!,
+    percentile(indices, 75)!,
+  ];
+
+  return Metric<CvhrDistribution>(
+    value: CvhrDistribution(
+      nightsUsed: kept.length,
+      nightsExcludedIrregular: excludedIrregular,
+      nightsExcludedThin: excludedThin,
+      weightedMean: all,
+      recentWeightedMean: rec,
+      quartiles: q,
+      aboveOwnUsual: rec > q[2],
+    ),
+    // Relative tier on purpose: this compares the user only with themselves.
+    tier: Tier.relative,
+    // The floor is 5 nights, so a 5-night answer must not read like a 30-night
+    // one. Confidence rises with the nights actually behind it.
+    confidence: clamp(
+        0.3 + 0.4 * (kept.length / cvhrDistributionWindowNights), 0.3, 0.7),
+    inputs_used: inputs,
+    note: 'CVHR is a CARDIAC SURROGATE, not a breathing measurement: this is '
+        'how often the pattern showed up across ${kept.length} of your own '
+        'nights, never an AHI, never a severity, never a per-night value. '
+        'It also fires on atrial fibrillation (those nights are excluded), on '
+        'periodic breathing at altitude and on any fragmented night, and it is '
+        'blunted by beta-blockers, autonomic neuropathy and diabetes — so a '
+        'quiet screen means nothing.',
+  );
+}
+
 /// Score ONE gap-free stretch: resample → smooth → sliding-median baseline →
 /// positive-excursion runs → width + steepness gates. Calls [onCycle] with
 /// (depthMs, widthSec) per surviving cycle. [t] in seconds, [nn] in ms.

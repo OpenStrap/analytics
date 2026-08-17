@@ -33,47 +33,71 @@ void main() {
             2000 + 300 * math.cos(2 * math.pi / 24 * (tHours - peakHour));
         samples.add(AdcSample(tMs, adc));
       }
-      final m = tempCircadian(samples, epochMin: 60);
+      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
       expect(m.present, isTrue);
       expect(m.tier, Tier.relative);
       final fit = m.value!.cosinorFit!;
       expect(fit.acrophaseHours, closeTo(peakHour, 0.3));
       expect(fit.amplitude, closeTo(300, 15));
       expect(fit.r2, greaterThan(0.95));
-      // Nonparametric: strong clean rhythm => high IS, low IV, high RA.
+      // Nonparametric: strong clean rhythm => high IS, low IV.
       final np = m.value!.nonparam!;
       expect(np.interdailyStability, greaterThan(0.7));
       expect(np.intradailyVariability, lessThan(0.5));
-      expect(np.relativeAmplitude!, greaterThan(0.05));
-      // The warmest 10-h window should centre near the peak.
-      expect(np.m10!, greaterThan(np.l5!));
     });
 
-    test('an unobserved hour-of-day leaves M10/L5/RA ABSENT, not grand-mean',
-        () {
-      // Same clean 3-day cosine, but the strap is off 03:00-06:00 every day —
-      // three hours-of-day are never observed, so the averaged 24-h profile is
-      // incomplete and there is no warmest/coolest window to report.
+    test('M10/L5/RA are WITHHELD, not merely null (MT-09)', () {
       final samples = <AdcSample>[];
       for (var i = 0; i < 3 * 24 * 6; i++) {
         final tMs = i * 10 * 60 * 1000.0;
         final tHours = tMs / 3.6e6;
-        final hod = tHours % 24;
-        if (hod >= 3 && hod < 6) continue;
         samples.add(
             AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi / 24 * tHours)));
       }
-      final np = tempCircadian(samples, epochMin: 60).value!.nonparam!;
-      expect(np.m10, isNull);
-      expect(np.l5, isNull);
-      expect(np.m10OnsetHour, isNull);
-      expect(np.l5OnsetHour, isNull);
-      expect(np.relativeAmplitude, isNull);
-      // IS/IV still stand — they do not need every hour-of-day.
-      expect(np.interdailyStability, greaterThan(0.0));
-      final j = np.toJson();
-      expect(j.containsKey('m10'), isFalse);
-      expect(j.containsKey('relative_amplitude'), isFalse);
+      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final j = m.value!.nonparam!.toJson();
+      // Not "absent when unobserved" — absent from the shape entirely, because
+      // RA on a median-centred series divides by a quantity that crosses zero.
+      for (final k in [
+        'm10',
+        'l5',
+        'm10_onset_hour',
+        'l5_onset_hour',
+        'relative_amplitude'
+      ]) {
+        expect(j.containsKey(k), isFalse, reason: k);
+      }
+      expect(j.containsKey('interdaily_stability'), isTrue);
+    });
+
+    test('the family decides the unit and the gate; unknown refuses (MT-09)',
+        () {
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 3 * 24 * 6; i++) {
+        final tMs = i * 10 * 60 * 1000.0;
+        samples.add(AdcSample(
+            tMs, 2000 + 300 * math.cos(2 * math.pi / 24 * (tMs / 3.6e6))));
+      }
+      expect(tempCircadian(samples, deviceFamily: 'gen4').value!.unit,
+          'adc_counts');
+      expect(
+          tempCircadian(samples, deviceFamily: 'gen5').value!.unit, 'centi_c');
+      for (final id in [null, '', 'imported']) {
+        final m = tempCircadian(samples, deviceFamily: id);
+        expect(m.present, isFalse, reason: 'id=$id');
+        expect(m.note, unknownFamilyNote(id));
+      }
+
+      // The de-mask gate is per-family: 0.06 g of wrist motion is inside gen4's
+      // own resting noise floor and outside gen5's.
+      final accel = [
+        for (final s in samples) AccelSample(s.tsMs, 0, 0, 1.06),
+      ];
+      expect(tempCircadian(samples, deviceFamily: 'gen4', accel: accel).note,
+          contains('dropped=0'));
+      expect(tempCircadian(samples, deviceFamily: 'gen5', accel: accel).present,
+          isFalse,
+          reason: 'gen5 masks all of it, leaving nothing to fit');
     });
 
     test('activity de-masking drops high-motion epochs', () {
@@ -86,13 +110,14 @@ void main() {
         final motion = i % 3 == 0 ? 0.5 : 0.0;
         accel.add(AccelSample(tMs, 1.0 + motion, 0, 0));
       }
-      final m = tempCircadian(samples, accel: accel, motionGate: 0.08);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', accel: accel, motionGate: 0.08);
       expect(m.inputs_used, contains('accel'));
       expect(m.note, contains('demasked'));
     });
 
     test('absent on too-few epochs', () {
-      final m = tempCircadian([AdcSample(0, 2000)]);
+      final m = tempCircadian([AdcSample(0, 2000)], deviceFamily: 'gen4');
       expect(m.present, isFalse);
       expect(m.confidence, 0);
     });
@@ -331,6 +356,32 @@ void main() {
       expect(cusumChangePoints([for (var i = 0; i < 10; i++) 55.0 + i], h: 5.0),
           isEmpty);
     });
+
+    // MT-10. The BIC penalty is a significance test; the MDC gate is an
+    // effect-size test. A step the instrument cannot resolve is not a finding
+    // however clean it is, and this is the guard that gets quietly dropped.
+    test('a statistically clean step SMALLER than the MDC is not reported', () {
+      // Noisy pre-segment (MAD ~1.5 bpm ⇒ MDC ~4 bpm) with a perfectly clean
+      // 1 bpm step: binary segmentation loves it, the body cannot resolve it.
+      const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      final x = [
+        for (var i = 0; i < 30; i++) 55.0 + noise10[i % 10],
+        for (var i = 0; i < 30; i++) 56.0 + noise10[i % 10],
+      ];
+      final m = segmentChangePoints(x, minSeg: 7);
+      expect(m.value!.changePoints, isEmpty);
+      expect(m.note, contains('dropped=1'));
+      expect(m.note, contains('UNDER-SPLITS'),
+          reason: 'an empty result is not evidence of stability');
+
+      // The same series with a 6 bpm step clears the MDC and is reported.
+      final big = [
+        for (var i = 0; i < 30; i++) 55.0 + noise10[i % 10],
+        for (var i = 0; i < 30; i++) 61.0 + noise10[i % 10],
+      ];
+      expect(segmentChangePoints(big, minSeg: 7).value!.changePoints,
+          hasLength(1));
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -450,7 +501,8 @@ void main() {
       }
       // Cosinor runs (the ~9-min span has no full day => low R²/short, but it
       // MUST NOT crash and MUST return an honest Metric).
-      final m = tempCircadian(temp, accel: accel, epochMin: 1);
+      final m =
+          tempCircadian(temp, deviceFamily: 'gen4', accel: accel, epochMin: 1);
       expect(m.tier, Tier.relative);
       // ignore: avoid_print
       print('REAL temp cosinor: present=${m.present} '

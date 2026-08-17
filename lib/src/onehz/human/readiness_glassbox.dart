@@ -108,6 +108,13 @@ class GlassBoxReadiness {
 /// Drivers: contribution_i = weight_i · (orientedPct_i − 50). Ranked by
 /// magnitude; a driver is NAMED in the narrative only if its raw change cleared
 /// its MDC (robust baseline gate). The breakdown lists ALL inputs regardless.
+///
+/// THE NARRATIVE DESCRIBES DRIVERS. IT NEVER PRESCRIBES. no "take it easy", no
+/// "you're ready for a hard session", no session type attached to a score —
+/// same refusal as `strainTarget` in human/coaching.dart, which carries the
+/// argument in full. this function already complies; the note is here so the
+/// next person to edit the narrative strings knows the constraint before they
+/// write one in the imperative mood.
 @Deprecated(
   'DUPLICATE readiness — use readinessComposite (wellness/readiness_composite.dart) '
   'as the canonical/headline recovery. glassBoxReadiness is retained ONLY for its '
