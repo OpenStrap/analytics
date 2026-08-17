@@ -1,9 +1,17 @@
 // FOUNDATION — robust personal baseline.
 //
-// median + MAD (Leys 2013; Iglewicz-Hoaglin modified-z, flag |M|>3.5),
-// coverage-gate (Plews 2014: require ≥minValid of window), and an MDC gate so
-// we only surface a change beyond the metric's minimal detectable change
-// (Hopkins 2000). MAD=0 is guarded for quantized data.
+// median + MAD (Leys 2013; Iglewicz-Hoaglin modified-z, flag |M|>3.5), a
+// MINIMUM-COUNT gate, and an MDC gate so we only surface a change beyond the
+// metric's minimal detectable change (Hopkins 2000). MAD=0 is guarded for
+// quantized data.
+//
+// NOT A COVERAGE GATE, and it used to cite Plews 2014 as if it were. Plews'
+// compliance result is about ≥3 valid days PER WEEK — a fraction, with a
+// denominator. [robustBaseline] is handed a list of values that are all valid
+// by construction, so it has no denominator to divide by: `sufficient` can only
+// ever mean "the caller passed at least minValid values". A caller that DOES
+// know its window length can say so by building [RobustBaseline] itself with a
+// larger [RobustBaseline.nWindow]; nothing in this file can infer it.
 //
 // HONESTY: insufficient coverage => baseline absent (null), never an
 // optimistic guess.
@@ -15,8 +23,14 @@ class RobustBaseline {
   final double? center; // median of the window (null if no data)
   final double? scale; // MAD (scaled to σ); null if undefined
   final int nValid;
+
+  /// Days the window SPANNED, when the caller knows it. [robustBaseline] cannot
+  /// — it receives only valid values — and sets it equal to [nValid]; a caller
+  /// that constructs this directly may pass the real span.
   final int nWindow;
-  final bool sufficient; // passed the coverage gate
+
+  /// [nValid] ≥ minValid. A minimum-COUNT gate, not a coverage fraction.
+  final bool sufficient;
   const RobustBaseline({
     required this.center,
     required this.scale,
@@ -39,8 +53,9 @@ class RobustBaseline {
 }
 
 /// Build a robust baseline from a window of values (already filtered to the
-/// metric of interest). [minValid] coverage gate (e.g. 3 for a 7-day window per
-/// Plews 2014). Values are taken as-is; pass only valid samples.
+/// metric of interest). [minValid] is a MINIMUM-COUNT gate on those values —
+/// see the file header for why it is not a coverage gate. Values are taken
+/// as-is; pass only valid samples.
 RobustBaseline robustBaseline(List<double> window, {int minValid = 3}) {
   final n = window.length;
   if (n == 0) {

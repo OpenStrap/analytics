@@ -319,6 +319,20 @@ void main() {
       expect(j['tst_sec'], s.tstSec);
       expect(j['confidence'], greaterThan(0));
 
+      // SLP-01. Half of a night's confidence is the WINDOW's confidence, and it
+      // used to be van Hees' — a detector whose `onsetIdx`/`offsetIdx` this
+      // pipeline never reads. It is now van Hees' own construction (length up
+      // to a 7 h night, clamped to [0.3, 0.95]) applied to the window that
+      // actually shipped, so it is a statement about `in_bed_sec`.
+      // Every second here carries a valid HR and no RR was passed, so
+      // stagingConf is exactly (0.35 + 0.25*0) * 1.0 = 0.35 and the whole
+      // confidence is pinned.
+      final windowConf = (s.inBedSec! / (7 * 3600)).clamp(0.3, 0.95);
+      expect(
+          s.confidence,
+          closeTo(((windowConf + 0.35) / 2.0).clamp(0.0, kMaxSleepConfidence),
+              1e-9));
+
       // 4-CLASS HYPNOGRAM (Awake/Light/Deep/REM): the per-second stages4 stream
       // is aligned 1:1 with stages, uses only the four labels, and its Light/Deep
       // partition of NREM reconciles exactly with the combined nremSec.
@@ -1001,10 +1015,13 @@ void _slp13Tests() {
   var i = 0;
   while (now < hours * 3600000) {
     final h = now / 3600000;
-    // Alternating deviation => every successive difference is 2*amp, so the
-    // bin RMSSD is exactly 2*amp and the expected shape is constructed, not
-    // guessed at.
-    final v = 1000.0 + ampMs(h) * (i.isEven ? 1 : -1);
+    // A 4-beat cycle [0, +2a, 0, -2a] => every successive difference is 2*amp,
+    // so the bin RMSSD is exactly 2*amp and the expected shape is constructed,
+    // not guessed at. It used to be a straight alternation, which has the same
+    // RMSSD but a difference-series lag-1 ACF of exactly −1 — indistinguishable
+    // from pure beat-timing jitter, which `hrvTime` now refuses outright
+    // (kNnDiffAcf1Floor). This shape has ACF1 = 0 and no real night alternates.
+    final v = 1000.0 + 2 * ampMs(h) * math.sin(2 * math.pi * i / 4);
     now += v;
     i++;
     if (gap != null && h >= gap.fromH && h < gap.toH) continue;

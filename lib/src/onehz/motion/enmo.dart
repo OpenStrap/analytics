@@ -57,20 +57,34 @@ class MotionMinute {
   final double tsMinStartMs; // wall-clock start of the minute (ms)
   final int nSamples; // valid samples that fed this minute
 
-  /// ⚠️ MEANINGLESS ON THE WHOOP 1 Hz SUBSTRATE — diagnostics only.
+  /// ⚠️ SECOND-CHOICE ON THE WHOOP 1 Hz SUBSTRATE, and USELESS against a FIXED
+  /// gravity reference — prefer [dynAmp] for any decision.
   ///
-  /// ENMO is `mean(max(0, ‖a‖ − gRef))`, which assumes ‖a‖ carries dynamic
-  /// acceleration. The band's 1 Hz historical record does NOT: it ships a fused
-  /// gravity/orientation vector (see [dynAmp]). Measured over 269,486 real
-  /// samples, ‖a‖ sits at p50 = 1.027 g with only 0.030% above 1.3 g — during
-  /// the single most vigorous minute of a day it was 1.033 g ± 0.006.
+  /// ENMO is `mean(max(0, ‖a‖ − gRef))`, so it is only as good as `gRef`. The
+  /// band's 1 Hz record is a heavily smoothed, largely gravity-dominated
+  /// vector, and the per-family gravity offset is the same order as the signal:
+  /// measured over the FULL 671,847-row gen4 corpus, p50 ‖a‖ = 1.0239 g against
+  /// a calibrated gRef of 1.0277 (MG 1.0014, W5 0.9977). Subtract a hard 1.0
+  /// and you are reading calibration, not movement.
   ///
-  /// So on this substrate ENMO reduces to roughly `1.03 − gRef`: a pure
-  /// calibration artifact carrying ZERO signal. That is precisely why an early
-  /// step estimator built on it reported 42,155 steps at gRef 0.97 and 0 at
-  /// 1.02. Do NOT threshold this, and do NOT feed it to anything expecting
-  /// accelerometry (Brage fusion, MET/cut-point models). It stays only because
-  /// a HIGH-RATE source (the 100 Hz live stream) does carry real accel.
+  /// CORRECTED 2026-08-17 (audit MOT-07). This docstring used to say ‖a‖ was
+  /// "only 0.030 % above 1.3 g" and that ENMO carried "ZERO signal". Both are
+  /// wrong, and they were being cited as the reason real capability stayed
+  /// unwired. Re-measured over the full corpus: **2,018 samples (0.300 %)
+  /// exceed 1.3 g**, 419 exceed 1.5 g, 22 exceed 2 g, max 3.0437 g. Per-minute
+  /// ENMO against the auto-calibrated reference is p50 0.0050 / p75 0.0151 /
+  /// p90 0.0271 / p99 0.1184 / max 0.3802 g, and 391 minutes (3.49 %) clear
+  /// 0.05 g — the dominant-wrist light-activity boundary of the Hildebrand
+  /// cut-point family. Association with the same minute's mean HR:
+  /// **Spearman(ENMO, HR) = 0.244** against **Spearman(dynAmp, HR) = 0.689**
+  /// (Spearman(ENMO, dynAmp) = 0.207). So ENMO carries roughly a THIRD of
+  /// dynAmp's association with effort — not zero.
+  ///
+  /// What stays true: ENMO is calibration-FRAGILE where dynAmp is
+  /// calibration-INVARIANT, which is why an early step estimator built on it
+  /// reported 42,155 steps at gRef 0.97 and 0 at 1.02. Threshold it only
+  /// against a reference calibrated on the SAME data ([EnmoResult.gRef]), never
+  /// against a literal 1.0.
   final double enmo;
 
   /// ⚠️ Same caveat as [enmo] on the 1 Hz substrate — see above.

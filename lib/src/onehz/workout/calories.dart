@@ -1,8 +1,10 @@
 // Per-bout calorie estimation (calories.py / WorkoutDetector.swift).
 //
 // HR-based: Keytel et al. 2005 active EE (kJ/min from HR, weight, age, sex) +
-// revised Harris–Benedict BMR for the resting floor. Sex-specific coefficients
-// (male / female / nonbinary). APPROXIMATE — not laboratory calorimetry, not
+// revised Harris–Benedict BMR for the resting floor. Keytel publishes TWO
+// coefficient sets, male and female; the third set here (`nonbinary`) is OUR
+// element-wise INTERPOLATION of those two, not a third published equation —
+// see [Calories.nonbinary]. APPROXIMATE — not laboratory calorimetry, not
 // medical advice.
 //
 // Faithfulness note: the coefficients, the 86_400 BMR/s divisor, the 251.04
@@ -73,6 +75,17 @@ class Calories {
     workoutAge: 0.0740,
     workoutAlpha: -20.4022,
   );
+  /// INTERPOLATED, NOT PUBLISHED (audit MOT-10). Keytel 2005 and revised
+  /// Harris–Benedict each publish exactly two sex sets; every constant below is
+  /// the element-wise ARITHMETIC MEAN of [male] and [female]
+  /// ((88.362+447.593)/2 = 267.9775, (0.1988−0.1263)/2 = 0.03625, …). The
+  /// weight term is the one to be careful with: male +0.1988 and female −0.1263
+  /// have OPPOSITE SIGNS, so the mean 0.03625 kJ/min/kg belongs to neither
+  /// regression and is not a fitted quantity at all. It is used deliberately —
+  /// `workoutSex` routes null/'other'/unrecognised here by design, and the mean
+  /// of the two is a smaller lie than guessing one of them — but nothing about
+  /// it is Keytel's. Same convention, same wording, as [mifflinBmrKcalDay]'s
+  /// nonbinary constant.
   static const CalorieCoeffs nonbinary = CalorieCoeffs(
     restingAlpha: 267.9775,
     restingWeight: 11.322,
@@ -87,6 +100,35 @@ class Calories {
   /// Bout active gate: a sample burns the Keytel active rate above
   /// resting + this fraction of HRR, else the resting BMR rate.
   static const double activeHRRFraction = 0.30;
+
+  /// THE HR-FLEX POINT for [dailyEnergy], as a fraction of HRmax.
+  ///
+  /// RAISED 0.50 → 0.65 on 2026-08-17 (audit MOT-02). This number decides which
+  /// waking minutes get billed the Keytel rate at all, and 0.50 put it at
+  /// 0.50 × 187 = 93.5 bpm for a 30 y/o — a heart rate a person reaches by
+  /// standing up. Keytel's regression is fitted on STEADY-STATE SUBMAXIMAL
+  /// EXERCISE with chest/ECG HR; below the exercise domain there is no HR↔EE
+  /// slope to extrapolate along (that absence is the entire premise of the
+  /// HR-FLEX method this function cites — Spurr 1988 / Ceesay 1989 assign
+  /// resting EE below flex and an INDIVIDUALLY CALIBRATED line above it). Ours
+  /// is a population line, so the gate has to sit where that line is at least
+  /// approximately true. 0.65 × HRmax is the ACSM moderate-intensity floor
+  /// (64 % HRmax ≈ 40 % HRR) — the published boundary below which movement is
+  /// not counted as exercise at all, and the region Keytel's submaximal
+  /// exercise protocol does not sample. It is a choice, not a number Keytel
+  /// prints; what Keytel prints is a regression with no resting arm.
+  ///
+  /// MEASURED CONSEQUENCE, whoop-4.db, 9 days, 70 kg/170 cm/30 y male stand-in,
+  /// Tanaka HRmax 187: billed minutes 39.4 % → 4.9 % of the wake window; daily
+  /// ACTIVE energy min/median/max 769/1,955/4,062 → 9/48/1,917 kcal; daily
+  /// TOTAL 1,544–5,582 → 793–3,437 kcal. Quiet days lose essentially all their
+  /// "active" energy, which is the correction: they never earned it. Real
+  /// sessions keep most of theirs (a 103-min-above-50 %-HRR day: 3,462 → 1,202).
+  ///
+  /// This is still a point estimate with no error band, deliberately: Keytel
+  /// publishes a POPULATION MAPE, which is not this user's error distribution,
+  /// and drawing bounds around the number would claim we computed them.
+  static const double defaultActiveFraction = 0.65;
 
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
@@ -171,9 +213,11 @@ class Calories {
   ///              filling any minute that has no HR sample.
   ///
   /// [hrPerMin] is per-minute mean HR (bpm); 0/absent minutes fall back to BMR.
-  /// [activeFraction] is the HR-flex point as a fraction of HRmax (default 0.50,
-  /// matching the edge pipeline): minutes below it burn BMR only, so a quiet day
-  /// reads ≈ basal and Keytel's low-HR over-estimate can't inflate "active".
+  /// [activeFraction] is the HR-flex point as a fraction of HRmax
+  /// ([defaultActiveFraction] = 0.65 — read its doc before moving it, it is the
+  /// single number that decides what "active" means): minutes below it burn BMR
+  /// only, so a quiet day reads ≈ basal and Keytel's low-HR extrapolation can't
+  /// inflate "active".
   /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
   ///
   /// [hrmax] IS REQUIRED, and there is deliberately no fallback for it. It used
@@ -192,7 +236,7 @@ class Calories {
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     required double hrmax,
-    double activeFraction = 0.50,
+    double activeFraction = defaultActiveFraction,
     int dayMinutes = 1440,
   }) {
     // (weight/height/age still can't be told apart from their defaults here:

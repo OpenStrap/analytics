@@ -78,18 +78,137 @@ class TempCircadian {
       };
 }
 
-/// What each family's skin-temp column actually holds, and how still "still"
-/// is on its accelerometer. Both are sensor properties, not physiology.
+/// What each family's skin-temp column actually holds, how still "still" is on
+/// its accelerometer, and how far BELOW a night's own level a reading can fall
+/// and still be skin. All three are sensor properties, not physiology.
 class _TempCal {
   final String unit;
   final double motionGate; // g of |‖a‖ − 1| above which an epoch is masked
-  const _TempCal(this.unit, this.motionGate);
+  /// One-sided settle band, in [unit]: a sample more than this far BELOW the
+  /// night's median is not settled skin (see [nightlySkinTemp]). Null = this
+  /// family has no measured band, so the settled mean REFUSES for it rather
+  /// than borrow gen4's counts.
+  final double? settleBandLow;
+  const _TempCal(this.unit, this.motionGate, this.settleBandLow);
 }
 
 const Map<DeviceFamily, _TempCal> _tempCal = {
-  DeviceFamily.gen4: _TempCal('adc_counts', 0.10),
-  DeviceFamily.gen5: _TempCal('centi_c', 0.04),
+  // gen4's 40 counts: on the 8 real gen4 nights in whoop-4.db the seven clean
+  // nights keep 94.4–100.0 % of their sleep-window samples above
+  // (night median − 40), while the one night carrying a two-hour cold segment
+  // keeps 78.7 %. The band is ~6× the 6.47-count between-night SD and ~1.4× the
+  // 29.3-count corpus-wide circadian range, so ordinary rhythm survives it.
+  DeviceFamily.gen4: _TempCal('adc_counts', 0.10, 40.0),
+  // gen5 has NO measured band. The exports carry 106 (W5) and 933 (MG) non-zero
+  // skin-temp rows in total — not one night clears the 60-sample floor — so
+  // there is nothing to calibrate against. Scaling gen4's 40 counts by a
+  // counts-per-°C guess would be gen4's number wearing a gen5 badge, which is
+  // exactly what device.dart's contract forbids. Fill this in from gen5 nights,
+  // not from arithmetic.
+  DeviceFamily.gen5: _TempCal('centi_c', 0.04, null),
 };
+
+/// A nightly skin-temp mean that knows how much of the night it is made of.
+class SettledSkinTemp {
+  /// Mean of the SETTLED samples only (see [nightlySkinTemp]), in [unit].
+  final double mean;
+
+  /// Fraction of the night's valid samples that were settled, 0..1. This is the
+  /// scalar RD-15 asks for (`skin_temp_settled_fraction`) — persist it.
+  final double settledFraction;
+
+  /// `adc_counts` (gen4) or `centi_c` (gen5). Never °C on screen.
+  final String unit;
+  const SettledSkinTemp(this.mean, this.settledFraction, this.unit);
+  Map<String, dynamic> toJson() => {
+        'mean': round6(mean),
+        'settled_fraction': round6(settledFraction),
+        'unit': unit,
+      };
+}
+
+/// Minimum settled fraction a night must reach before its skin-temp mean may be
+/// USED as a measurement. 0.80 is the audit's floor and costs one night in
+/// eight on the real gen4 corpus.
+const double kMinSettledFraction = 0.80;
+
+/// Nightly skin-temp mean over the SETTLED portion of a sleep window.
+///
+/// THE PROBLEM THIS EXISTS FOR. The plain mean of a sleep window's skin-temp
+/// samples cannot tell a fever from a strap that was just put on. On the real
+/// gen4 corpus one night carries a two-hour segment ~100 counts below the rest
+/// of that same night — a cold strap, HR present throughout, so not off-wrist,
+/// just not yet at skin temperature — and it displaces that night's mean by
+/// more than the entire 29.3-count daily rhythm. Every consumer of the nightly
+/// mean (readiness's temp driver, `tempIllnessFlag`, `multivariateAnomaly`'s
+/// temp column, `tempCircadian`) inherits that displacement.
+///
+/// THE RULE. A sample is SETTLED when it sits no more than the family's
+/// [_TempCal.settleBandLow] BELOW the night's own median. One-sided on purpose:
+/// warm-up and off-wrist both read LOW, while a fever reads HIGH and must pass
+/// through untouched — a symmetric band would delete the signal the channel
+/// exists for.
+///
+/// Returns the settled mean plus the settled fraction. ABSENT when the family
+/// has no measured band, when there are fewer than [minSamples] valid samples,
+/// or when the settled fraction is below [minSettledFraction] — in that last
+/// case the night has no usable temperature and the consumer must drop the
+/// input, not substitute one.
+///
+/// The channel itself is NEVER removed or nulled by this: it gates USE.
+Metric<SettledSkinTemp> nightlySkinTemp(
+  List<AdcSample> samples, {
+  required String? deviceFamily,
+  double minSettledFraction = kMinSettledFraction,
+  int minSamples = 60,
+}) {
+  const inputs = ['skin_temp_adc', 'device_family'];
+  final cal = calibrationFor(_tempCal, deviceFamily);
+  if (cal == null || cal.settleBandLow == null) {
+    return Metric<SettledSkinTemp>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: unknownFamilyNote(deviceFamily),
+    );
+  }
+  final v = [
+    for (final s in samples)
+      if (s.valid && s.adc > 0) s.adc
+  ];
+  if (v.length < minSamples) {
+    return Metric<SettledSkinTemp>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: needBaselineNote(have: v.length, need: minSamples),
+    );
+  }
+  final floor = median(v)! - cal.settleBandLow!;
+  final kept = [
+    for (final x in v)
+      if (x >= floor) x
+  ];
+  final frac = kept.length / v.length;
+  if (frac < minSettledFraction) {
+    return Metric<SettledSkinTemp>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: 'unsettled_skin_temp:settled=${round6(frac)},'
+          'need=${round6(minSettledFraction)} — the strap spent part of this '
+          'night below skin temperature (warm-up or off-body), so the nightly '
+          'mean is not a measurement of this person',
+    );
+  }
+  return Metric<SettledSkinTemp>(
+    value: SettledSkinTemp(mean(kept)!, frac, cal.unit),
+    confidence: clamp(frac, 0.0, 1.0),
+    tier: Tier.relative,
+    inputs_used: inputs,
+    note: 'RELATIVE nightly skin-temp mean over the SETTLED portion only '
+        '(${round6(frac)} of valid samples, band ${cal.settleBandLow} '
+        '${cal.unit} below the night median; one-sided so a fever passes). '
+        'Unit is ${cal.unit} — never °C, never compared across families.',
+  );
+}
 
 /// Relative skin-temp circadian analysis on a (de-masked) time-series of the
 /// relative temp ADC.
@@ -258,9 +377,13 @@ CircadianNonparam? _nonparam(
   }
   var profVar = 0.0;
   if (profile.isNotEmpty) {
-    final pm = mean(profile)!;
+    // van Someren's IS takes BOTH variances about the GRAND mean. Using the
+    // profile's own mean here (which it did until 2026-08-17) minimises profVar
+    // by construction, so IS came out biased low whenever epoch-of-day coverage
+    // was unbalanced across days — the normal case (per-day bin coverage on real
+    // gen4 data runs 14/24 to 24/24).
     for (final v in profile) {
-      profVar += (v - pm) * (v - pm);
+      profVar += (v - grand) * (v - grand);
     }
     profVar /= profile.length;
   }

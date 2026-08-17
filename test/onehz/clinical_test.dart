@@ -23,6 +23,57 @@ void main() {
       expect(hrvTime([800]).present, isFalse);
     });
 
+    test('HRV-02: RMSSD/pNN50 refused when the differences are white noise',
+        () {
+      // Differencing a smooth tachogram leaves ACF1 near 0; differencing white
+      // noise leaves exactly -0.5. gen5/MG nights measure -0.426..-0.517 —
+      // essentially pure jitter — while every gen4 night sits at -0.057..-0.324.
+      final rnd = math.Random(7);
+      final jitter = <double>[
+        for (var i = 0; i < 600; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      final noisy = hrvTime(jitter);
+      expect(noisy.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(noisy.value!.diffAcf1!, closeTo(-0.5, 0.1),
+          reason: 'differenced white noise');
+      expect(noisy.value!.rmssd, isNull, reason: 'jitter, not vagal tone');
+      expect(noisy.value!.pnn50, isNull);
+      // SDNN is a dispersion of LEVELS and survives — the header's advice.
+      expect(noisy.value!.sdnn, isNotNull);
+      expect(noisy.note, contains('rmssd_refused:acf1='));
+
+      // A smooth respiratory-sinus-shaped series keeps its RMSSD.
+      final smooth = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40 * math.sin(2 * math.pi * i / 16)
+      ];
+      final clean = hrvTime(smooth);
+      expect(clean.value!.diffAcf1!, greaterThan(kNnDiffAcf1Floor));
+      expect(clean.value!.rmssd, isNotNull);
+      expect(clean.value!.pnn50, isNotNull);
+    });
+
+    test('HRV-02: confidence carries jitter and artifact, not beat count alone',
+        () {
+      // It used to be clamp(n/250, .3, .95), which published 0.95 on all 13
+      // nights of the audit corpus. n/250 saturates after ~4 min, so on a whole
+      // night confidence was a constant.
+      final smooth = <double>[
+        for (var i = 0; i < 600; i++) 1000 + 40 * math.sin(2 * math.pi * i / 16)
+      ];
+      final base = hrvTime(smooth).confidence;
+      expect(base, closeTo(0.95, 1e-9),
+          reason: 'a clean series still tops out');
+      expect(hrvTime(smooth, artifactFraction: 0.15).confidence,
+          closeTo(0.85, 1e-9),
+          reason: '15% artifact must cost confidence, as hrvFreq already does');
+      final rnd = math.Random(7);
+      final jitter = <double>[
+        for (var i = 0; i < 600; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      expect(hrvTime(jitter).confidence, 0.3,
+          reason: 'confidence bottoms out where RMSSD is refused');
+    });
+
     test('successive differences do not span a DROPPED run', () {
       // an-clinical-6. correctRr drops multi-beat artifact runs while advancing
       // its clock across them, so nn[i-1] and nn[i] can sit either side of a
@@ -203,7 +254,11 @@ void main() {
       expect(dc.value!.capacity, greaterThan(0));
       expect(ac.value!.capacity, lessThan(0));
       expect(dc.value!.kind, 'DC');
-      expect(dc.value!.riskTier, isNotNull);
+      // HRV-03. Bauer's post-MI mortality tier is GONE from the payload — its
+      // cut-offs are 24-h Holter ECG in post-MI patients, and on one subject in
+      // one 9-day window it read 'low' on gen4 (DC 7.6-9.9), 'intermediate' on
+      // MG and 'high' on WHOOP 5 (DC 1.70): the tier was decided by the strap.
+      expect(dc.toJson((v) => v.toJson()).toString(), isNot(contains('risk')));
     });
     test('absent without enough beats', () {
       expect(decelerationCapacity([1000, 1010, 990]).present, isFalse);
@@ -610,9 +665,13 @@ void main() {
         final win = i ~/ 300;
         final inBurst = win == 2 || win == 5;
         final base = 1000.0;
+        // Both parts are OSCILLATIONS, not alternations: a perfectly
+        // alternating series has diff-ACF1 = −1, which the jitter floor now
+        // (correctly) refuses as pure beat-timing noise, and no real arousal
+        // burst looks like that.
         final v = inBurst
-            ? base + (i.isEven ? 250.0 : -250.0) // ±250 ms whipsaw
-            : base + (i.isEven ? 8.0 : -8.0); // small ±8 ms wobble
+            ? base + 250.0 * math.sin(2 * math.pi * i / 4) // fast ±250 ms swing
+            : base + 16.0 * math.sin(2 * math.pi * i / 12);
         nn.add(v);
         t += v;
         times.add(t);
@@ -622,7 +681,7 @@ void main() {
       // Whole-night RMSSD is dragged way up by the bursts.
       expect(whole, greaterThan(100),
           reason: 'whole-night RMSSD inflated by bursts');
-      // The stable wobble RMSSD ≈ sqrt((16^2)) ≈ 16 ms; robust median stays low.
+      // The stable wobble RMSSD ≈ 8 ms; robust median stays low.
       expect(robust, lessThan(40),
           reason: 'median-of-windows is robust to a few burst windows');
       expect(robust, lessThan(whole / 3),
@@ -634,7 +693,8 @@ void main() {
       final times = <double>[];
       var t = 0.0;
       for (var i = 0; i < 1200; i++) {
-        nn.add(1000.0 + (i.isEven ? 10.0 : -10.0));
+        // Slow oscillation, not an alternation — see the burst test above.
+        nn.add(1000.0 + 10.0 * math.sin(2 * math.pi * i / 12));
         t += nn.last;
         times.add(t);
       }
@@ -689,6 +749,36 @@ void main() {
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
     });
+
+    test('HRV-02: no difference is manufactured across a REJECTED beat', () {
+      // The window cleaner compacts, so differencing straight down its output
+      // spanned every rejected beat with one invented difference. Here the two
+      // sides of the ectopic sit 100 ms apart, so the seam Δ is 100 ms while
+      // every real Δ is 0. THIS is most of the "gen5 reads 2x gen4" gap: on the
+      // real corpus it inflated the nightly headline by 51-102 % on MG
+      // (87.7 -> 58.2, 82.9 -> 53.0, 76.9 -> 48.4 ms) and 2-13 % on gen4.
+      final rr = <double>[900, 900, 900, 200, 1000, 1000, 1000];
+      final ts = <double>[for (var i = 0; i < 7; i++) 1000.0 + i * 1000.0];
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      expect(m.present, isTrue);
+      expect(m.value, closeTo(0.0, 1e-9),
+          reason: '2 runs of flat beats, no seam difference');
+    });
+
+    test('HRV-02: the nightly headline is ABSENT on a jitter-dominated night',
+        () {
+      // WHOOP 5 measures ACF1 -0.50/-0.51 on this series even after the
+      // window cleaner, so the headline 111.8 / 118.7 ms was noise. Absent
+      // beats plausible: readiness treats a null HRV driver as absent.
+      final rnd = math.Random(11);
+      final rr = <double>[
+        for (var i = 0; i < 900; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      final ts = <double>[for (var i = 0; i < 900; i++) 1000.0 + i * 1000.0];
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 1801);
+      expect(m.present, isFalse);
+      expect(m.note, contains('rmssd_refused:acf1='));
+    });
   });
 
   // The CALIBRATION of this scale (what a rest / active / hard / maximal day
@@ -724,7 +814,7 @@ void main() {
     });
   });
 
-  group('StrainScorer (Edwards/Banister TRIMP → 0–100)', () {
+  group('StrainScorer (Banister TRIMP → 0–100)', () {
     test('trimpToStrain pins: 0→0, 7200→~100, monotone, 2dp', () {
       expect(StrainScorer.trimpToStrain(0), 0.0);
       // ln(7201)/ln(7201)=1 → 100.
@@ -788,17 +878,14 @@ void main() {
       expect(durs.reduce(math.max), closeTo(1 / 60.0, 1e-12));
     });
 
-    test(
-        'Edwards zone weight at %HRR boundaries (RHR=0,reserve=100 → bpm=%HRR)',
-        () {
-      int w(double pct) => StrainScorer.zoneWeight(pct, 0, 100);
-      expect(w(49), 0);
-      expect(w(50), 1);
-      expect(w(60), 2);
-      expect(w(70), 3);
-      expect(w(80), 4);
-      expect(w(90), 5);
-      expect(w(100), 5);
+    test('MOT-11: no HRmax → no number, not a 220−age stand-in', () {
+      // `strain` used to fall back to defaultMaxHR() = 190 — a 30 y/o's
+      // ceiling applied to whoever's wrist arrived. The perimeter caught it;
+      // the source now does.
+      final bpm = List<double>.filled(700, 150.0);
+      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
+      expect(StrainScorer.strain(bpm, ts, maxHR: null), isNull);
+      expect(StrainScorer.strain(bpm, ts, maxHR: 190), isNotNull);
     });
 
     test('Banister monotonic increasing in intensity', () {

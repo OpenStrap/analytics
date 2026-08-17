@@ -1,8 +1,7 @@
 import 'dart:math' as math;
 
 import '../types.dart';
-import '../util.dart'
-    show averageRanks, benjaminiHochberg, mean, normalTwoSidedP, theilSen;
+import '../util.dart' show averageRanks, benjaminiHochberg, mean, theilSen;
 
 class SleepNeed {
   final double needSec;
@@ -254,6 +253,13 @@ class JournalEffect {
 
   /// Pooled within-group SD used for [cohensD]; null when not computed.
   final double? pooledSd;
+
+  /// Two-sided permutation p for the difference of means, and the
+  /// Benjamini-Hochberg q over the whole (tag × outcome) grid this call
+  /// returned. Null when the cell was not tested. [meaningful] is gated on q,
+  /// never on p — see the doc comment.
+  final double? p;
+  final double? q;
   const JournalEffect({
     required this.outcome,
     required this.delta,
@@ -265,6 +271,8 @@ class JournalEffect {
     required this.meaningful,
     this.cohensD,
     this.pooledSd,
+    this.p,
+    this.q,
   });
 }
 
@@ -280,13 +288,26 @@ class JournalTagCorrelation {
 /// series of a different length cannot be attributed to dates at all, so it is
 /// reported as insufficient rather than silently truncated or index-crashed.
 ///
-/// [minEffectPct] and [minCohensD] set the "meaningful" bar. A percentage
-/// difference of means alone is NOT evidence: with 2 days per side, two
-/// noisy series routinely differ by several percent. The verdict therefore also
-/// requires a standardized effect size (Cohen's d = delta / pooled SD ≥ 0.5,
-/// Cohen's conventional "medium" effect) so within-group spread is accounted
-/// for. When both sides are exactly constant (pooled SD = 0) d is undefined and
-/// we require [minNForZeroSpread] observations per side before calling it.
+/// [minEffectPct] and [minCohensD] are REPORTING FLOORS, not the verdict. A
+/// percentage difference of means alone is NOT evidence: with 2 days per side,
+/// two noisy series routinely differ by several percent. A standardized effect
+/// size (Cohen's d = delta / pooled SD ≥ 0.5) is barely better, because at n = 2
+/// the sample d is the same noisy Δ over an equally noisy denominator. Simulated
+/// under the pre-2026-08-17 rule (`|Δ%| ≥ 3 AND |d| ≥ 0.5`, outcome ~ N(60, 8),
+/// no effect at all): a cell was called meaningful **65.5 %** of the time at 2
+/// vs 2 and **42.9 %** at 3 vs 20 — about 14 falsely-meaningful cells on a
+/// routine 8-tag × 4-outcome screen.
+///
+/// SO THE VERDICT IS A TEST, and the same one the numeric sibling uses: a
+/// two-sided permutation p on the difference of means ([permutations] shuffles,
+/// seeded so the same journal always gives the same answer), then
+/// Benjamini-Hochberg across the WHOLE (tag × outcome) grid this call returns,
+/// with `meaningful` gated on q ≤ [fdrAlpha]. At 2 vs 2 there are only six label
+/// assignments, so the smallest reachable p is ~0.33 and no such cell can ever
+/// be called — which is the point.
+///
+/// When both sides are exactly constant (pooled SD = 0) d is undefined and we
+/// require [minNForZeroSpread] observations per side before the floor passes.
 List<JournalTagCorrelation> journalCorrelations({
   required List<JournalDay> journal,
   required List<String> dates,
@@ -294,54 +315,79 @@ List<JournalTagCorrelation> journalCorrelations({
   double minEffectPct = 3.0,
   double minCohensD = 0.5,
   int minNForZeroSpread = 3,
+  double fdrAlpha = 0.10,
+  int permutations = 999,
+  int permutationSeed = 20260817,
 }) {
-  final allTags = <String>{for (final j in journal) ...j.tags};
+  final allTags = <String>{for (final j in journal) ...j.tags}.toList()..sort();
   final tagByDate = {for (final j in journal) j.date: j.tags};
-  final out = <JournalTagCorrelation>[];
+  // One row per (tag, outcome) in emission order. Built first, gated second:
+  // the FDR correction needs the whole family before any verdict can be given.
+  final rows = <({
+    String tag,
+    String outcome,
+    double delta,
+    double? pct,
+    String higherSide,
+    int nTagged,
+    int nUntagged,
+    bool insufficient,
+    double? cohensD,
+    double? pooledSd,
+    bool floorOk,
+    double? p,
+  })>[];
   for (final tag in allTags) {
-    final effects = <JournalEffect>[];
     for (final entry in outcomes.entries) {
       // LENGTH GUARD: `entry.value[i]` used to be indexed by dates.length with
       // no check, so any outcome list shorter than `dates` threw RangeError.
       // A misaligned series is not partially usable — we cannot know which
       // dates the values belong to — so abstain for this outcome.
       if (entry.value.length != dates.length) {
-        effects.add(
-          JournalEffect(
-            outcome: entry.key,
-            delta: 0,
-            pctChange: null,
-            higherSide: 'neither',
-            nTagged: 0,
-            nUntagged: 0,
-            insufficient: true,
-            meaningful: false,
-          ),
-        );
+        rows.add((
+          tag: tag,
+          outcome: entry.key,
+          delta: 0,
+          pct: null,
+          higherSide: 'neither',
+          nTagged: 0,
+          nUntagged: 0,
+          insufficient: true,
+          cohensD: null,
+          pooledSd: null,
+          floorOk: false,
+          p: null,
+        ));
         continue;
       }
       final tagged = <double>[];
       final untagged = <double>[];
+      final vals = <double>[];
+      final inGroup = <bool>[];
       for (var i = 0; i < dates.length; i++) {
         final v = entry.value[i];
         if (v == null) continue;
         final hasTag = tagByDate[dates[i]]?.contains(tag) == true;
         (hasTag ? tagged : untagged).add(v);
+        vals.add(v);
+        inGroup.add(hasTag);
       }
       final insufficient = tagged.length < 2 || untagged.length < 2;
       if (insufficient) {
-        effects.add(
-          JournalEffect(
-            outcome: entry.key,
-            delta: 0,
-            pctChange: null,
-            higherSide: 'neither',
-            nTagged: tagged.length,
-            nUntagged: untagged.length,
-            insufficient: true,
-            meaningful: false,
-          ),
-        );
+        rows.add((
+          tag: tag,
+          outcome: entry.key,
+          delta: 0,
+          pct: null,
+          higherSide: 'neither',
+          nTagged: tagged.length,
+          nUntagged: untagged.length,
+          insufficient: true,
+          cohensD: null,
+          pooledSd: null,
+          floorOk: false,
+          p: null,
+        ));
         continue;
       }
       final taggedMean = tagged.reduce((a, b) => a + b) / tagged.length;
@@ -374,25 +420,49 @@ List<JournalTagCorrelation> journalCorrelations({
               tagged.length >= minNForZeroSpread &&
               untagged.length >= minNForZeroSpread);
 
-      effects.add(
-        JournalEffect(
-          outcome: entry.key,
-          delta: delta,
-          pctChange: pct,
-          higherSide: delta >= 0 ? 'tagged' : 'untagged',
-          nTagged: tagged.length,
-          nUntagged: untagged.length,
-          insufficient: false,
-          meaningful: bigEnough && separated,
-          cohensD: d,
-          pooledSd: pooledSd,
-        ),
-      );
+      rows.add((
+        tag: tag,
+        outcome: entry.key,
+        delta: delta,
+        pct: pct,
+        higherSide: delta >= 0 ? 'tagged' : 'untagged',
+        nTagged: tagged.length,
+        nUntagged: untagged.length,
+        insufficient: false,
+        cohensD: d,
+        pooledSd: pooledSd,
+        floorOk: bigEnough && separated,
+        p: _permTwoSampleP(vals, inGroup, permutations, permutationSeed),
+      ));
     }
-    out.add(JournalTagCorrelation(tag, effects));
   }
-  out.sort((a, b) => a.tag.compareTo(b.tag));
-  return out;
+
+  final qs = benjaminiHochberg([for (final r in rows) r.p]);
+  final byTag = <String, List<JournalEffect>>{};
+  for (var i = 0; i < rows.length; i++) {
+    final r = rows[i];
+    final q = qs[i];
+    byTag.putIfAbsent(r.tag, () => []).add(
+          JournalEffect(
+            outcome: r.outcome,
+            delta: r.delta,
+            pctChange: r.pct,
+            higherSide: r.higherSide,
+            nTagged: r.nTagged,
+            nUntagged: r.nUntagged,
+            insufficient: r.insufficient,
+            meaningful: r.floorOk && q != null && q <= fdrAlpha,
+            cohensD: r.cohensD,
+            pooledSd: r.pooledSd,
+            p: r.p,
+            q: q,
+          ),
+        );
+  }
+  return [
+    for (final tag in allTags)
+      JournalTagCorrelation(tag, byTag[tag] ?? const [])
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -479,19 +549,32 @@ class JournalNumericEffect {
   final int? nWith;
   final int? nWithout;
 
-  /// Two-sided p for this single test, before any correction. Null when no test
-  /// could be run. NOT a publication gate on its own — see [q].
+  /// Two-sided PERMUTATION p for this single test, before any correction —
+  /// labels reshuffled on the 0/1 path, ranks on the dose path. Exact under H₀
+  /// for any marginal and any tie structure, which is what tie-heavy ordinal
+  /// journal fields need. Null when no test could be run. NOT a publication
+  /// gate on its own — see [q]. Note it is NOT the p implied by
+  /// [rhoLow]/[rhoHigh]: that interval is Bonett & Wright, for display.
   final double? p;
 
   /// Benjamini-Hochberg (1995) FDR-adjusted p over THE WHOLE GRID returned by
   /// one call — every field × every outcome. This is the number the "meaningful"
   /// verdict is gated on. Null when [p] is null.
   ///
-  /// Why it is not optional: 9 built-in numeric fields × 4 outcomes is 36
+  /// Why it is not optional: 9 built-in numeric fields × 4 outcomes is up to 36
   /// simultaneous tests. At a per-test 0.05 gate that is ~2 findings from pure
   /// noise for every user, every load — a machine for manufacturing confident
-  /// nonsense out of a journal.
+  /// nonsense out of a journal. The ACTUAL family size is 4 × the fields this
+  /// user really journals (nulls are excluded from m), so it is commonly 4 —
+  /// which is also the multiplier the discreteness floor is checked against.
   final double? q;
+
+  /// MACHINE-READABLE reason when [insufficient] is set for a reason the day
+  /// count alone does not explain — currently only
+  /// `need_history:have=N,need=M`, meaning the permutation test's own
+  /// discreteness floor could not clear the multiplicity correction at N days
+  /// however strong the effect was, and M days would. Null otherwise.
+  final String? note;
 
   const JournalNumericEffect({
     required this.outcome,
@@ -509,6 +592,7 @@ class JournalNumericEffect {
     this.nWithout,
     this.p,
     this.q,
+    this.note,
   });
 }
 
@@ -641,6 +725,94 @@ double _permTwoSampleP(List<double> ys, List<bool> inGroup, int b, int seed) {
   return (ge + 1) / (b + 1);
 }
 
+/// Two-sided permutation p for Spearman's rho: shuffle one rank vector [b]
+/// times and count how often |rho| reaches the observed one.
+///
+/// This is the GATE, while the Bonett & Wright interval below is the DISPLAY.
+/// They are deliberately two different things. The interval's standard error is
+/// a simulation result on CONTINUOUS data (Ruscio 2008, J Mod Appl Stat Methods
+/// 7(2):416-434, found poorer coverage on ordinal data and bootstrap as good or
+/// better) — and journal fields are ordinal by construction: mood is 1–5,
+/// soreness is 1–5, coffees are small integers, every one of them tie-heavy.
+/// It was also being read as a null-hypothesis p while evaluated at the
+/// OBSERVED r, which is the interval SE, not the H₀ SE. Both deviations point
+/// the safe way, so this costs power, not honesty — but a permutation p is
+/// exact under H₀ for any marginal and any tie structure, so there is no reason
+/// to pay for either. Seeded, like [_permTwoSampleP], so the same journal always
+/// yields the same p.
+double _permSpearmanP(List<double> xs, List<double> ys, int b, int seed) {
+  final rx = averageRanks(xs);
+  final ry = averageRanks(ys);
+  final obs = (_pearson(rx, ry) ?? 0.0).abs();
+  final rng = math.Random(seed);
+  final shuffled = [...ry];
+  var ge = 0;
+  for (var k = 0; k < b; k++) {
+    shuffled.shuffle(rng);
+    final r = _pearson(rx, shuffled);
+    if (r != null && r.abs() >= obs - 1e-12) ge++;
+  }
+  return (ge + 1) / (b + 1);
+}
+
+/// n! as a double, +inf on overflow. Only ever compared against a threshold.
+double _factorial(int n) {
+  var r = 1.0;
+  for (var i = 2; i <= n; i++) {
+    r *= i;
+    if (!r.isFinite) return double.infinity;
+  }
+  return r;
+}
+
+/// C(n, k) as a double, +inf on overflow. Only ever compared against a
+/// threshold, so the saturation is harmless.
+double _binom(int n, int k) {
+  if (k < 0 || k > n) return 0;
+  var r = 1.0;
+  for (var i = 1; i <= k; i++) {
+    r = r * (n - k + i) / i;
+    if (!r.isFinite) return double.infinity;
+  }
+  return r;
+}
+
+/// The SMALLEST p a permutation test on this sample could ever return.
+///
+/// A permutation test's null distribution is DISCRETE. For the two-group
+/// difference the label vector has only C(n, n₁) distinct assignments; the
+/// observed one always reaches its own |difference|, and its complement does too
+/// WHEN the split is balanced (with n₁ ≠ n − n₁ no complement exists inside the
+/// fixed group size). So the two-sided floor is 1/C(n, n₁), or 2/C(n, n₁) at
+/// n₁ = n/2 — not something more shuffles can lower. Drawing only [b] shuffles
+/// adds its own 1/(b+1) floor on top.
+///
+/// Why it matters: at the n = 8 minimum with a 3/5 split the floor is
+/// 1/56 = 0.0179, and after a 4-test BH correction that is q = 0.071 — a binary
+/// field at exactly 8 days CANNOT be published however real the effect. At n = 9
+/// it can (1/126 × 4 = 0.032). A test that cannot pass is not a "no", and the
+/// silence with no reason attached is the part that was wrong.
+double _permPFloor(int n, int n1, int b) {
+  final c = _binom(n, n1);
+  final k = (n1 * 2 == n) ? 2.0 : 1.0;
+  return math.max(1.0 / (b + 1), c <= 0 ? 1.0 : k / c);
+}
+
+/// The smallest number of paired days at which this test could clear [alpha]
+/// after a family-of-[m] BH correction, holding the observed group balance.
+/// Null if it cannot get there within a season.
+int? _needForFloor(int n, int n1, int b, int m, double alpha,
+    {required bool binary}) {
+  final p1 = n1 / n;
+  for (var N = n; N <= n + 90; N++) {
+    final floor = binary
+        ? _permPFloor(N, math.max(1, math.min(N - 1, (N * p1).round())), b)
+        : math.max(1.0 / (b + 1), 2.0 / _factorial(N));
+    if (floor * m <= alpha) return N;
+  }
+  return null;
+}
+
 /// Per-field relationship between numeric journal entries and each outcome.
 ///
 /// [outcomes] values must be POSITIONALLY ALIGNED to [dates], exactly as in
@@ -705,6 +877,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
     int? nWith,
     int? nWithout,
     double? p,
+    double pFloor,
+    int nSmallerSide,
     bool floorOk,
     bool insufficient,
   })>[];
@@ -723,6 +897,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
         nWith: null,
         nWithout: null,
         p: null,
+        pFloor: 1.0,
+        nSmallerSide: 0,
         floorOk: false,
         insufficient: true,
       ));
@@ -806,6 +982,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
           nWith: withIt.length,
           nWithout: without.length,
           p: _permTwoSampleP(ys, inGroup, permutations, permutationSeed),
+          pFloor: _permPFloor(n, withIt.length, permutations),
+          nSmallerSide: math.min(withIt.length, without.length),
           // Both sides exactly constant leaves d undefined; the per-side floor
           // is already the tag path's zero-spread rule, so a real gap between
           // two constants still counts.
@@ -828,7 +1006,7 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
       // days. So the saturated value is pulled in by 1/(2n): the interval
       // still excludes zero, but it widens as the sample shrinks, which is the
       // honest reading of a perfect correlation over very few days.
-      double? lo, hi, p;
+      double? lo, hi;
       if (n > 3) {
         final ceiling = 1.0 - 1.0 / (2.0 * n);
         final r = rho.clamp(-ceiling, ceiling);
@@ -846,11 +1024,15 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
 
         lo = tanh(zr - 1.96 * se);
         hi = tanh(zr + 1.96 * se);
-        // The same z the interval is built from, read as a two-sided p. So at
-        // a family of one, "q ≤ 0.05" and the old "the 95% interval excludes
-        // zero" are the same test — the correction only ever tightens it.
-        p = normalTwoSidedP(zr / se);
       }
+      // The GATE is a permutation p, not the interval's z. `normalTwoSidedP(zr
+      // / se)` read an interval SE evaluated at the observed r as if it were
+      // the null-hypothesis SE, on a rank statistic whose SE is a simulation
+      // result for CONTINUOUS data applied to tie-heavy ordinal journal fields.
+      // See [_permSpearmanP]. The interval above is unchanged and still what a
+      // screen displays.
+      final p =
+          n >= 4 ? _permSpearmanP(xs, ys, permutations, permutationSeed) : null;
 
       rows.add((
         field: field,
@@ -866,6 +1048,11 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
         nWith: null,
         nWithout: null,
         p: p,
+        // A rank permutation has n! relabellings — 40,320 already at the n = 8
+        // minimum, where 2/n! is far below the sampling floor — so in practice
+        // only 1/(b+1) binds. Nothing like the binary path's 1/C(n, n₁).
+        pFloor: math.max(1.0 / (permutations + 1), 2.0 / _factorial(n)),
+        nSmallerSide: n,
         floorOk: rho.abs() >= minAbsRho,
         insufficient: false,
       ));
@@ -873,10 +1060,25 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
   }
 
   final qs = benjaminiHochberg([for (final r in rows) r.p]);
+  // The BH family size, so each row can be asked whether it COULD have passed.
+  // Computed once from the p's as they stand: dropping the unreachable rows and
+  // re-running would only shrink m and let more through, which is the wrong
+  // direction for a gate whose job is to refuse.
+  final m = rows.where((r) => r.p != null).length;
   final byField = <String, List<JournalNumericEffect>>{};
   for (var i = 0; i < rows.length; i++) {
     final r = rows[i];
     final q = qs[i];
+    // STRUCTURALLY UNREACHABLE ⇒ ABSTAIN, and say how many days it would take.
+    // A permutation p cannot go below [_permPFloor]; if even that floor fails
+    // the correction, this test could not have been published however strong
+    // the effect, and reporting it as a computed-but-weak "no" is a verdict we
+    // never actually reached.
+    final unreachable = r.p != null && r.pFloor * m > fdrAlpha;
+    final need = unreachable
+        ? _needForFloor(r.n, r.nSmallerSide, permutations, m, fdrAlpha,
+            binary: r.binary)
+        : null;
     byField.putIfAbsent(r.field, () => []).add(
           JournalNumericEffect(
             outcome: r.outcome,
@@ -885,8 +1087,11 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
             rhoLow: r.lo,
             rhoHigh: r.hi,
             n: r.n,
-            insufficient: r.insufficient,
-            meaningful: r.floorOk && q != null && q <= fdrAlpha,
+            insufficient: r.insufficient || unreachable,
+            meaningful: !unreachable && r.floorOk && q != null && q <= fdrAlpha,
+            note: unreachable
+                ? 'need_history:have=${r.n},need=${need ?? r.n + 90}'
+                : null,
             binary: r.binary,
             delta: r.delta,
             cohensD: r.cohensD,

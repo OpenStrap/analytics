@@ -24,7 +24,14 @@ class RrCorrectionResult {
   /// runs dropped (length may differ from the input).
   final List<double> nn;
 
-  /// Beat-time (ms) for each NN interval, cumulative from t0.
+  /// Beat-time (ms) for each NN interval, relative to the START of the first
+  /// input beat (so `nnTimesMs.first == rrMs.first` when the first beat is
+  /// kept, and adding `rrTsMs.first - rrMs.first` puts it back on the epoch).
+  ///
+  /// Built by cumulative-summing RR *within a contiguous run*, and RE-ANCHORED
+  /// to the beat's real timestamp at every sensor dropout — see [correctRr]'s
+  /// `rrTsMs`. Without `rrTsMs` it is a pure cumsum and the dropouts are
+  /// spliced out; pass the timestamps.
   final List<double> nnTimesMs;
 
   /// Per-input-beat classification (same length as the input rr).
@@ -54,13 +61,31 @@ class RrCorrectionResult {
 /// [rrMs] the raw RR series (ms). [alpha] scales the time-varying threshold
 /// (paper default 5.2 on the QD estimate). [windowBeats] sliding window for the
 /// local dispersion estimate.
+///
+/// [rrTsMs] the beat timestamps that came with [rrMs] (same length, sorted,
+/// epoch ms). PASS THEM. Without them the output clock is Σrr, which splices
+/// every sensor dropout out of the record: the intervals the band never
+/// reported are not in [rrMs] at all, so no amount of book-keeping inside this
+/// function can recover them. Measured on 13 real nights, the cumsum span was
+/// 0.13–0.87 of the true rec_ts span, and the Lomb-Scargle spectrum built on it
+/// moved LF/HF across the sympatho-vagal line (0.65 → 1.53 on one MG night).
+/// With them, the clock cumsums RR *inside* a contiguous run — the RR values
+/// are the only sub-second information that exists, since `rr_ts_ms` is
+/// `rec_ts*1000` and therefore whole-second — and re-anchors to the real
+/// timestamp whenever the wall step exceeds the interval by more than
+/// [reanchorGapMs], i.e. at a dropout.
 RrCorrectionResult correctRr(
   List<double> rrMs, {
+  List<double>? rrTsMs,
   double alpha = 5.2,
   int windowBeats = 91,
   double minThresholdMs = 100,
+  double reanchorGapMs = 1000,
 }) {
   final n = rrMs.length;
+  // Beat-end time for EVERY input beat, kept or not. One array, built once, so
+  // every branch below reads a clock instead of advancing its own.
+  final tAll = _beatTimes(rrMs, rrTsMs, reanchorGapMs);
   if (n == 0) {
     return const RrCorrectionResult(
       nn: [],
@@ -80,14 +105,10 @@ RrCorrectionResult correctRr(
     ];
     final nn = <double>[];
     final times = <double>[];
-    var t = 0.0;
     for (var i = 0; i < n; i++) {
-      // The clock advances for EVERY interval, kept or not — RR intervals tile
-      // the timeline, so dropping a beat must not delete the time it occupied.
-      t += rrMs[i];
       if (classes[i] == BeatClass.normal) {
         nn.add(rrMs[i]);
-        times.add(t);
+        times.add(tAll[i]);
       }
     }
     return RrCorrectionResult(
@@ -168,15 +189,13 @@ RrCorrectionResult correctRr(
   final isArtifact = [for (final c in classes) c != BeatClass.normal];
   final nn = <double>[];
   final times = <double>[];
-  var t = 0.0;
   var dropped = 0;
   var corrected = 0;
   var i = 0;
   while (i < n) {
     if (!isArtifact[i]) {
-      t += rrMs[i];
       nn.add(rrMs[i]);
-      times.add(t);
+      times.add(tAll[i]);
       i++;
       continue;
     }
@@ -190,34 +209,25 @@ RrCorrectionResult correctRr(
       // Isolated -> spline-correct from surrounding normals.
       final corr = _splineCorrect(rrMs, isArtifact, i);
       if (corr != null) {
-        // The clock advances by the REAL interval, not the interpolated one.
-        // `corr` is our best guess at what the NN *should* have been (a missed
-        // beat splits one ~2000 ms interval into two ~1000 ms ones), but the
-        // 2000 ms still elapsed. Advancing by `corr` deleted ~1 s of record per
-        // corrected beat — 1.6 % of a night at one missed beat in sixty — which
-        // inflated cvhr_per_hour's analyzedHours divisor and shortened hrvFreq's
-        // spanSec / Lomb-Scargle time axis. Same rule as the multi-beat branch
-        // and the no-anchor fallback below.
-        t += rrMs[i];
+        // The beat keeps its REAL time, not the interpolated one. `corr` is our
+        // best guess at what the NN *should* have been (a missed beat splits one
+        // ~2000 ms interval into two ~1000 ms ones), but the 2000 ms still
+        // elapsed. Advancing by `corr` deleted ~1 s of record per corrected beat
+        // — 1.6 % of a night at one missed beat in sixty.
         nn.add(corr);
-        times.add(t);
+        times.add(tAll[i]);
         corrected++;
       } else {
-        t += rrMs[i]; // no anchors -> honest drop, but the time still elapsed
-        dropped++;
+        dropped++; // no anchors -> honest drop; the clock already elapsed
       }
     } else {
-      // Multi-beat run: NEVER interpolate — but DO advance the clock by the
-      // run's real elapsed time. Not doing so spliced the two sides of every
-      // dropped run together, so `nnTimesMs` was compacted: 299.0 s of real
-      // record emitted as a 294.0 s span. Everything keyed off that clock
-      // (cvhr_per_hour's analyzedHours, the Lomb-Scargle time axis, spanSec)
-      // was then inflated on exactly the noisy nights that needed the
-      // correction most. RR intervals tile the timeline whether or not the
-      // beat annotation is trustworthy, so their sum IS the elapsed time.
-      for (var k = i; k < j; k++) {
-        t += rrMs[k];
-      }
+      // Multi-beat run: NEVER interpolate. The clock is not touched here at all
+      // — `tAll` already carries the run's elapsed time, so the two sides of a
+      // dropped run are not spliced together. Not doing this compacted
+      // `nnTimesMs` (299.0 s of real record emitted as a 294.0 s span) and
+      // inflated everything keyed off it: cvhr_per_hour's analyzedHours, the
+      // Lomb-Scargle axis, spanSec — on exactly the noisy nights that needed
+      // the correction most.
       dropped += runLen;
     }
     i = j;
@@ -232,6 +242,55 @@ RrCorrectionResult correctRr(
     droppedCount: dropped,
     correctedCount: corrected,
   );
+}
+
+/// Beat-end time (ms, relative to the start of beat 0) for every input beat.
+///
+/// RR intervals tile the timeline, so the clock advances for EVERY interval,
+/// kept or dropped — but only for intervals the band actually REPORTED. A
+/// sensor dropout is not an interval at all: it is absent from [rrMs], and
+/// summing across it splices the two sides of the hole together. [rrTsMs] is
+/// the only witness that the hole existed, so when the wall step between two
+/// consecutive reported beats exceeds that beat's own interval by more than
+/// [reanchorGapMs], the clock is RE-ANCHORED to the real timestamp instead of
+/// accumulated. Inside a contiguous run the RR cumsum is kept, because
+/// `rr_ts_ms = rec_ts*1000` is whole-second and the RR values are the only
+/// sub-second information in the record.
+///
+/// The slack has to be ≥ the max plausible RR (2,400 ms saturation) minus a
+/// normal beat, or ordinary quantisation would re-anchor constantly; 1,000 ms
+/// is the audit's figure and is ~1 whole quantisation step.
+List<double> _beatTimes(
+    List<double> rrMs, List<double>? rrTsMs, double reanchorGapMs) {
+  final n = rrMs.length;
+  final t = List<double>.filled(n, 0);
+  if (n == 0) return t;
+  final wall = rrTsMs != null && rrTsMs.length == n;
+  final origin = wall ? rrTsMs[0] - rrMs[0] : 0.0;
+  var cur = 0.0;
+  for (var i = 0; i < n; i++) {
+    // The test is LOCAL — this beat's wall step against this beat's own
+    // interval — so a run's accumulated cumsum-vs-wall drift never triggers it.
+    //
+    // That drift is real and NOT resolved here. Inside contiguous runs of ≥200
+    // beats, Σrr / rec_ts-span measures 0.9631 on gen4 against 0.9988 (W5) and
+    // 1.0013 (MG). Which clock is wrong is not decidable from the exports: the
+    // band's `hr` field is computed from the same beat detector as `rr_ms`, so
+    // it is not independent evidence, and a low rate of beats the band never
+    // reports produces the same deficit with a perfectly correct clock. So
+    // there is deliberately no `rrClockScale` — applying 0.963 to gen4's RR
+    // values would be actively wrong under that second explanation. The
+    // consequence to carry: **gen4 and gen5/MG nights are not comparable on any
+    // frequency-domain or per-hour quantity** until it is resolved.
+    final dropout =
+        wall && i > 0 && (rrTsMs[i] - rrTsMs[i - 1]) - rrMs[i] > reanchorGapMs;
+    final anchored = wall ? rrTsMs[i] - origin : 0.0;
+    // `> cur` keeps the clock monotonic even if timestamps arrive out of order
+    // or the cumsum has run ahead of the wall — a backwards jump is never taken.
+    cur = (dropout && anchored > cur) ? anchored : cur + rrMs[i];
+    t[i] = cur;
+  }
+  return t;
 }
 
 /// Time-varying threshold: alpha × QD of the SIGNED series x in a sliding

@@ -81,6 +81,32 @@ void main() {
       expect(s, lessThanOrEqualTo(21.0));
     });
 
+    test('MOT-04: the scale saturates at ~3.25 h at 160 bpm, not 5 h', () {
+      // The docstring's "5 h at 160 bpm → 21" was loose: with the baseline
+      // subtraction included, 195 min already tops out, so every session past
+      // that is the same number. Regenerate this with `quietWakingHrr` if that
+      // constant ever moves (MOT-03) — it moves every anchor in the table.
+      expect(strainOfDay(dayHr(960, 85, [(190, 160)])), lessThan(21.0));
+      expect(strainOfDay(dayHr(960, 85, [(195, 160)])), closeTo(21.0, 1e-9));
+    });
+
+    test('MOT-04/MOT-03: at this user MEASURED quiet level a nothing-day still '
+        'scores ~12 — the known defect, pinned', () {
+      // The anchors above put quiet waking at exactly `quietWakingHrr` = 0.20.
+      // whoop-4.db says this user's real wake minutes sit at p50 0.274 HRR
+      // (RHR 55 / HRmax 187), and at that level a full-wear day with no
+      // exercise at all scores in the band the table calls "90 min hard".
+      // Measured on the real corpus: 6.93 / 11.17 / 11.38 / 11.97 / 12.14 over
+      // the five quiet days. THIS TEST IS EXPECTED TO FAIL WHEN MOT-03 LANDS —
+      // when it does, that is the fix arriving, and the anchor table in
+      // load_trimp.dart has to be regenerated in the same change.
+      const rhr = 55.0, hrMax = 187.0;
+      final quietBpm = rhr + 0.274 * (hrMax - rhr); // 91.2 bpm
+      final trimp = banisterTrimp(List<double>.filled(960, quietBpm),
+          restingHr: rhr, maxHr: hrMax, sex: Sex.male);
+      expect(strainScore(trimp.value!, wakeMinutes: 960), closeTo(11.9, 0.6));
+    });
+
     test('short wear with no activity is not scored as effort', () {
       // Real bundle 2026-07-10: band worn ~135 waking minutes, 23 steps.
       // The baseline must scale with wear, or a 2-hour inactive wear window

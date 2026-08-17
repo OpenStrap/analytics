@@ -7,9 +7,15 @@
 // estimator — this is THE source.
 //
 // Pipeline:
-//   1. vanHeesSleepWindow(accel) with the published 30-min bridge gap → the
-//      in-bed REST window [onsetIdx, offsetIdx) + the per-second immobility mask.
-//   2. AdvancedSleepStager.detectSleep/stageWindow, staged via
+//   1. vanHeesSleepWindow(accel) → the per-second immobility mask + z-angle
+//      series ONLY. Its `onsetIdx`/`offsetIdx` are NOT the published window and
+//      never have been — this file used to claim they were. The window comes
+//      from step 2; van Hees survives here as the immobility/arm-angle
+//      primitive that `stages4` and the nap detector share, and as the
+//      `fallbackWindow` whose masks are forwarded.
+//   2. AdvancedSleepStager.detectSleep/stageWindow — THE window
+//      ([_pickMainSleepGroup] over the detected sessions, or the caller's
+//      forced window) — staged via
 //      StagingMethod.cardio (the default — delegates to cardioStager, the
 //      transparent motion+HR+RMSSD rule stager; see advanced_stager.dart's
 //      file header for the 2026-07 comparison behind this default) → 4-class
@@ -58,11 +64,29 @@ const double kMinObservedFractionForSleep = 0.5;
 /// offset). Worst-case misalignment is under one epoch in either direction.
 const int _hrEvidenceHalfWinSec = 15;
 
-/// Ceiling on [SleepSegmentation.confidence]. Four-class staging from RR and
-/// wrist motion sits at κ 0.21–0.53 across every consumer device measured, and
-/// REM and light both show elevated HRV — so no amount of coverage makes this
-/// night certain. The confidence this file publishes is a fraction of THIS
-/// ceiling, never of 1.0.
+/// Ceiling on [SleepSegmentation.confidence].
+///
+/// WHAT THE CONFIDENCE IS: a COVERAGE score — how much of the window we
+/// actually watched (HR seconds, RR seconds, window length), capped here. It is
+/// NOT an accuracy, a probability that a stage label is right, or a κ. Nothing
+/// in this file measures accuracy; only PSG can, and we do not have it.
+///
+/// WHAT 0.6 IS: a CHOICE of cap, and the number is load-bearing in exactly one
+/// place — [stageIntervals] scales its half-widths by `confidence / this`, so a
+/// well-observed night gets a narrower interval than one scraping the observed
+/// floor. Lowering the cap below the typical score would pin every night at 1.0
+/// and DESTROY that contrast, which is why it is not simply set to our own κ.
+///
+/// WHAT THE LITERATURE SAYS, stated the right way round. Four-class staging
+/// from RR and wrist motion sits at κ 0.21–0.53 across six consumer devices vs
+/// PSG (SLEEP Advances 6(2):zpaf021, 2025: Apple Watch S8 0.53, Fitbit Sense
+/// 0.42, Charge 5 0.41, WHOOP 4.0 0.37, Withings ScanWatch 0.22, Garmin
+/// Vivosmart 4 0.21). That range is the one WE ARE BELOW, not one we sit in:
+/// our own held-out four-class κ is 0.132 (`cardio_stager.dart`), under every
+/// device in it, and the vendor firmware for the band we decode scores 0.37 —
+/// 2.8× ours. The docstring used to quote the range as if it justified the
+/// ceiling; it justifies nothing except that no amount of coverage makes a
+/// night certain.
 const double kMaxSleepConfidence = 0.6;
 
 /// SLP-13 — the narrowest half-width a stage interval may ever have (s).
@@ -640,7 +664,14 @@ SleepSegmentation segmentSleep(
   final hrCov = clamp(hrCovered / inBed, 0.0, 1.0);
   final rrCov = clamp(rrSeconds.length / inBed, 0.0, 1.0);
   final stagingConf = (0.35 + 0.25 * rrCov) * hrCov;
-  final windowConf = wm.confidence > 0 ? wm.confidence : 0.45;
+  // Confidence in the window WE PUBLISHED, on van Hees' own construction
+  // (length up to a typical 7 h night, clamped) — but measured on `chosen`, the
+  // window that actually ships. It used to be `wm.confidence`: literally how
+  // long the DISCARDED van Hees block was, from a detector whose window this
+  // file never reads. Half of every night's published confidence came from the
+  // detector that lost, and that confidence sets the SLP-13 stage-interval
+  // widths.
+  final windowConf = clamp(inBed / (7 * 3600), 0.3, 0.95);
   final conf =
       clamp((windowConf + stagingConf) / 2.0, 0.0, kMaxSleepConfidence);
 

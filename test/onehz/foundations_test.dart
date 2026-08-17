@@ -55,6 +55,37 @@ void main() {
       expect(after.baseline, before, reason: 'hard outlier not folded');
       expect(after.nValid, settled.nValid,
           reason: 'nValid unchanged on reject');
+      // STAT-10b. `nightsSinceUpdate` counts nights the baseline DID NOT MOVE —
+      // the only thing computeStatus reads it for. A rejected night moved
+      // nothing, so it increments like every other hold. It used to reset to 0
+      // here while an out-of-range night incremented, so the same counter meant
+      // two different things depending on which gate fired.
+      expect(after.nightsSinceUpdate, settled.nightsSinceUpdate + 1);
+      final outOfRange = Baselines.update(settled, 999.0, cfg)!;
+      expect(outOfRange.nightsSinceUpdate, after.nightsSinceUpdate,
+          reason: 'both hold branches mean the same thing');
+    });
+
+    // STAT-10. The spread EWMA is an EWMA of ABSOLUTE DEVIATION, so the
+    // deviation has to be measured against the baseline the night ARRIVED at.
+    // Measuring against the already-updated baseline shrinks it by exactly
+    // (1 − λ_B) for anything inside the Winsor band — 4.83 % at halfLifeB = 14,
+    // 20.63 % while young — which tightens the spread and inflates every z.
+    test('spread deviation is measured against the OLD baseline (STAT-10)', () {
+      final settled = Baselines.foldHistory(
+          <double?>[for (var i = 0; i < 20; i++) 60.0], cfg)!;
+      // Inside the Winsor band (spread is at the floor 5, band is ±15).
+      final after = Baselines.update(settled, 60.0 + 10.0, cfg)!;
+      final ls = Baselines.lambda(cfg.halfLifeS);
+      final want =
+          math.max(cfg.floorSpread, ls * 10.0 + (1.0 - ls) * settled.spread);
+      expect(after.spread, closeTo(want, 1e-9));
+      // The shipped version used |value − newBaseline| = (1 − λ_B)·10.
+      final lb = Baselines.lambda(cfg.halfLifeB);
+      final shrunk = math.max(cfg.floorSpread,
+          ls * ((1 - lb) * 10.0) + (1.0 - ls) * settled.spread);
+      expect(after.spread, greaterThan(shrunk));
+      expect((1 - lb), closeTo(0.9517, 1e-4), reason: 'the 4.83 % shrink');
     });
 
     test('early-life fast adapt: a high seed is pulled toward reality in days',
@@ -302,6 +333,56 @@ void main() {
       expect(span, closeTo(real - rr.first, 1e-6));
       // The emitted NN value is still the interpolated one, not the raw 2000.
       expect(c.nn.reduce((a, b) => a > b ? a : b), lessThan(1500.0));
+    });
+
+    test('a SENSOR DROPOUT is not spliced out when rrTsMs is passed', () {
+      // HRV-01. The two tests above fix runs *we* drop. This is the one we
+      // cannot see from `rrMs` alone: beats the band never reported at all, so
+      // the interval is absent from the array and Σrr walks straight over the
+      // hole. Measured on 13 real nights, the cumsum span was 0.13–0.87 of the
+      // true rec_ts span, and the Lomb-Scargle spectrum built on it moved
+      // LF/HF across the sympatho-vagal line (whoop-mg 2026-08-12: 0.65 with
+      // the cumsum clock, 1.53 with this one; whoop-4 2026-08-13: 1.32 -> 2.03).
+      const rr = 860.0; // realistic, and NOT a whole second
+      const nBeats = 4000;
+      const holeSec = 600;
+      const holeAt = 2000;
+      final rrMs = <double>[];
+      final rrTsMs = <double>[];
+      var wallMs = 1700000000000.0;
+      for (var i = 0; i < nBeats; i++) {
+        wallMs += rr;
+        if (i == holeAt) wallMs += holeSec * 1000; // sensor reported nothing
+        rrMs.add(rr);
+        // rr_ts_ms = rec_ts*1000 on 100 % of real rows — WHOLE SECONDS.
+        rrTsMs.add((wallMs / 1000).floorToDouble() * 1000);
+      }
+
+      final spliced = correctRr(rrMs);
+      final anchored = correctRr(rrMs, rrTsMs: rrTsMs);
+      expect(spliced.nn.length, anchored.nn.length,
+          reason: 'the clock must not change which beats are kept');
+
+      final splicedSpan = spliced.nnTimesMs.last - spliced.nnTimesMs.first;
+      final anchoredSpan = anchored.nnTimesMs.last - anchored.nnTimesMs.first;
+      // Without the timestamps the hole simply does not exist.
+      expect(splicedSpan, closeTo((nBeats - 1) * rr, 1e-6));
+      // With them it is exactly one hole longer — to within the 1 s
+      // quantisation of rr_ts_ms, which is the honest floor here and is not
+      // smoothed away.
+      expect(anchoredSpan - splicedSpan, closeTo(holeSec * 1000, 1000));
+
+      // And the re-anchor fires ONCE. Whole-second timestamps make every
+      // in-run wall step 0 or 1000 ms against an 860 ms interval; if the guard
+      // were on accumulated drift instead of the local step, quantisation
+      // alone would re-anchor on most beats and the axis would just become
+      // rec_ts, throwing away the only sub-second information we have.
+      var jumps = 0;
+      for (var i = 1; i < anchored.nnTimesMs.length; i++) {
+        final step = anchored.nnTimesMs[i] - anchored.nnTimesMs[i - 1];
+        if ((step - rr).abs() > 1e-6) jumps++;
+      }
+      expect(jumps, 1, reason: 'one dropout -> one re-anchor');
     });
   });
 }

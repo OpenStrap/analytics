@@ -30,13 +30,15 @@
 //
 //     Two things make the minute detector stable, and both matter:
 //       1. The feature is [MotionMinute.dynAmp] — per-axis high-passed dynamic
-//          amplitude — NOT ENMO. On this substrate ENMO is worse than unstable,
-//          it is EMPTY: the band ships a fused gravity vector whose magnitude
-//          sits at ~1.03 g even during the most vigorous minute of a day, so
-//          ENMO reduces to ~(1.03 − gRef), a pure calibration artifact. dynAmp
-//          removes gravity as a VECTOR and measures how fast the wrist
-//          re-orients. (Vähä-Ypyä 2015 argues for calibration-robust amplitude
-//          measures over ENMO for exactly this reason.)
+//          amplitude — NOT ENMO. ENMO is not empty on this substrate (audit
+//          MOT-07 re-measured it: Spearman(ENMO, HR) = 0.244 vs
+//          Spearman(dynAmp, HR) = 0.689 over 11,205 covered gen4 minutes), it
+//          is CALIBRATION-FRAGILE: it is `‖a‖ − gRef` and the per-family gRef
+//          (1.0277 gen4 / 1.0014 MG / 0.9977 W5) is the same order as the
+//          movement it is supposed to measure. dynAmp removes gravity as a
+//          VECTOR and measures how fast the wrist re-orients, so no reference
+//          has to be right. (Vähä-Ypyä 2015 argues for calibration-robust
+//          amplitude measures over ENMO for exactly this reason.)
 //       2. The cut-point is a MULTI-DAY PERSONAL REFERENCE
 //          ([personalDynFloorFromDailySummaries]) that is FROZEN after an
 //          enrollment window — neither an absolute g constant

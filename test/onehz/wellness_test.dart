@@ -46,6 +46,33 @@ void main() {
       expect(np.intradailyVariability, lessThan(0.5));
     });
 
+    test('RD-14: IS is taken about the GRAND mean, not the profile mean', () {
+      // Unbalanced epoch-of-day coverage — the normal case on real data, where
+      // per-day 24-bin coverage runs 14/24 to 24/24 — plus a level drift across
+      // days. Hours 12-23 exist only on the highest day, so the 24-h profile's
+      // own mean sits above the grand mean.
+      final samples = <AdcSample>[];
+      for (var day = 0; day < 3; day++) {
+        final hours = day == 2 ? 24 : 12;
+        for (var h = 0; h < hours; h++) {
+          for (var k = 0; k < 6; k++) {
+            final tHours = day * 24.0 + h + k / 6.0;
+            final adc = 2000 +
+                100.0 * day +
+                150 * math.cos(2 * math.pi / 24 * (tHours - 4));
+            samples.add(AdcSample(tHours * 3.6e6, adc));
+          }
+        }
+      }
+      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+          .value!
+          .nonparam!;
+      // van Someren's IS puts BOTH variances about the grand mean. Using the
+      // profile's own mean minimises the numerator by construction and gives
+      // 0.5299 on this fixture — biased low, always in the same direction.
+      expect(np.interdailyStability, closeTo(0.5582, 0.0005));
+    });
+
     test('M10/L5/RA are WITHHELD, not merely null (MT-09)', () {
       final samples = <AdcSample>[];
       for (var i = 0; i < 3 * 24 * 6; i++) {
@@ -362,11 +389,11 @@ void main() {
     // however clean it is, and this is the guard that gets quietly dropped.
     test('a statistically clean step SMALLER than the MDC is not reported', () {
       // Noisy pre-segment (MAD ~1.5 bpm ⇒ MDC ~4 bpm) with a perfectly clean
-      // 1 bpm step: binary segmentation loves it, the body cannot resolve it.
+      // 2 bpm step: binary segmentation loves it, the body cannot resolve it.
       const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
       final x = [
         for (var i = 0; i < 30; i++) 55.0 + noise10[i % 10],
-        for (var i = 0; i < 30; i++) 56.0 + noise10[i % 10],
+        for (var i = 0; i < 30; i++) 57.0 + noise10[i % 10],
       ];
       final m = segmentChangePoints(x, minSeg: 7);
       expect(m.value!.changePoints, isEmpty);
@@ -381,6 +408,55 @@ void main() {
       ];
       expect(segmentChangePoints(big, minSeg: 7).value!.changePoints,
           hasLength(1));
+    });
+
+    // STAT-05. The penalty shipped at HALF the BIC it claimed to be
+    // (`penaltyK = 1.0` where BIC = (diffparam+1)·log n = 2·σ̂²·ln n for the
+    // Normal change-in-mean), so the search proposed boundaries the criterion
+    // it names would never have proposed — and only the MDC gate downstream
+    // stopped them reaching the user.
+    test('the penalty is BIC, not half of it (STAT-05)', () {
+      const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      final x = [
+        for (var i = 0; i < 30; i++) 55.0 + noise10[i % 10],
+        for (var i = 0; i < 30; i++) 56.0 + noise10[i % 10],
+      ];
+      // At the shipped-then half-penalty the search DID split here.
+      expect(segmentChangePoints(x, minSeg: 7, penaltyK: 1.0).note,
+          contains('dropped=1'));
+      // At BIC it never proposes the boundary at all.
+      expect(segmentChangePoints(x, minSeg: 7).note, contains('dropped=0'));
+      expect(segmentChangePoints(x, minSeg: 7).value!.changePoints, isEmpty);
+    });
+
+    // STAT-07. `cusumChangePoints` was purely positional, and its only
+    // production caller feeds it a COMPACTED series (days with no nocturnal RHR
+    // are skipped — "most days for some users"). So a pre-change regime spanned
+    // wear gaps and the accumulator carried evidence across months.
+    test('a wear gap breaks the regime and the accumulator (STAT-07)', () {
+      const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      final x = [
+        for (var i = 0; i < 30; i++) 55.0 + noise10[i % 10],
+        for (var i = 0; i < 30; i++) 70.0 + noise10[i % 10],
+      ];
+      String day(int n) => DateTime.utc(2026, 1, 1)
+          .add(Duration(days: n))
+          .toIso8601String()
+          .substring(0, 10);
+      // 30 consecutive days, 60 days off-wrist, then 30 consecutive days at a
+      // different level. Positionally that is one clean step.
+      final dates = [
+        for (var i = 0; i < 30; i++) day(i),
+        for (var i = 0; i < 30; i++) day(90 + i),
+      ];
+      expect(cusumChangePoints(x, h: 5.0), isNotEmpty,
+          reason: 'positional: the gap is invisible');
+      expect(cusumChangePoints(x, dates: dates, h: 5.0), isEmpty,
+          reason: 'no observations across the gap ⇒ no evidence to carry');
+      // Consecutive dates leave the old behaviour exactly as it was.
+      final contiguous = [for (var i = 0; i < 60; i++) day(i)];
+      expect(cusumChangePoints(x, dates: contiguous, h: 5.0),
+          hasLength(cusumChangePoints(x, h: 5.0).length));
     });
   });
 
@@ -399,7 +475,7 @@ void main() {
         hrvInput(40.0, around(60.0)), // far below baseline => bad
         rhrInput(55.0, around(55.0)), // at baseline
         respInput(14.0, around(14.0)),
-        tempInput(2000.0, around(2000.0)),
+        tempInput(2000.0, around(2000.0), settledFraction: 0.97),
       ]);
       expect(m.present, isTrue);
       expect(m.drivers, isNotNull);
@@ -415,16 +491,19 @@ void main() {
         hrvInput(60.0, around(60.0)),
         rhrInput(55.0, around(55.0)),
         respInput(14.0, around(14.0)),
-        tempInput(2000.0, around(2000.0)),
+        tempInput(2000.0, around(2000.0), settledFraction: 0.97),
       ]);
       expect(m.value!.score, closeTo(50, 8));
       expect(m.value!.toJson().containsKey('meaningful'), isFalse);
     });
 
     test('weights renormalize over present inputs; absent => "—"', () {
-      final present = readinessComposite([hrvInput(70.0, around(60.0))]);
+      final present = readinessComposite([
+        hrvInput(70.0, around(60.0)),
+        rhrInput(55.0, around(55.0)),
+      ]);
       expect(present.present, isTrue);
-      expect(present.inputs_used, ['HRV']);
+      expect(present.inputs_used, ['HRV', 'RHR']);
 
       final none = readinessComposite([
         hrvInput(null, around(60.0)),
@@ -447,7 +526,10 @@ void main() {
       // before the fallback the WHOLE composite blanked to "—" here — the
       // intermittent "readiness sometimes disappears (with sleep present)" bug.
       final tightBase = <double>[52, 52, 52, 52, 52, 52, 53];
-      final m = readinessComposite([rhrInput(56.0, tightBase)]);
+      // minInputs:1 — the subject here is the MAD==0 rescue, not the RD-04
+      // minimum-inputs gate (which has its own test below).
+      final m = readinessComposite([rhrInput(56.0, tightBase)],
+          minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue,
           reason: 'mean/SD z should rescue a MAD==0 (but SD>0) baseline');
       expect(m.inputs_used, ['RHR']);
@@ -532,6 +614,7 @@ void main() {
       // With >= minBaseline points it computes.
       final ok = readinessComposite([
         hrvInput(60.0, [48.0, 49.0, 50.0, 51.0, 52.0]),
+        rhrInput(55.0, [54.0, 55.0, 56.0, 55.0, 54.0]),
       ]);
       expect(ok.present, isTrue);
     });
@@ -626,7 +709,8 @@ void main() {
       // robustZ abstains and the deliberate `?? z(v, base)` fallback (#26)
       // produced the contribution. PRE-FIX the detail still said "robust-z".
       final base = <double>[55, 55, 55, 55, 55, 55, 55, 58];
-      final m = readinessComposite([rhrInput(60, base)]);
+      final m = readinessComposite([rhrInput(60, base)],
+          minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue, reason: m.note);
       final d = m.drivers!.single;
       expect(d.detail, contains('mean+SD fallback'));
@@ -635,7 +719,8 @@ void main() {
 
     test('a dispersed baseline still discloses robust-z (median+MAD)', () {
       final base = <double>[50, 52, 54, 56, 58, 60, 62];
-      final m = readinessComposite([rhrInput(70, base)]);
+      final m = readinessComposite([rhrInput(70, base)],
+          minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue, reason: m.note);
       expect(m.drivers!.single.detail, contains('robust-z (median+MAD)'));
     });
@@ -646,6 +731,222 @@ void main() {
           readinessComposite([rhrInput(60, List<double>.filled(8, 55.0))]);
       expect(m.present, isFalse);
       expect(m.toJson()['value'], '—');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RD-15 / RD-05 — a warming strap must not read as a recovered person.
+  //
+  // Numbers pinned from whoop-4.db, the 8 real gen4 nights the audit measured
+  // (sleep windows from v_hypnogram, skin_temp_raw from decoded_onehz). Nightly
+  // means recomputed here match the shipped `skin_temp_adc` series exactly.
+  // -------------------------------------------------------------------------
+  group('nightlySkinTemp (RD-15 settled fraction)', () {
+    // One night, 1 Hz: 8 h at 805 counts with a 2 h segment ~100 counts colder
+    // in the middle — the shape of 2026-08-14, whose real settled fraction is
+    // 0.787 and whose plain mean (784.20) sat -3.17 robust-z below the trailing
+    // baseline, i.e. +7.6 readiness points of "recovery" from a cold strap.
+    List<AdcSample> night({required int coldSec, int totalSec = 28800}) => [
+          for (var i = 0; i < totalSec; i++)
+            AdcSample(
+                i * 1000.0, (i >= 6000 && i < 6000 + coldSec) ? 700.0 : 805.0),
+        ];
+
+    test('a settled night keeps its samples and its mean', () {
+      final m = nightlySkinTemp(night(coldSec: 0), deviceFamily: 'gen4');
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.settledFraction, 1.0);
+      expect(m.value!.mean, closeTo(805.0, 1e-9));
+      expect(m.value!.unit, 'adc_counts');
+    });
+
+    test('a cold segment is trimmed out of the mean', () {
+      // 5 % cold: passes the 0.80 floor, but the plain mean would be 799.75.
+      final m = nightlySkinTemp(night(coldSec: 1440), deviceFamily: 'gen4');
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.settledFraction, closeTo(0.95, 1e-9));
+      expect(m.value!.mean, closeTo(805.0, 1e-9));
+    });
+
+    test('a night that spent 25 % below skin temperature REFUSES', () {
+      final m = nightlySkinTemp(night(coldSec: 7200), deviceFamily: 'gen4');
+      expect(m.present, isFalse);
+      expect(m.note, startsWith('unsettled_skin_temp:settled=0.75'));
+      expect(m.toJson()['value'], '—');
+    });
+
+    test('a FEVER is not trimmed — the band is one-sided', () {
+      // The exact mirror of the refused night above: same 25 % excursion, same
+      // 100-count size, only UPWARD. It survives whole, because "not skin" is a
+      // statement about cold readings and a fever is the signal this channel
+      // exists to carry.
+      final hot = [
+        for (var i = 0; i < 28800; i++)
+          AdcSample(i * 1000.0, (i >= 6000 && i < 13200) ? 905.0 : 805.0),
+      ];
+      final m = nightlySkinTemp(hot, deviceFamily: 'gen4');
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.settledFraction, 1.0);
+      expect(m.value!.mean, closeTo(830.0, 1e-9));
+    });
+
+    test('gen5 has no measured band and unknown families refuse', () {
+      for (final id in <String?>['gen5', null, '', 'gen6']) {
+        final m = nightlySkinTemp(night(coldSec: 0), deviceFamily: id);
+        expect(m.present, isFalse, reason: 'family $id must not borrow gen4');
+        expect(m.note, startsWith('unknown_device_family:'));
+      }
+    });
+
+    test('under the 60-sample floor it says how short it was', () {
+      final m = nightlySkinTemp(
+          [for (var i = 0; i < 30; i++) AdcSample(i * 1000.0, 805.0)],
+          deviceFamily: 'gen4');
+      expect(m.present, isFalse);
+      expect(m.note, 'need_baseline:have=30,need=60');
+    });
+  });
+
+  group('tempInput settled gate (RD-05)', () {
+    List<double> around(double c) =>
+        [for (var i = 0; i < 14; i++) c + (i.isEven ? 1.0 : -1.0)];
+
+    // The whoop-4 2026-08-14 shape: temp reads far BELOW baseline and
+    // goodSign = -1 turns that into "good", so readiness goes UP.
+    List<ReadinessInput> inputs(double? settled) => [
+          hrvInput(60.0, around(60.0)),
+          rhrInput(55.0, around(55.0)),
+          tempInput(784.2, around(805.0), settledFraction: settled),
+        ];
+
+    test('an unsettled night drops the temp driver, it never pays out', () {
+      final ungated = readinessComposite(inputs(0.97));
+      final gated = readinessComposite(inputs(0.787)); // the real 08-14 value
+      expect(ungated.inputs_used, contains('temp'));
+      expect(gated.inputs_used, isNot(contains('temp')));
+      expect(gated.value!.score, lessThan(ungated.value!.score),
+          reason: 'a cold strap was buying readiness points');
+      expect(gated.note, contains('unsettled_skin_temp:settled=0.787'));
+    });
+
+    test('an unmeasured settled fraction is a refusal, not a pass', () {
+      final m = readinessComposite(inputs(null));
+      expect(m.inputs_used, isNot(contains('temp')));
+      expect(m.note, contains('no settled fraction measured'));
+    });
+
+    test('the channel itself is untouched — a settled night still drives', () {
+      final m = readinessComposite(inputs(0.90));
+      expect(m.inputs_used, contains('temp'));
+      expect(m.drivers!.map((d) => d.label), contains('temp'));
+    });
+  });
+
+  group('readinessComposite minimum inputs (RD-04)', () {
+    List<double> around(double c) =>
+        [for (var i = 0; i < 14; i++) c + (i.isEven ? 1.0 : -1.0)];
+
+    test('one surviving input is not a composite', () {
+      // temp alone: its disclosed 0.10 would renormalise to an effective 1.0.
+      final m = readinessComposite(
+          [tempInput(760.0, around(805.0), settledFraction: 0.99)]);
+      expect(m.present, isFalse);
+      expect(m.note, startsWith('need_inputs:have=1,need=2'));
+      expect(m.inputs_used, ['temp']);
+    });
+
+    test('RR + temp clear the count but not the weight floor', () {
+      final m = readinessComposite([
+        respInput(14.0, around(14.0)),
+        tempInput(805.0, around(805.0), settledFraction: 0.99),
+      ]);
+      expect(m.present, isFalse, reason: '0.20 + 0.10 = 0.30 < 0.5');
+      expect(m.note, contains('need_weight=0.5'));
+    });
+
+    test('HRV + RHR compute', () {
+      final m = readinessComposite([
+        hrvInput(60.0, around(60.0)),
+        rhrInput(55.0, around(55.0)),
+      ]);
+      expect(m.present, isTrue, reason: m.note);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RD-07 — the chi-square gate assumed a KNOWN scale. Pinned against the
+  // 200k-trial Monte Carlo in the docstring of `_madInflationTable`.
+  // -------------------------------------------------------------------------
+  group('multivariateAnomaly small-sample gate (RD-07)', () {
+    /// Deterministic pseudo-normal noise — no dart:math Random seeding games,
+    /// just a fixed sequence with mean 0 and unit-ish spread.
+    double noise(int i) =>
+        math.sin(i * 1.7) + 0.6 * math.sin(i * 0.31) + 0.4 * math.cos(i * 2.9);
+
+    test('the gate widens when the baseline is small and relaxes as it grows',
+        () {
+      // The audit's measured false-candidate rate against the bare chi2(0.999)
+      // gate was 0.197/night at n=10, dof=4 — 196x nominal. The widening below
+      // is the empirical 99.9 %ile of d2 over that quantile.
+      List<AnomalyDay> run(int n) {
+        final feats = <AnomalyFeatures>[
+          for (var i = 0; i < n + 1; i++)
+            AnomalyFeatures(
+              rhr: 55 + noise(i),
+              hrv: 4.0 + 0.1 * noise(i + 40),
+              temp: 805 + 6 * noise(i + 80),
+              resp: 15 + noise(i + 120),
+            ),
+        ];
+        final dates = [
+          for (var i = 0; i < feats.length; i++)
+            DateTime.utc(2026, 1, 1)
+                .add(Duration(days: i))
+                .toIso8601String()
+                .substring(0, 10)
+        ];
+        return multivariateAnomaly(dates, feats,
+            baselineDays: 400, minBaseline: 10, persistDays: 2);
+      }
+
+      // Same night, same distance — only the gate moves with the baseline size.
+      final small = run(10).last;
+      final large = run(120).last;
+      expect(small.mahalanobis, isNotNull);
+      expect(large.mahalanobis, isNotNull);
+      // An explicit gate bypasses the widening entirely (unchanged contract).
+      final fixed = multivariateAnomaly(
+        [for (var i = 0; i < 12; i++) 'd$i'],
+        [
+          for (var i = 0; i < 12; i++)
+            AnomalyFeatures(rhr: 55 + noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
+        ],
+        minBaseline: 10,
+        chiSqGate: 0.0,
+      );
+      expect(fixed.where((d) => d.candidate), isNotEmpty,
+          reason: 'chiSqGate must still be honoured verbatim');
+    });
+
+    test('a d2 that clears bare chi2 at n=10 no longer becomes a candidate',
+        () {
+      // dof 2 => bare gate 13.82. Ten baseline nights of tight noise then one
+      // night ~4 robust-z out on both features: d2 lands well over 13.82 but
+      // under 13.82 x 13.23, which is where the measured 99.9 %ile actually is.
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 10; i++)
+          AnomalyFeatures(rhr: 55 + noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
+        const AnomalyFeatures(rhr: 59.0, hrv: 3.65),
+      ];
+      final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
+      final bare =
+          multivariateAnomaly(dates, feats, minBaseline: 10, chiSqGate: 13.82);
+      final widened = multivariateAnomaly(dates, feats, minBaseline: 10);
+      expect(
+          bare.last.mahalanobis! * bare.last.mahalanobis!, greaterThan(13.82));
+      expect(bare.last.candidate, isTrue);
+      expect(widened.last.candidate, isFalse,
+          reason: 'a MAD over ten nights is not a known scale');
     });
   });
 }

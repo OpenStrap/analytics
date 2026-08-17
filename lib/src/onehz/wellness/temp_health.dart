@@ -1,7 +1,11 @@
 // WELLNESS — relative skin-temp health signals (illness flag + menstrual).
 //
-// Both operate on the NIGHTLY-MEAN RELATIVE skin-temp (z-scored or raw ADC).
-// NEVER absolute °C / fever.
+// Both operate on the RAW NIGHTLY-MEAN skin-temp in the device's own unit —
+// NOT a z-score. Each standardises once, internally, against its own window;
+// handing them an already-standardised series standardises it twice and the
+// thresholds below stop meaning what they say. `nightlySkinTemp` (temp_circadian
+// .dart) is the canonical producer and also gates out nights the strap spent
+// warming up. NEVER absolute °C / fever.
 //
 // 1. Skin-temp z-score illness flag (Smarr 2020) — nightly relative-temp z vs a
 //    trailing personal baseline; flags a sustained elevation. MUST be
@@ -52,10 +56,22 @@ class TempIllnessDay {
 
 /// Nightly relative skin-temp z-score illness flag, cycle-aware.
 ///
-/// [dates] labels; [nightlyTemp] nightly-mean RELATIVE temp ADC (null = missing
-/// night); [luteal] OPTIONAL per-night luteal-phase flag (true => suppress).
-/// [baselineDays] trailing robust-baseline window; [zThresh] flag elevation
-/// above this robust z; [persistDays] consecutive elevated nights required.
+/// [dates] labels; [nightlyTemp] the RAW nightly-mean skin-temp in the device's
+/// own unit (gen4 ADC counts, gen5 centi-°C) — `nightlySkinTemp(...).value.mean`
+/// is the canonical producer. Null = missing night. [luteal] OPTIONAL per-night
+/// luteal-phase flag (true => suppress). [baselineDays] trailing robust-baseline
+/// window; [zThresh] flag elevation above this robust z; [persistDays]
+/// consecutive elevated nights required.
+///
+/// DO NOT PASS A Z-SCORE. This function standardises internally against its own
+/// trailing window (`robustBaseline(...).modZ`), so a pre-standardised series
+/// gets standardised twice and `zThresh = 2.0` stops meaning anything: an
+/// already-z-scored value whose own denominator came from as few as 3 nights
+/// carries ~50 % relative error before this ever sees it. The function cannot
+/// detect the unit — the contract is the only guard there is, which is why it
+/// is written here in capitals rather than left in a header line. (Smarr et al.,
+/// Sci Rep 2020;10:21640 reports +0.63 °C against a per-subject baseline and
+/// supplies NO z threshold; 2.0 is ours, on an uncalibrated relative channel.)
 ///
 /// HONESTY: when MAD baseline is degenerate (quantized/flat) we report null z
 /// and stay `normal` — we never invent a deviation. In luteal nights an

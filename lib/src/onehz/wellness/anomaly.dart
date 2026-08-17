@@ -31,7 +31,11 @@ import '../util.dart';
 class AnomalyFeatures {
   final double? rhr; // RHR  (↑ worse)
   final double? hrv; // lnRMSSD or RMSSD (↓ worse -> we negate internally)
-  final double? temp; // relative skin-temp (↑ worse)
+  /// RAW nightly-mean skin-temp in the device's own unit (`nightlySkinTemp`),
+  /// ↑ worse. NOT a z — this detector standardises every column itself against
+  /// the trailing window below, so a pre-standardised series is standardised
+  /// twice and `minBaseline`/the χ² gate stop meaning what they say.
+  final double? temp;
   final double? resp; // respiration rate (↑ worse)
   const AnomalyFeatures({this.rhr, this.hrv, this.temp, this.resp});
 }
@@ -79,11 +83,12 @@ const _featLabels = ['RHR', 'HRV(↓)', 'temp', 'resp'];
 /// required to flag; [ridge] covariance regularizer fraction.
 ///
 /// [chiSqGate] OPTIONAL fixed Mahalanobis² threshold. When null (default) the
-/// gate is DIMENSION-AWARE: a conservative χ²_{0.999, dof} upper quantile keyed
-/// by the number of features actually present that night — so the false-alarm
-/// rate stays honest as the vector dimension changes. (Robust MAD modestly
-/// under-estimates SD on small samples, which inflates z; the conservative
-/// 0.999 level absorbs that so normal nights don't trip the alarm.)
+/// gate is DIMENSION- AND SAMPLE-AWARE: χ²_{0.999, dof} for the number of
+/// features present that night, widened by [_madInflation] for how few nights
+/// the MAD scale was estimated from. The bare χ² quantile assumes a KNOWN
+/// covariance; ours is a MAD over as few as [minBaseline] nights, and against
+/// the bare gate the measured false-candidate rate is 0.197/night at n = 10 and
+/// dof = 4 — 196× nominal. See [_madInflationTable].
 List<AnomalyDay> multivariateAnomaly(
   List<String> dates,
   List<AnomalyFeatures> feats, {
@@ -200,7 +205,13 @@ List<AnomalyDay> multivariateAnomaly(
     if (day[i] - lastScoredDay > 1) run = 0;
     lastScoredDay = day[i];
 
-    final gate = chiSqGate ?? _chiSq999(keep.length);
+    // Smallest surviving per-feature baseline drives the gate: the noisiest
+    // scale estimate in the vector is the one inflating d².
+    var baseN = 1 << 30;
+    for (final f in keep) {
+      if (cols[f].length < baseN) baseN = cols[f].length;
+    }
+    final gate = chiSqGate ?? _chiSq999(keep.length) * _madInflation(baseN);
     final candidate = d2 > gate;
     if (candidate) {
       run++;
@@ -213,9 +224,63 @@ List<AnomalyDay> multivariateAnomaly(
   return out;
 }
 
+/// How much the χ² gate must be widened because the scale is ESTIMATED, not
+/// known.
+///
+/// χ²(0.999) is the quantile of a Mahalanobis distance taken against a KNOWN
+/// covariance. Ours is a median + MAD over `minBaseline` nights, and a MAD on
+/// ten values is so noisy that d² lives in a far heavier-tailed distribution
+/// than χ². Measured (200 k trials/cell, iid N(0,1) features, replicating this
+/// function exactly — `_robustCorr`'s Pearson-on-standardised-columns, the 0.1
+/// ridge, the stddev fallback), the false-candidate rate against the bare χ²
+/// gate was:
+///
+///   baseline n | dof 2  | dof 3  | dof 4
+///   -----------|--------|--------|-------
+///           10 | 0.0796 | 0.1298 | 0.1973   ← 196× nominal at dof 4
+///           14 | 0.0451 | 0.0709 | 0.1048
+///           20 | 0.0244 | 0.0376 | 0.0532
+///           28 | 0.0144 | 0.0202 | 0.0272
+///           60 | 0.0050 | 0.0059 | 0.0075
+///
+/// That is user-facing: a flagged night drives a quiet-hours-overriding
+/// "Unusual overnight physiology" notification, and the exposure is concentrated
+/// in a new user's first month while the per-feature baseline grows from 10 to
+/// `baselineDays`.
+///
+/// The factor below is the empirical 99.9 %ile of d² divided by χ²(0.999) at
+/// that dof, taken as the MAX over dof 2..4 at each n (conservative by
+/// construction — a shared curve must not under-widen the widest case).
+/// Interpolated log-linearly in n; below the first anchor it holds, above the
+/// last it decays to 1.0 as MAD → σ. `test/onehz/wellness_test.dart` pins the
+/// anchors.
+const List<(int, double)> _madInflationTable = [
+  (10, 13.23),
+  (14, 5.65),
+  (20, 3.17),
+  (28, 2.24),
+  (45, 1.65),
+  (90, 1.25),
+  (200, 1.0),
+];
+
+double _madInflation(int n) {
+  if (n <= _madInflationTable.first.$1) return _madInflationTable.first.$2;
+  if (n >= _madInflationTable.last.$1) return 1.0;
+  for (var i = 1; i < _madInflationTable.length; i++) {
+    final (n1, f1) = _madInflationTable[i];
+    if (n > n1) continue;
+    final (n0, f0) = _madInflationTable[i - 1];
+    final t = (math.log(n) - math.log(n0)) / (math.log(n1) - math.log(n0));
+    return math.exp(math.log(f0) + t * (math.log(f1) - math.log(f0)));
+  }
+  return 1.0;
+}
+
 /// Conservative χ² 0.999 upper-quantile by degrees of freedom (1..4 — the four
 /// illness features). A single noisy night must clear this to even become a
 /// candidate, so the persistence gate then needs TWO such nights to flag.
+/// Widened by [_madInflation] for the small-sample scale estimate.
 double _chiSq999(int dof) {
   switch (dof) {
     case 1:

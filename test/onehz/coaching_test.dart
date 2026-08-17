@@ -360,29 +360,31 @@ void main() {
     });
 
     test('clear positive correlation is detected and marked meaningful', () {
-      // "alcohol" days have clearly lower recovery than untagged days.
+      // "alcohol" days have clearly lower recovery than untagged days. FIVE per
+      // side: at two per side there are only six label assignments, so no
+      // permutation p can reach the FDR bar (see the RD-10 group below).
       final journal = <JournalDay>[
-        const JournalDay('d0', {'alcohol'}),
-        const JournalDay('d1', {'alcohol'}),
-        const JournalDay('d2', {}),
-        const JournalDay('d3', {}),
+        for (var i = 0; i < 5; i++) JournalDay('d$i', const {'alcohol'}),
+        for (var i = 5; i < 10; i++) JournalDay('d$i', const {}),
       ];
-      final dates = ['d0', 'd1', 'd2', 'd3'];
+      final dates = [for (var i = 0; i < 10; i++) 'd$i'];
       final outcomes = <String, List<double?>>{
-        'recovery': [40, 42, 80, 82], // tagged mean 41, untagged mean 81
+        'recovery': [40, 41, 42, 43, 44, 80, 81, 82, 83, 84],
       };
       final out = journalCorrelations(
           journal: journal, dates: dates, outcomes: outcomes);
       final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
       expect(eff.insufficient, isFalse);
       expect(eff.meaningful, isTrue);
-      expect(eff.delta, closeTo(41 - 81, 1e-9)); // −40
+      expect(eff.delta, closeTo(42 - 82, 1e-9)); // −40
       expect(
           eff.higherSide, 'untagged'); // untagged (non-alcohol) recovers more
-      expect(eff.nTagged, 2);
-      expect(eff.nUntagged, 2);
+      expect(eff.nTagged, 5);
+      expect(eff.nUntagged, 5);
       expect(eff.pctChange, isNotNull);
       expect(eff.pctChange!.abs(), greaterThanOrEqualTo(3.0));
+      expect(eff.q, isNotNull);
+      expect(eff.q!, lessThanOrEqualTo(0.10));
     });
 
     test('nulls are dropped from both sides before comparing', () {
@@ -449,6 +451,27 @@ void main() {
 
     test('a large, well-separated effect is still meaningful', () {
       final out = journalCorrelations(
+        journal: [
+          for (var i = 0; i < 5; i++) JournalDay('d$i', const {'alcohol'}),
+          for (var i = 5; i < 10; i++) JournalDay('d$i', const {}),
+        ],
+        dates: [for (var i = 0; i < 10; i++) 'd$i'],
+        outcomes: const {
+          'recovery': [40, 41, 42, 43, 44, 80, 81, 82, 83, 84]
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
+      expect(eff.meaningful, isTrue);
+      expect(eff.cohensD!.abs(), greaterThan(0.5));
+    });
+
+    // -----------------------------------------------------------------------
+    // RD-10. The verdict used to be `|Δ%| ≥ 3 AND |d| ≥ 0.5` with no test and no
+    // multiplicity correction, which under the null called a cell meaningful
+    // 65.5 % of the time at 2 vs 2 and 42.9 % at 3 vs 20.
+    // -----------------------------------------------------------------------
+    test('2 vs 2 cannot be meaningful however cleanly it separates', () {
+      final out = journalCorrelations(
         journal: const [
           JournalDay('d0', {'alcohol'}),
           JournalDay('d1', {'alcohol'}),
@@ -461,8 +484,67 @@ void main() {
         },
       );
       final eff = out.firstWhere((c) => c.tag == 'alcohol').effects.single;
-      expect(eff.meaningful, isTrue);
+      expect(eff.cohensD!.abs(), greaterThan(0.5),
+          reason: 'the old d bar IS cleared');
+      expect(eff.pctChange!.abs(), greaterThanOrEqualTo(3.0),
+          reason: 'the old percentage bar IS cleared');
+      // Six label assignments, two of them at least as extreme => p ~ 1/3. No
+      // amount of separation can beat that, which is the whole point.
+      expect(eff.p!, greaterThan(0.3));
+      expect(eff.meaningful, isFalse);
+    });
+
+    test('3 tagged vs 20 untagged: a d ≥ 0.5 gap is not enough on its own', () {
+      final untagged = <double>[
+        for (var i = 0; i < 2; i++) ...[52, 54, 56, 58, 60, 62, 64, 66, 68, 70]
+      ];
+      final out = journalCorrelations(
+        journal: [
+          for (var i = 0; i < 3; i++) JournalDay('d$i', const {'late_meal'}),
+          for (var i = 3; i < 23; i++) JournalDay('d$i', const {}),
+        ],
+        dates: [for (var i = 0; i < 23; i++) 'd$i'],
+        outcomes: {
+          'recovery': <double?>[64, 66, 68, ...untagged],
+        },
+      );
+      final eff = out.firstWhere((c) => c.tag == 'late_meal').effects.single;
       expect(eff.cohensD!.abs(), greaterThan(0.5));
+      expect(eff.pctChange!.abs(), greaterThanOrEqualTo(3.0));
+      expect(eff.meaningful, isFalse,
+          reason: 'three days is not evidence (p=${eff.p}, q=${eff.q})');
+    });
+
+    test('the FDR correction runs over the whole tag × outcome grid', () {
+      // One real effect, seven pure-noise tags on the same days. The noise tags
+      // are tested too, so the real one has to survive the correction.
+      final dates = [for (var i = 0; i < 12; i++) 'd$i'];
+      final out = journalCorrelations(
+        journal: [
+          for (var i = 0; i < 12; i++)
+            JournalDay('d$i', {
+              if (i < 6) 'alcohol',
+              if (i.isEven) 'noise_a',
+              if (i % 3 == 0) 'noise_b',
+            }),
+        ],
+        dates: dates,
+        outcomes: const {
+          'recovery': [40, 41, 42, 43, 44, 45, 80, 81, 82, 83, 84, 85],
+          'hrv': [55, 56, 57, 58, 59, 60, 55, 56, 57, 58, 59, 60],
+        },
+      );
+      final alcohol = out.firstWhere((c) => c.tag == 'alcohol');
+      final rec = alcohol.effects.firstWhere((e) => e.outcome == 'recovery');
+      expect(rec.meaningful, isTrue);
+      expect(rec.q, isNotNull);
+      // Every cell carries its q, and no noise tag survives.
+      for (final tc in out) {
+        for (final e in tc.effects) {
+          if (tc.tag == 'alcohol' && e.outcome == 'recovery') continue;
+          expect(e.meaningful, isFalse, reason: '${tc.tag}/${e.outcome}');
+        }
+      }
     });
 
     test('two constant sides with only 2 days each are NOT meaningful', () {

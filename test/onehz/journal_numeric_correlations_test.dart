@@ -415,7 +415,16 @@ void main() {
       // Four pairs is where the interval gets absurdly wide but still exists
       // — and being unable to exclude zero is exactly the right answer there.
       expect(e.rhoLow!, lessThan(0), reason: 'five days cannot clear zero');
-      expect(e.meaningful, isFalse);
+      // STAT-08. The DISPLAY interval (Bonett & Wright) and the GATE
+      // (permutation p) are now two different tests, and this is where they
+      // part company: five days in perfect rank order has an exact two-sided
+      // permutation p of 2/5! = 0.0167, which clears 0.05, while the B-W
+      // interval — a continuous-data simulation result applied to ordinal
+      // journal fields, evaluated at the observed r — cannot. The exact test is
+      // the honest one; `minN` (8 in production, overridden to 5 here) is what
+      // keeps five-day findings off the screen, not a conservative SE.
+      expect(e.p!, closeTo(2 / 120, 0.01));
+      expect(e.meaningful, isTrue);
 
       // At three the standard error is undefined outright, so there is no
       // interval at all and therefore no verdict.
@@ -585,6 +594,46 @@ void main() {
       final e = _effect(out, 'rare', 'rhr');
       expect(e.insufficient, isTrue);
       expect(e.meaningful, isFalse);
+    });
+
+    // STAT-03. A permutation test's null distribution is DISCRETE. At exactly
+    // n = 8 with a 3/5 split the label vector has C(8,3) = 56 assignments, so
+    // the smallest two-sided p is 1/56 = 0.0179 — and after the BH correction
+    // over a family of 4 that is q = 0.071, above 0.05. The test CANNOT be
+    // published however perfect the separation. At n = 9 it can
+    // (1/126 × 4 = 0.032). What shipped was silence with no reason attached.
+    test('an unreachable test abstains and says how many days it needs', () {
+      List<JournalNumericCorrelation> run(int n) {
+        final dates = _dates(n);
+        // Perfectly separated: every ticked day is 20 ms above every other.
+        final flag = [for (var i = 0; i < n; i++) i < 3 ? 1.0 : 0.0];
+        return journalNumericCorrelations(
+          fieldLagDays: const {},
+          journal: [
+            for (var i = 0; i < n; i++)
+              JournalNumericDay(dates[i], {'sauna': flag[i]}),
+          ],
+          dates: dates,
+          // FOUR outcomes: the family size the only production caller passes.
+          outcomes: {
+            for (final k in ['rmssd', 'rhr', 'readiness', 'efficiency'])
+              k: [
+                for (var i = 0; i < n; i++)
+                  60.0 + (flag[i] == 1 ? 20.0 : 0.0) + (i % 3)
+              ],
+          },
+        );
+      }
+
+      final at8 = _effect(run(8), 'sauna', 'rmssd');
+      expect(at8.insufficient, isTrue, reason: '1/C(8,3) x 4 = 0.071 > 0.05');
+      expect(at8.meaningful, isFalse);
+      expect(at8.note, 'need_history:have=8,need=9');
+
+      final at9 = _effect(run(9), 'sauna', 'rmssd');
+      expect(at9.insufficient, isFalse, reason: '1/C(9,3) x 4 = 0.032');
+      expect(at9.note, isNull);
+      expect(at9.meaningful, isTrue);
     });
 
     test('empty input is empty output, not a crash', () {

@@ -75,16 +75,58 @@ void main() {
       expect(napped.value!.shape, isNot(equals(m.value!.shape)));
     });
 
+    test('RD-01: the day peaks in the afternoon, not an hour after waking', () {
+      // τ_wake was 2.6 h (the PUBLISHED τ_sleep, written into the wake slot),
+      // so the homeostat fell from 12.53 to 4.57 in the first four hours and sat
+      // on its 2.4 floor from mid-morning: the whole curve was process C plus a
+      // decaying inertia term, and its MAXIMUM landed at 08:00 for a 07:00
+      // riser. With the published rates (1/0.0353 and 1/0.3813, PMC4203690
+      // §1.1–1.8) S runs 13.74 / 12.24 / 10.95 / 9.82 / 8.84 over 0/4/8/12/16 h
+      // awake and the peak sits just before the 16.8 h acrophase.
+      final m = alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 8);
+      final shape = m.value!.shape;
+      var peak = 0;
+      for (var i = 1; i < shape.length; i++) {
+        if (shape[i] > shape[peak]) peak = i;
+      }
+      final peakClock = 7 + peak * 0.25;
+      expect(peakClock, closeTo(15.75, 0.5));
+    });
+
+    test('RD-02: the low window moves with sleep length, not with the horizon',
+        () {
+      // The search used to run over a fixed 18 h curve, so the lowest window was
+      // whichever one fitted last: wake + 16.25 h in 24 of 24 replayed
+      // wake × sleep combinations, with sleep duration moving it 0.00 h. It is
+      // bounded by the waking day now (24 h − last night's sleep).
+      double offset(double sleep) {
+        final v = alertnessForecast(wakeLocalHour: 7, sleepDurationHours: sleep)
+            .value!;
+        return (v.troughStartHour - 7 + 24) % 24;
+      }
+
+      expect(offset(5), closeTo(16.25, 1e-9));
+      expect(offset(7), closeTo(15.25, 1e-9));
+      expect(offset(8), closeTo(14.25, 1e-9));
+      expect(offset(9), closeTo(13.25, 1e-9));
+      // And the note says what the window is, so no one reads it as measured.
+      expect(alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 8).note,
+          contains('not a dip'));
+    });
+
     test('an assumed circadian phase is disclosed as assumed', () {
       expect(alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 7.5).note,
           contains('ASSUMED'));
-      expect(
-          alertnessForecast(
-                  wakeLocalHour: 7,
-                  sleepDurationHours: 7.5,
-                  circadianAcrophaseHours: 15.2)
-              .note,
-          isNot(contains('ASSUMED')));
+      final fitted = alertnessForecast(
+              wakeLocalHour: 7,
+              sleepDurationHours: 7.5,
+              circadianAcrophaseHours: 15.2)
+          .note;
+      expect(fitted, isNot(contains('ASSUMED')));
+      // RD-12: dropping the assumption clause must not leave the card implying
+      // the phase was MEASURED on the user. What the caller passes is a cosinor
+      // fitted on hourly HR — a proxy — and the note has to say so.
+      expect(fitted, contains('PROXY'));
     });
   });
 
@@ -215,7 +257,7 @@ void main() {
       expect(flat.value!.bothPointSameWay, isFalse);
     });
 
-    test('a rise inside the MDC does not count as an elevated night', () {
+    test('a rise inside the usual spread is not an elevated night', () {
       final m = overreachingConjunction(
         load: loadWithRamp(),
         rhrRecent: const [50.5, 50.6, 50.4, 50.5, 50.5],

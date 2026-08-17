@@ -299,8 +299,36 @@ void main() {
       expect(v.score, lessThan(50));
     });
 
-    test('a sub-MDC mover is never named as a driver', () {
-      // All inputs essentially at their median => no driver clears MDC.
+    test('RD-09: a real night off baseline names its driver', () {
+      // The user's own nightly resting HR from whoop-4.db (lowest 30-min mean,
+      // 00:00–06:00 IST). Baseline of seven, tonight the eighth.
+      const rhr = <double>[57.73, 57.07, 60.87, 56.90, 60.40, 55.97, 67.67];
+      const tonight = 60.93; // +3.20 bpm on a median of 57.73
+      // Robust scale of that window is 2.61 bpm, so the old gate — mdc(), which
+      // with no measured typical error is 2.77 × that same scale — stood at
+      // 7.23 bpm. NOTHING in this user's real spread reaches it, so
+      // `drivers` was empty and the narrative said "nothing moved beyond your
+      // normal day-to-day noise" every single night. The smallest worthwhile
+      // change is 1.30 bpm, and this night clears it.
+      final inputs = [
+        const GlassBoxInput(
+            label: 'rhr',
+            value: tonight,
+            history: rhr,
+            weight: wRhr,
+            lowerIsBetter: true),
+      ];
+      // ignore: deprecated_member_use_from_same_package
+      final m = glassBoxReadiness(inputs);
+      final v = m.value!;
+      expect(v.breakdown.single.beyondUsualSpread, isTrue);
+      expect(v.drivers, isNotEmpty);
+      expect(v.drivers.first.label, 'rhr');
+      expect(v.narrative.toLowerCase(), isNot(contains('noise')));
+    });
+
+    test('a mover inside the usual spread is never named as a driver', () {
+      // All inputs essentially at their median => nothing clears the SWC.
       final hist = List<double>.generate(20, (i) => 50.0 + (i % 5) * 0.1);
       final inputs = [
         GlassBoxInput(label: 'hrv', value: 50.2, history: hist, weight: wHrv),

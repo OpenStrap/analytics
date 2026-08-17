@@ -7,13 +7,16 @@
 // Algorithm:
 //   1. Anchor selection: for DC, anchor i where RR(i) > RR(i-1) (a
 //      deceleration); for AC, RR(i) < RR(i-1). Bounded by a ratio threshold T
-//      to suppress artifacts, default 0.05 — Bauer's own PRSA excludes anchors
-//      whose RR change exceeds 5 %, so 0.05 is the canonical setting and the
-//      one the published risk tiers below were read against. (The header used
-//      to claim "default unbounded"; it never was. DC is strongly cap-sensitive
-//      — at RMSSD 80 the capped estimate is 10.3 ms against 35.1 ms unbounded —
-//      so this is not a cosmetic disagreement, and the number must not be
-//      changed on the strength of a stale comment.)
+//      to suppress artifacts, default 0.05.
+//
+//      THE 0.05 IS OURS. PMC6299532 gives the DCorg formula and L = 64 and
+//      states NO percentage anchor-exclusion threshold; the header used to call
+//      0.05 "Bauer's own" and "the canonical setting", and no primary source for
+//      that could be found. DC scales strongly with it — at RMSSD 80 the capped
+//      estimate is 10.3 ms against 35.1 ms unbounded — so it is a calibration
+//      knob that governs the number, and it must not be changed on the strength
+//      of a comment in either direction. (The header before that one claimed
+//      "default unbounded"; it never was.)
 //   2. For each anchor, take a window of length 2L centered at the anchor.
 //      Drop anchors too close to the series ends.
 //   3. Phase-aligned averaging: X(k) = mean over anchors of RR(anchor+k),
@@ -21,8 +24,19 @@
 //   4. Quantify with the Haar-wavelet-like contrast (s=2):
 //      DC = [X(0) + X(1) − X(−1) − X(−2)] / 4.   (ms; positive = healthier)
 //
-// Risk tiers (Bauer 2006, post-MI): DC ≤2.5 high | 2.6–4.5 intermediate |
-// >4.5 low risk.
+// NO RISK TIER. This used to emit Bauer's post-MI mortality tier (≤2.5 high /
+// 2.6–4.5 intermediate / >4.5 low). Those cut-offs come from 24-h Holter ECG in
+// 1,455 post-MI patients (Lancet 2006;367:1674-81); healthy 24-h DC is
+// 13.43 ± 5.60 ms, so every wrist-PPG night sits below the whole table and the
+// string read "low risk" or worse for a healthy user forever. Measured on one
+// subject across three straps inside nine days: gen4 DC 7.61–9.90 → 'low' every
+// night, MG 4.06/4.87/5.96 → 'intermediate'/'low'/'low', W5 1.70 → 'high'. The
+// tier was decided by which strap he wore that week. Detection, never diagnosis.
+// `capacity` stays as a RELATIVE trended number against the user's own baseline.
+// A tier may come back only with per-family calibration (`device.dart`) plus a
+// validation on a comparable signal — the one wrist-PPG DC validation that
+// exists (Sci Rep 2026, doi 10.1038/s41598-026-52700-7, ρ = 0.95) is 5 min 30 s
+// of continuous beat detection in sinus rhythm, not an all-night PPG tachogram.
 
 import '../types.dart';
 import '../util.dart';
@@ -32,26 +46,17 @@ class PrsaResult {
   final List<double> profile; // averaged X(k), k=-L..L-1
   final int anchors; // number of anchors averaged
   final String kind; // 'DC' or 'AC'
-  final String? riskTier; // only meaningful for DC
   const PrsaResult({
     required this.capacity,
     required this.profile,
     required this.anchors,
     required this.kind,
-    this.riskTier,
   });
   Map<String, dynamic> toJson() => {
         'capacity_ms': round6(capacity),
         'anchors': anchors,
         'kind': kind,
-        if (riskTier != null) 'risk_tier': riskTier,
       };
-}
-
-String _dcRisk(double dc) {
-  if (dc <= 2.5) return 'high';
-  if (dc <= 4.5) return 'intermediate';
-  return 'low';
 }
 
 /// PRSA deceleration capacity.
@@ -139,7 +144,6 @@ Metric<PrsaResult> _prsa(
       profile: profile,
       anchors: anchors.length,
       kind: kind,
-      riskTier: deceleration ? _dcRisk(capacity) : null,
     ),
     confidence: conf,
     tier: Tier.high,

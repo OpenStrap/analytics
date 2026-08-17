@@ -1,8 +1,19 @@
 // CLINICAL TIER-1 — training load: TRIMP + CTL/ATL/TSB.
 //
-// Edwards 1993 zone-sum TRIMP and Banister exponential TRIMP (Morton 1990).
+// Banister exponential TRIMP (Morton 1990) — the ONE TRIMP in this package.
 // CTL (Chronic Training Load, 42-day EWMA of daily TRIMP), ATL (Acute, 7-day
 // EWMA), TSB = CTL − ATL (Training Stress Balance / "form").
+//
+// EDWARDS IS GONE (audit MOT-06, deleted 2026-08-17). `StrainScorer` used to
+// carry a second, zone-sum TRIMP applying Edwards 1993's 50/60/70/80/90
+// cut-offs to %HRR, where Edwards defines them on %HRmax. At RHR 55 / HRmax
+// 187, 50 % HRR = 121 bpm = 64.7 % HRmax, so every minute banded about one zone
+// low and the two published-looking 0–100 numbers disagreed by 2.8×–184× on the
+// same stream (measured on whoop-4.db). Nothing shipped it — `strain_effort`
+// was a permanently-null key removed from edge at v68 — so rather than re-derive
+// it on the right denominator, the whole second scale is deleted. The app's
+// display zones (`hr_zones.dart`) already do %HRmax correctly, with a separately
+// labelled Karvonen variant. Do not reintroduce a second 0–100 strain.
 //
 // Banister: TRIMP = Σ Δt(min) · ΔHRr · y, where ΔHRr = (HR−RHR)/(HRmax−RHR)
 // and y = e^(b·ΔHRr), b = 1.92 (male) / 1.67 (female). Needs measured HRmax+RHR.
@@ -85,10 +96,33 @@ const double maximalNetTrimp = 400.0;
 
 /// Curvature of the 0–21 map; higher gives more resolution at the low end.
 ///
-/// Calibrated together with [maximalNetTrimp] so that, for a representative
-/// profile (RHR 60, HRmax 187, 16 h awake), a day scores:
-///   inactive → ~0 · rest + a walk → 2–4 · 45 min moderate run → 8–11 ·
-///   90 min hard session → 14–17 · 5 h at 160 bpm → 21.
+/// CALIBRATION ANCHORS — regenerated 2026-08-17 (audit MOT-04), and they only
+/// mean anything with the profile and the convention printed next to them:
+///
+///   PROFILE  RHR 60, HRmax 187 (Tanaka @30), male constants, 960 waking
+///            minutes, every NON-SESSION minute sitting at exactly
+///            [quietWakingHrr] (= 85 bpm on this profile).
+///
+///   inactive 16 h                       TRIMP  176.5 → 0.00
+///   + 60 min walk @105 bpm              TRIMP  192.3 → 2.70
+///   + 45 min moderate run @145 bpm      TRIMP  237.9 → 8.55
+///   + 90 min hard session @165 bpm      TRIMP  392.9 → 16.54
+///   + 5 h @160 bpm                      TRIMP  806.9 → 21.00 (SATURATED)
+///   135 min wear, no activity           TRIMP   24.8 → 0.00
+///
+/// The old table's "5 h at 160 bpm → 21" was loose, not wrong: with the
+/// baseline subtraction included the scale SATURATES AT ≈3.25 h at 160 bpm
+/// (195 min) and ≈4.25 h at 150 bpm, so everything above that is one number.
+///
+/// AND THE ANCHORS ARE NOT WHAT REAL DAYS SCORE. The convention above puts
+/// quiet waking at exactly 0.20 HRR; this user's measured wake minutes sit at
+/// p50 0.274 / p75 0.332 HRR (whoop-4.db, 9 full-wear days, RHR 55 / HRmax
+/// 187). At that real quiet level a day containing only 2–6 minutes above 50 %
+/// HRR scores 6.93 / 11.17 / 11.38 / 11.97 / 12.14 — i.e. a NOTHING-DAY lands
+/// in the band this table calls "90 min hard session". That gap is
+/// [quietWakingHrr] being too low for this user, not the map: it is audit
+/// MOT-03, it is not fixed here, and every number in this table moves when it
+/// is. Regenerate the table with the constant, never separately.
 const double strainCurvature = 15.0;
 
 /// The TRIMP that [wakeMinutes] of ordinary waking accrues on its own.
@@ -96,6 +130,20 @@ const double strainCurvature = 15.0;
 /// Scales with the wake window ACTUALLY observed, so a partial-wear day is not
 /// charged a full day's overhead (a 2 h inactive wear window would otherwise
 /// come out negative and clamp, while a 16 h one read as real effort).
+///
+/// WHY THIS IS STILL SUBTRACTIVE (audit MOT-05, measured 2026-08-17 and NOT
+/// adopted). MOT-05 asks for the domain bound to move into the accumulator —
+/// sum `x·y(x)` only over minutes above [quietWakingHrr] and drop this
+/// subtraction — on the argument that a gated sum depends on data rather than
+/// on a fourth-decimal constant. Replayed on all three real corpora at the
+/// SHIPPED constant it is strictly worse, because 0.20 HRR is below where quiet
+/// waking actually sits: gen4's five nothing-days go 11.2/11.4/12.0/12.1/13.1 →
+/// 17.6/17.7/17.8/18.2/21.0, and MG's three genuinely quiet days go 0.00 →
+/// 10.72/12.72/0.06. Crediting a quiet minute in FULL the moment it clears the
+/// gate is what does it. (Σ(x−Q)·y(x) over the same minutes tracks the current
+/// form within ~1.5 points on gen4 but still breaks MG's honest zeros: 0.00 →
+/// 4.05/4.83.) The gated form is only defensible once [quietWakingHrr] is this
+/// user's own quiet level — MOT-03 — so it is blocked on that, not on taste.
 double baselineTrimp(double wakeMinutes, {bool female = false}) =>
     wakeMinutes *
     quietWakingHrr *
@@ -151,28 +199,25 @@ Metric<double> strainScoreMetric(
   );
 }
 
-// A second, top-level `edwardsTrimp` used to sit here binning minutes on
-// %HRmax while `StrainScorer.zoneWeight` below bins the SAME cut-offs on %HRR.
-// Nothing called it and the two disagreed by ~25 % on the same HR stream, so it
-// is deleted — StrainScorer is the one Edwards TRIMP.
+// Two other TRIMPs used to sit here: a top-level `edwardsTrimp` binning minutes
+// on %HRmax, and `StrainScorer`'s zone sum binning the SAME cut-offs on %HRR.
+// Both are deleted (audit MOT-06) — see the file header. Banister is the one
+// TRIMP.
 
 // ════════════════════════════════════════════════════════════════════════════
-// StrainScorer — Edwards/Banister TRIMP → 0–100 strain ("Effort").
+// StrainScorer — Banister TRIMP → 0–100 strain ("Effort").
 // Implementation of published exercise-physiology methods.
 //
 //   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
 //   2. Per-sample intensity %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
 //   3. TRIMP over the window (each sample carries its OWN duration, measured
 //      from the real timestamps and capped at the stream's median cadence so a
-//      gap is never counted as effort):
-//        a. Edwards 5-zone (default): sample contributes its zone weight (1..5 at
-//           50/60/70/80/90 %HRR cut-offs) × that sample's duration (min).
-//        b. Banister exponential: sample contributes dur × x × y(x), with
-//           y = 0.64·e^(1.92x) (men) / 0.86·e^(1.67x) (women).
-//   4. strain = 100 × ln(TRIMP + 1) / ln(D), D = 7201 (TRIMP 7200 ≈ max).
+//      gap is never counted as effort): sample contributes dur × x × y(x), with
+//      y = 0.64·e^(1.92x) (men) / 0.86·e^(1.67x) (women).
+//   4. strain = 100 × ln(TRIMP + 1) / ln(D), D = 7201.
 //
-// References: Karvonen 1957; Edwards 1993; Banister 1991 (y = 0.64·e^(1.92x)
-// men / 0.86·e^(1.67x) women); Tanaka 2001 (HRmax = 208 − 0.7·age).
+// References: Karvonen 1957; Banister 1991 (y = 0.64·e^(1.92x) men /
+// 0.86·e^(1.67x) women); Tanaka 2001 (HRmax = 208 − 0.7·age).
 //
 // NOTE (steps/active-energy floor): strain is PURELY HR-derived
 // (Edwards/Banister TRIMP → log map). Steps and active calories are computed as
@@ -195,8 +240,13 @@ class StrainScorer {
   /// Top of the strain ("Effort") scale (rescaled 21.0 → 100.0).
   static const double maxStrain = 100.0;
 
-  /// Logarithmic-map denominator D = 7200 + 1: Edwards daily ceiling
-  /// (top weight 5 sustained 24h = 7200) maps to exactly maxStrain.
+  /// Logarithmic-map denominator D = 7200 + 1.
+  ///
+  /// It was set from the Edwards daily ceiling (top weight 5 sustained 24 h =
+  /// 7200), and Edwards is gone (MOT-06). Kept unchanged anyway: the Banister
+  /// ceiling over the same 24 h is 1440 × 1 × y(1) = 6,293, within 15 % of it,
+  /// and this is a DISPLAY map — rescaling it would rescore every stored day for
+  /// no gain in truth.
   static const double strainDenominator = 7201.0;
 
   /// Fallback per-sample duration (minutes) — 1 s at 1 Hz.
@@ -232,22 +282,17 @@ class StrainScorer {
       (female ? banisterScaleWomen : banisterScaleMen) *
       math.exp((female ? banisterBWomen : banisterBMen) * x);
 
-  /// Edwards zone cut-offs as (%HRR threshold, weight), highest-first.
-  static const List<List<num>> edwardsZones = [
-    [90.0, 5],
-    [80.0, 4],
-    [70.0, 3],
-    [60.0, 2],
-    [50.0, 1],
-  ];
-
   // ── HRmax helpers ───────────────────────────────────────────────────────────
 
   /// Tanaka (2001): HRmax = 208 − 0.7 × age.
   static double tanakaHRmax(double age) => 208.0 - 0.7 * age;
 
-  /// Classic 220 − age. Last-resort fallback only.
-  static int defaultMaxHR([int age = defaultAge]) => 220 - age;
+  // `defaultMaxHR([age]) => 220 - age` used to sit here as StrainScorer's
+  // "last-resort fallback". It had exactly one caller — `strain` — and its only
+  // job there was to keep producing a number when the person's ceiling was
+  // unknown (MOT-11). Deleted with that fallback. `AutoWorkoutDetector` keeps
+  // its own 190 for the "did you work out?" prompt, which is not a published
+  // number.
 
   /// Linear-interpolated percentile of an ALREADY-SORTED sequence (numpy-style).
   static double _percentileSorted(List<double> sortedValues, double pct) {
@@ -277,7 +322,7 @@ class StrainScorer {
     return (0.0, 'unknown');
   }
 
-  // ── Karvonen %HRR and Edwards zone weight ──────────────────────────────────
+  // ── Karvonen %HRR ──────────────────────────────────────────────────────────
 
   /// Karvonen %HRR, clamped [0, 100].
   static double pctHRR(double bpm, double restingHR, double hrReserve) {
@@ -285,15 +330,6 @@ class StrainScorer {
     if (pct < 0) return 0;
     if (pct > 100) return 100;
     return pct;
-  }
-
-  /// Edwards 5-zone weight (0–5) from %HRR (unclamped).
-  static int zoneWeight(double bpm, double restingHR, double hrReserve) {
-    final pct = (bpm - restingHR) / hrReserve * 100.0;
-    for (final z in edwardsZones) {
-      if (pct >= z[0]) return z[1].toInt();
-    }
-    return 0;
   }
 
   // ── TRIMP accumulation ──────────────────────────────────────────────────────
@@ -339,19 +375,6 @@ class StrainScorer {
     return out;
   }
 
-  /// Edwards 5-zone TRIMP: Σ zoneWeight(sample) × that sample's duration (min).
-  static double edwardsTRIMP(List<double> bpm, double restingHR,
-      double hrReserve, List<double> durationsMin) {
-    var acc = 0.0;
-    for (var i = 0; i < bpm.length; i++) {
-      final dur = i < durationsMin.length
-          ? durationsMin[i]
-          : (durationsMin.isEmpty ? fallbackSampleMin : durationsMin.last);
-      acc += zoneWeight(bpm[i], restingHR, hrReserve) * dur;
-    }
-    return acc;
-  }
-
   /// Banister exponential TRIMP: Σ duration(min) × x × y(x), y per [banisterY].
   static double banisterTRIMP(List<double> bpm, double restingHR,
       double hrReserve, List<double> durationsMin, {bool female = false}) {
@@ -385,18 +408,25 @@ class StrainScorer {
   ///
   /// [bpm] per-sample HR; [tsSec] their timestamps in SECONDS (same length).
   /// Returns null when there isn't enough data to trust the number (fewer than
-  /// [minReadings] AND less than [minSpanSeconds] coverage), or when maxHR ≤
-  /// restingHR (invalid HRR). [edwards] true → Edwards (default); false → Banister.
+  /// [minReadings] AND less than [minSpanSeconds] coverage), when [maxHR] is
+  /// missing, or when maxHR ≤ restingHR (invalid HRR).
+  ///
+  /// [maxHR] IS REQUIRED-AND-NULLABLE, and null means NO NUMBER (audit MOT-11).
+  /// It used to fall back to `defaultMaxHR()` = 190, a 220−age ceiling for a 30
+  /// y/o applied to whoever's wrist arrived — a fabricated anchor inside the
+  /// value, caught (if at all) by the caller. Honesty belongs at the source, so
+  /// that helper is gone too. `AutoWorkoutDetector` keeps its own 190 for the
+  /// "did you work out?" gate, which is a prompt, not a published number.
   static double? strain(
     List<double> bpm,
     List<double> tsSec, {
-    double? maxHR,
+    required double? maxHR,
     double restingHR = defaultRestingHR,
-    bool edwards = true,
     bool female = false,
     double denominator = strainDenominator,
   }) {
-    final effMax = maxHR ?? defaultMaxHR().toDouble();
+    if (maxHR == null) return null;
+    final effMax = maxHR;
     final bool enoughData;
     if (bpm.length >= minReadings) {
       enoughData = true;
@@ -417,32 +447,24 @@ class StrainScorer {
     if (!enoughData || effMax <= restingHR) return null;
 
     final durations = sampleDurationsMinutes(tsSec);
-    final hrReserve = effMax - restingHR;
-
-    final double trimp;
-    if (edwards) {
-      trimp = edwardsTRIMP(bpm, restingHR, hrReserve, durations);
-    } else {
-      trimp = banisterTRIMP(bpm, restingHR, hrReserve, durations,
-          female: female);
-    }
+    final trimp = banisterTRIMP(bpm, restingHR, effMax - restingHR, durations,
+        female: female);
     return trimpToStrain(trimp, denominator: denominator);
   }
 }
 
-/// Edwards/Banister TRIMP strain ("Effort", 0–100) as a Metric, with the
-/// honesty envelope: absent when the gates fail (never fabricated).
+/// Banister TRIMP strain ("Effort", 0–100) as a Metric, with the honesty
+/// envelope: absent when the gates fail (never fabricated).
 ///
 /// [bpm] per-sample HR (bpm). [tsSec] timestamps (s), same length. [maxHr] /
 /// [restingHr] the personal anchors (HRmax resolved by the caller via
-/// [StrainScorer.estimateHRmax] / Tanaka). [method] 'edwards' (default) or
-/// 'banister'. [sex] selects the Banister coefficient.
+/// [StrainScorer.estimateHRmax] / Tanaka). [sex] selects the Banister
+/// coefficient. The `method` parameter is gone with the Edwards path (MOT-06).
 Metric<double> trimpStrain(
   List<double> bpm,
   List<double> tsSec, {
   double? maxHr,
   double? restingHr,
-  String method = 'edwards',
   Sex sex = Sex.male,
 }) {
   const inputs = ['hr_series', 'resting_hr', 'max_hr'];
@@ -464,7 +486,6 @@ Metric<double> trimpStrain(
     tsSec,
     maxHR: maxHr,
     restingHR: restingHr,
-    edwards: method != 'banister',
     female: sex == Sex.female,
   );
   if (s == null) {
@@ -479,7 +500,7 @@ Metric<double> trimpStrain(
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: '${method == "banister" ? "Banister" : "Edwards"} TRIMP → 0–100 strain '
+    note: 'Banister TRIMP → 0–100 strain '
         '(100·ln(TRIMP+1)/ln(7201)); wrist-HR ESTIMATE, not clinical',
   );
 }

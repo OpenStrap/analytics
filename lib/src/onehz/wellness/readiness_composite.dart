@@ -36,6 +36,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import 'temp_circadian.dart' show kMinSettledFraction;
 
 /// One readiness input: its current value + a trailing baseline window + the
 /// sign of "good" (+1 if higher is better, -1 if higher is worse) + a weight.
@@ -45,13 +46,20 @@ class ReadinessInput {
   final List<double> baseline; // trailing personal-baseline window
   final int goodSign; // +1 higher-is-better, -1 higher-is-worse
   final double weight; // relative importance (HRV>RHR>RR>temp)
+
+  /// Set when a value WAS measured but this input refuses to let readiness use
+  /// it tonight (see [tempInput]). [value] is null in that case, so the input
+  /// drops out and the weights renormalise — but the reason is named in the
+  /// composite's note instead of vanishing.
+  final String? refusal;
   const ReadinessInput(
     this.label,
     this.value,
     this.baseline,
     this.goodSign,
-    this.weight,
-  );
+    this.weight, {
+    this.refusal,
+  });
 }
 
 /// Canonical default inputs (caller supplies values + baselines). Weights encode
@@ -62,8 +70,48 @@ ReadinessInput rhrInput(double? v, List<double> base) =>
     ReadinessInput('RHR', v, base, -1, 0.30);
 ReadinessInput respInput(double? v, List<double> base) =>
     ReadinessInput('RR', v, base, -1, 0.20);
-ReadinessInput tempInput(double? v, List<double> base) =>
-    ReadinessInput('temp', v, base, -1, 0.10);
+
+/// The skin-temp driver — GATED ON SETTLEDNESS, and the gate has no safe
+/// default.
+///
+/// The channel stays; what is gated is readiness's USE of it. A nightly mean
+/// taken over a window the strap spent partly warming up (or off the body) is
+/// displaced downwards, and `goodSign = -1` reads downwards as GOOD: on the one
+/// real gen4 night carrying a two-hour cold segment the ungated input pushed
+/// readiness UP by 7.6 points on the shipped baseline (and by ~26 against the
+/// clean-night baseline the audit measured against). A cold strap must not read
+/// as a recovered person.
+///
+/// [settledFraction] is `nightlySkinTemp`'s scalar for this night. NULL means
+/// "nobody measured it", which is not the same as "it was fine" — the input is
+/// refused, exactly as it is when the fraction is below [minSettledFraction],
+/// and the composite renormalises over the drivers that are present. Pass the
+/// fraction to get the driver back.
+///
+/// The ORIENTATION is inherited, not endorsed: Kräuchi's distal-proximal
+/// gradient work says nocturnal distal skin temperature BELOW baseline is
+/// vasoconstriction, not recovery, and `glassBoxReadiness` already disagrees
+/// with this file by using |z|. Deciding the sign is a separate, deliberate
+/// change (RD-05); this one only stops a sensor artifact from paying out.
+ReadinessInput tempInput(
+  double? v,
+  List<double> base, {
+  double? settledFraction,
+  double minSettledFraction = kMinSettledFraction,
+}) {
+  if (v == null) return ReadinessInput('temp', null, base, -1, 0.10);
+  if (settledFraction == null) {
+    return ReadinessInput('temp', null, base, -1, 0.10,
+        refusal: 'temp: no settled fraction measured for this night — an '
+            'ungated nightly mean cannot tell skin from a warming strap');
+  }
+  if (settledFraction < minSettledFraction) {
+    return ReadinessInput('temp', null, base, -1, 0.10,
+        refusal: 'temp: unsettled_skin_temp:settled='
+            '${round6(settledFraction)},need=${round6(minSettledFraction)}');
+  }
+  return ReadinessInput('temp', v, base, -1, 0.10);
+}
 
 class Readiness {
   final double score; // 0..100 glass-box readiness
@@ -82,12 +130,31 @@ class Readiness {
 /// Required minimum baseline points (per input) before readiness can compute.
 const int readinessCompositeMinBaseline = 3;
 
+/// Minimum number of inputs, and minimum surviving weight, before a composite
+/// is a composite at all.
+///
+/// Renormalising over present inputs is the frozen catalog's own rule
+/// ("Reweight on missing inputs, don't zero") and stays. What it must not do is
+/// hand the WHOLE 0..100 score to one input: with only `temp` present, its
+/// disclosed 0.10 becomes an effective 1.0 and a single sensor artifact IS the
+/// headline. Reachable — each input needs its own ≥3-night baseline and the four
+/// series fill at different rates. On the real gen4 corpus two of seventeen days
+/// scored off exactly one input (readiness 44.7 and 0.8); both now read "—".
+const int readinessCompositeMinInputs = 2;
+const double readinessCompositeMinWeight = 0.5;
+
 Metric<Readiness> readinessComposite(
   List<ReadinessInput> inputs, {
   int minBaseline = readinessCompositeMinBaseline,
+  int minInputs = readinessCompositeMinInputs,
+  double minWeightSum = readinessCompositeMinWeight,
 }) {
   final used = <String>[];
   final drivers = <Driver>[];
+  final refusals = <String>[
+    for (final inp in inputs)
+      if (inp.refusal != null) inp.refusal!
+  ];
   var weightSum = 0.0;
   var weightedZ = 0.0;
   // Track the best-covered input that has a value but a too-short baseline, so
@@ -128,20 +195,33 @@ Metric<Readiness> readinessComposite(
     drivers.add(Driver(inp.label, inp.weight * oriented,
         detail: 'oriented $method=${round6(oriented)}'));
   }
-  if (used.isEmpty || weightSum == 0) {
+  final suffix = refusals.isEmpty ? '' : ' Refused: ${refusals.join('; ')}.';
+  if (used.length < minInputs || weightSum < minWeightSum) {
     // If inputs HAD values but their baselines were too short, say so in the
     // machine-readable need_baseline convention (don't fabricate a score).
-    if (anyValuePresent && bestShortHave >= 0) {
+    if (used.isEmpty && anyValuePresent && bestShortHave >= 0) {
       return Metric<Readiness>.absent(
         tier: Tier.estimate,
         inputs_used: const [],
-        note: needBaselineNote(have: bestShortHave, need: minBaseline),
+        note: needBaselineNote(have: bestShortHave, need: minBaseline) + suffix,
       );
     }
-    return const Metric<Readiness>.absent(
+    if (used.isEmpty) {
+      return Metric<Readiness>.absent(
+        tier: Tier.estimate,
+        inputs_used: const [],
+        note: 'no readiness inputs present — "—" (never imputed).$suffix',
+      );
+    }
+    // Present but too thin to be a COMPOSITE. Renormalising here would promote
+    // one disclosed weight to 1.0; see [readinessCompositeMinInputs].
+    return Metric<Readiness>.absent(
       tier: Tier.estimate,
-      inputs_used: [],
-      note: 'no readiness inputs present — "—" (never imputed)',
+      inputs_used: used,
+      note: 'need_inputs:have=${used.length},need=$minInputs,'
+          'weight=${round6(weightSum)},need_weight=${round6(minWeightSum)} — '
+          'renormalising this few would hand the whole score to one input.'
+          '$suffix',
     );
   }
   // Renormalize weights over present inputs.
@@ -169,6 +249,6 @@ Metric<Readiness> readinessComposite(
     drivers: normDrivers,
     note: 'GLASS-BOX readiness: disclosed weights HRV>RHR>RR>temp, renormalized '
         'over present inputs. Drivers are definitional within the formula '
-        '(correction, not inferred cause).',
+        '(correction, not inferred cause).$suffix',
   );
 }

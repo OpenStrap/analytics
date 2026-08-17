@@ -10,10 +10,16 @@
 // detector instead, run strictly on the complement of the main sleep window.
 //
 // METHOD
-//   1. van Hees z-angle immobility (`immobilityMask`) — the SAME primitive the
-//      nocturnal spine uses. An angle is orientation-invariant, so it does not
-//      inherit the ~13% spread in |accel| across static wrist postures that
-//      makes magnitude-based stillness false-positive on a merely resting arm.
+//   1. van Hees z-angle immobility (`immobilityMask`). An angle is
+//      orientation-invariant, so it does not inherit the ~13% spread in |accel|
+//      across static wrist postures that makes magnitude-based stillness
+//      false-positive on a merely resting arm.
+//      NOT the nocturnal spine's stillness test — this used to claim it was.
+//      `AdvancedSleepStager` uses `_gravityDeltas`, the norm of the DIFFERENCE
+//      between successive gravity vectors. Both are orientation-CHANGE
+//      detectors and neither is the |accel| magnitude test van_hees.dart argues
+//      against, but they are different features over different windows and the
+//      two detectors have never been shown to agree on real nights.
 //   2. Enumerate EVERY immobility bout (the nocturnal path keeps only the
 //      longest), bridging brief arousals.
 //   3. Reject hard: off-wrist, charging/workout spans, the main sleep window,
@@ -282,7 +288,8 @@ Metric<List<NapWindow>> detectNaps(
   final awakeIdx = <int>[];
   for (var k = 0; k < n; k++) {
     if (hr[k] <= 0 || deferredSec[k]) continue;
-    if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) continue;
+    if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end)
+      continue;
     awakeIdx.add(k);
   }
   if (awakeIdx.length < minAwakeHrSamples) {
@@ -324,9 +331,7 @@ Metric<List<NapWindow>> detectNaps(
       continue;
     }
 
-    if (mainSleep != null &&
-        start < mainSleep.end &&
-        end > mainSleep.start) {
+    if (mainSleep != null && start < mainSleep.end && end > mainSleep.start) {
       inMainSleep++;
       continue;
     }
@@ -345,8 +350,7 @@ Metric<List<NapWindow>> detectNaps(
 
     final offFrac = _overlapFraction(aStart, aEnd, wristOff);
     final exFrac = _overlapFraction(aStart, aEnd, exclude);
-    if (offFrac >= maxNapOffWristFraction ||
-        exFrac >= maxNapOffWristFraction) {
+    if (offFrac >= maxNapOffWristFraction || exFrac >= maxNapOffWristFraction) {
       offWrist++;
       continue;
     }

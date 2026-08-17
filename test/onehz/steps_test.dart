@@ -650,17 +650,48 @@ void main() {
       // TS-03a: there is no `220 − age` fallback left in here — `hrmax` is
       // required, and it is the only thing that sets the flex gate. Two
       // ceilings for the same 30 y/o (220−30 = 190 vs Tanaka 208−0.7·30 = 187)
-      // put the gate at 95 vs 93.5 bpm, so a day spent at 94 bpm is entirely
-      // basal on one and entirely active on the other. That divergence is the
-      // bug the single dispatched definition exists to remove; this pins that
-      // the number in front of it is what decides.
+      // put the gate at 123.5 vs 121.55 bpm, so a day spent at 122 bpm is
+      // entirely basal on one and entirely active on the other. That divergence
+      // is the bug the single dispatched definition exists to remove; this pins
+      // that the number in front of it is what decides.
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
-      final hr = List<double>.filled(1440, 94.0);
+      final hr = List<double>.filled(1440, 122.0);
       final wide = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
       final tanaka = Calories.dailyEnergy(hr, profile: profile, hrmax: 187);
       expect(wide.active, 0.0);
       expect(tanaka.active, greaterThan(0.0));
+    });
+
+    test('MOT-02: the flex point is 0.65·HRmax, not 0.50 — a 100 bpm day is '
+        'not "active"', () {
+      // 0.50 put the gate at 93.5 bpm for a 30 y/o, inside the region where
+      // Keytel is extrapolating off the end of its own fitted exercise data.
+      // MEASURED on whoop-4.db (9 days, 70 kg/170 cm/30 y male stand-in, Tanaka
+      // 187): billed wake minutes 39.4 % → 4.9 %, daily ACTIVE energy
+      // min/median/max 769/1955/4062 → 9/48/1917 kcal, daily TOTAL
+      // 1544–5582 → 793–3437 kcal. Everyone's active energy drops; the quiet
+      // days lose nearly all of it, which is the point.
+      expect(Calories.defaultActiveFraction, 0.65);
+      final profile = const WorkoutUserProfile(
+          weightKg: 70, heightCm: 170, age: 30, sex: 'male');
+      // 16 h of ordinary waking at 100 bpm — clears the old gate, not the new.
+      final quiet = List<double>.filled(960, 100.0);
+      expect(Calories.dailyEnergy(quiet, profile: profile, hrmax: 187).active,
+          0.0);
+      expect(
+          Calories.dailyEnergy(quiet,
+                  profile: profile, hrmax: 187, activeFraction: 0.50)
+              .active,
+          greaterThan(4000.0),
+          reason: 'the number the old gate published for sitting around');
+      // A real session still bills: 45 min at 145 bpm.
+      final session = <double>[
+        ...List<double>.filled(915, 100.0),
+        ...List<double>.filled(45, 145.0),
+      ];
+      expect(Calories.dailyEnergy(session, profile: profile, hrmax: 187).active,
+          closeTo(553.0, 5.0));
     });
 
     test('an exercise block adds active calories on top of basal', () {

@@ -79,23 +79,50 @@ class AlertnessForecast {
       };
 }
 
-// Published Three-Process parameters (Åkerstedt & Folkard). They are group
-// values on the model's own 1-16 alertness scale; we only ever use the SHAPE
-// they produce, which is why no constant here is exposed or printed.
-const double _sUpper = 14.3; // asymptote S recovers toward during sleep
-const double _sLower = 2.4; // asymptote S decays toward while awake
-const double _tauWake = 2.6; // h, decay time constant awake
-const double _tauSleep = 4.2; // h, recovery time constant asleep
-const double _cAmplitude = 2.5; // circadian amplitude
-const double _wInertia = 5.72; // sleep-inertia magnitude at wake
-const double _tauInertia = 0.67; // h, inertia decay
+// Published Three-Process parameters, quoted verbatim from Ingre / Van Leeuwen
+// et al., PLOS ONE 2014;9(10):e108679 (PMC4203690 §1.1–1.8), which restates
+// Åkerstedt & Folkard's fitted values. They are group values on the model's own
+// 1-16 alertness scale; we only ever use the SHAPE they produce, which is why no
+// constant here is exposed or printed. The rate constants are published as
+// per-hour RATES — written as 1/rate here so the paper's own numbers are on the
+// page and the next sweep can re-check without re-finding it.
+//
+// THE TWO TIME CONSTANTS WERE WRONG UNTIL 2026-08-17: τ_wake was 2.6 h (the
+// published τ_SLEEP, written into the wake slot) and τ_sleep 4.2 h. S therefore
+// hit its lower asymptote by mid-morning and the drawn curve was process C alone
+// for two thirds of the day. Do not "simplify" these back to round numbers.
+const double _sUpper = 14.3; // ha — asymptote S recovers toward during sleep
+const double _sLower = 2.4; // la — asymptote S decays toward while awake
+const double _tauWake = 1 / 0.0353; // h — 28.33, wake decay (published rate)
+const double _tauSleep = 1 / 0.3813; // h — 2.62, sleep recovery (published rate)
+const double _cAmplitude = 2.5; // Ca — 24 h circadian amplitude
+const double _uAmplitude = 0.5; // Ua — 12 h ultradian amplitude
+const double _uMean = -0.5; // Um — ultradian offset
+const double _wInertia = 5.72; // Wc — sleep-inertia magnitude at wake
+const double _tauInertia = 0.67; // Wd — h, inertia decay
 
-/// Population circadian peak, used only when the user's own acrophase is not
-/// available. Disclosed in the note, because it is an assumption about *this*
-/// user's body clock made from other people's.
-const double _defaultAcrophaseHours = 16.0;
+// NOT IMPLEMENTED, deliberately: the sleep brake (bl 12.2), which slows S
+// recovery late in a sleep episode. It only bends recovery inside a long sleep,
+// and every sleep this function models is either last night (entered through
+// [sleepDurationHours], not simulated) or a nap far shorter than the brake's
+// reach. Named here so the omission is a decision on the page, not a gap.
+
+/// Population circadian peak (p = 16.8 h), used only when the user's own
+/// acrophase is not available. Disclosed in the note, because it is an
+/// assumption about *this* user's body clock made from other people's.
+const double _defaultAcrophaseHours = 16.8;
 
 const double _stepHours = 0.25;
+
+/// The two phase disclosures. Which one ships is the difference between "we
+/// guessed your body clock from other people" and "we fitted a proxy for it on
+/// your own rhythm" — never "we measured it", because nothing here does.
+const String _assumedPhaseNote =
+    'Circadian phase ASSUMED from the population (peak ~16:48), not measured '
+    'on you. ';
+const String _fittedPhaseNote =
+    'Circadian phase taken from a rhythm fitted on your own data — a PROXY for '
+    'body-clock phase, which nothing on this band measures. ';
 
 /// Forecast the SHAPE of today's alertness from last night's sleep.
 ///
@@ -103,7 +130,12 @@ const double _stepHours = 0.25;
 /// long that night's sleep actually was. BOTH are required to be present — a
 /// null in either is an abstention, not a default. [naps] are daytime sleeps in
 /// the same local-hour frame. [circadianAcrophaseHours] is the user's own
-/// cosinor acrophase when we have one.
+/// cosinor acrophase when we have one — a fitted PROXY for body-clock phase (the
+/// caller today fits it on hourly HR, which tracks activity), never a measured
+/// alertness phase, and the note says which of the two produced the curve.
+///
+/// The curve runs from wake to the projected end of the waking day
+/// (24 h − [sleepDurationHours]), capped at [horizonHours].
 ///
 /// Local clock hours throughout, never epochs: mixing the two is how a day
 /// label ends up an hour out and a "trough" lands in the wrong afternoon.
@@ -150,7 +182,17 @@ Metric<AlertnessForecast> alertnessForecast({
           ? circadianAcrophaseHours
           : _defaultAcrophaseHours;
 
-  final steps = (horizonHours / _stepHours).round();
+  // THE CURVE ENDS WHEN THE DAY DOES. Until 2026-08-17 it ran a fixed 18 h and
+  // the trough search below could only look at windows that fitted inside that
+  // cut — so the "lowest two hours" was the LAST admissible window, wake + 16.25
+  // h, in 24 of 24 replayed wake × sleep combinations, and sleep duration moved
+  // it by exactly 0.00 h. The horizon, not the model, was the answer. The waking
+  // day is 24 h minus last night's sleep, so the input the two documented gates
+  // exist to protect now actually moves the output. [horizonHours] caps it; the
+  // 3 h floor only guards absurd input (a claimed 22 h night).
+  final wakingHours =
+      math.max(3.0, math.min(horizonHours, 24.0 - sleepDurationHours));
+  final steps = (wakingHours / _stepHours).round();
   final raw = <double>[];
   var s = s0;
   for (var i = 0; i <= steps; i++) {
@@ -163,8 +205,12 @@ Metric<AlertnessForecast> alertnessForecast({
           : _sLower + (s - _sLower) * math.exp(-_stepHours / _tauWake);
     }
     final c = _cAmplitude * math.cos(2 * math.pi * (clock - phase) / 24.0);
+    // Process U — the model's 12 h ultradian harmonic, phase-locked to the same
+    // acrophase. Missing until 2026-08-17, which flattened the mid-day wobble.
+    final u =
+        _uAmplitude * math.cos(2 * math.pi * (clock - phase) / 12.0) + _uMean;
     final w = _wInertia * math.exp(-(i * _stepHours) / _tauInertia);
-    raw.add(s + c - w);
+    raw.add(s + c + u - w);
   }
 
   // Normalise inside the day. The result is a picture, not a quantity.
@@ -184,6 +230,13 @@ Metric<AlertnessForecast> alertnessForecast({
   // "around mid-afternoon" is the resolution this model supports, and a
   // to-the-minute low would imply a precision it does not have. The first hour
   // is excluded — that dip is sleep inertia, which is over, not a forecast.
+  //
+  // READ THE NOTE BEFORE TRUSTING THIS WINDOW. Under this model alertness mostly
+  // falls across the waking day, so the lowest window is usually its last hours
+  // (an early riser with a long night is the case where the morning wins). Where
+  // it lands is arithmetic on wake time and sleep length — nothing here measures
+  // a dip on you — which is why the note says so and the label is a part-of-day,
+  // never a time.
   final w2 = (2.0 / _stepHours).round();
   final skip = (1.0 / _stepHours).round();
   var bestStart = skip;
@@ -216,7 +269,10 @@ Metric<AlertnessForecast> alertnessForecast({
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'Three-Process Model shape only — NO SCORE. '
-        '${circadianAcrophaseHours == null ? "Circadian phase ASSUMED from the population (peak ~16:00), not measured on you. " : ""}'
+        '${circadianAcrophaseHours == null ? _assumedPhaseNote : _fittedPhaseNote}'
+        'The low window is where this model bottoms out over your waking day — '
+        'usually its last hours. It follows from when you woke and how long you '
+        'slept, and is not a dip measured on you. '
         '$safety',
   );
 }

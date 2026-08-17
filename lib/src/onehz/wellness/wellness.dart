@@ -2,6 +2,10 @@
 //
 // Built on the foundations (types/util/baseline/fusion) and clinical (cosinor,
 // illness_cusum) layers. MED-tier, RELATIVE-honest methods:
+//   - nightlySkinTemp      : the nightly skin-temp mean over the SETTLED part
+//                            of the window + the settled fraction. THE producer
+//                            every temp consumer should read; a warming strap
+//                            is not a cold person. PER-FAMILY.
 //   - tempCircadian        : relative skin-temp cosinor + IS/IV, PER-FAMILY
 //                            (gen4 ADC vs gen5 centi-°C); M10/L5/RA withheld
 //   - tempIllnessFlag      : Smarr nightly relative-temp z, CYCLE-AWARE

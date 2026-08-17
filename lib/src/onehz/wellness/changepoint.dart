@@ -8,11 +8,17 @@
 //      each point against the data BEFORE it (an expanding pre-change baseline,
 //      restarted at every detection) and fires when the accumulated deviation
 //      crosses a threshold. Cheap, streaming, for "something just shifted".
-//   2. OFFLINE exact change-point search via binary segmentation with an
-//      MBIC/BIC penalty (Killick 2012 cost = Gaussian change-in-mean SSE), with
-//      a min-segment length ≥7. (Exact PELT and binary segmentation give the
-//      same segmentation for the change-in-mean cost; we use the simpler
-//      recursive binary search guarded by the same penalty.)
+//   2. OFFLINE GREEDY binary segmentation with a BIC penalty on the Gaussian
+//      change-in-mean cost (Killick 2012), min-segment length ≥7. This is an
+//      APPROXIMATION to the exact partition, NOT PELT: Killick, Fearnhead &
+//      Eckley 2012 (JASA 107(500):1590-1598) is built on exactly that contrast
+//      — PELT is exact while binary segmentation "only provides an approximate
+//      solution and can lead to poor estimation of the number and position of
+//      changepoints", because a greedy first split is not in general the
+//      optimal single split of an optimally-partitioned series. We take the
+//      approximation on purpose (it is retrospective, gated by a penalty AND an
+//      MDC effect-size floor); the header used to claim the two agree, which is
+//      the paper's counter-example, not its result.
 //
 // HONESTY: change-points are reported on SMOOTHED aggregates only and gated by
 // the penalty so we don't celebrate regression-to-the-mean noise. min-seg
@@ -42,6 +48,20 @@ class CusumDetection {
 /// value), [h] decision threshold in scale-units. [minBaseline] points required
 /// before any point can be scored.
 ///
+/// [dates] are the `yyyy-MM-dd` labels of [x], POSITIONALLY ALIGNED. Pass them.
+/// Callers feed this a COMPACTED series — only the days that produced a value —
+/// so without them the pre-change window and the accumulator are positional and
+/// silently span wear gaps: "10 points of baseline" becomes ten scattered days
+/// over four months, and evidence accumulated before a two-month gap still fires
+/// a critical-priority "your resting HR shifted" on the first day back. A CUSUM
+/// is evidence accumulated over CONSECUTIVE observations; across a gap there are
+/// no observations, so there is no evidence to carry. This is the same fix
+/// `clinical/illness_cusum.dart` already carries, and the failure mode
+/// `util.dart`'s [calendarDays] documents.
+///
+/// Omitting [dates] (or passing a mismatched length) keeps the old positional
+/// behaviour — no caller is made worse off — but it is not the honest reading.
+///
 /// Each point is standardized by the robust median/MAD of the points BEFORE it,
 /// back to the start of the current regime — never by the whole series. That is
 /// the difference between a detector and a description: standardizing by the
@@ -62,15 +82,26 @@ class CusumDetection {
 /// absent change-point beats a fabricated one.
 List<CusumDetection> cusumChangePoints(
   List<double> x, {
+  List<String>? dates,
   double k = 0.5,
   double h = 5.0,
   int minBaseline = 10,
 }) {
   final out = <CusumDetection>[];
   if (x.length <= minBaseline) return out;
+  final day =
+      (dates != null && dates.length == x.length) ? calendarDays(dates) : null;
   var regimeStart = 0; // first index of the current (pre-change) regime
   var up = 0.0, dn = 0.0;
   for (var i = 0; i < x.length; i++) {
+    // A break in the calendar breaks the regime AND the accumulator: the
+    // pre-change window restarts here and [minBaseline] consecutive days must
+    // accrue again before anything can be scored.
+    if (day != null && i > 0 && day[i] - day[i - 1] > 1) {
+      up = 0;
+      dn = 0;
+      regimeStart = i;
+    }
     final baseline = x.sublist(regimeStart, i);
     if (baseline.length < minBaseline) continue;
     // ponytail: median/MAD recomputed over the expanding window each step —
@@ -132,20 +163,36 @@ double _segSse(List<double> x, List<double> prefix, List<double> prefixSq,
   return sumSq - sum * sum / n;
 }
 
-/// Offline change-point detection by binary segmentation with a BIC/MBIC
+/// Offline change-point detection by greedy binary segmentation with a BIC
 /// penalty on the Gaussian change-in-mean cost.
 ///
 /// [x] the (smoothed) daily-aggregate series. [minSeg] minimum segment length
-/// (≥7 per catalog). The per-change penalty defaults to MBIC-style
-/// `penaltyK · σ̂² · ln(n)` where σ̂² is the variance of the full series; a
-/// split is accepted only if it reduces SSE by more than the penalty.
+/// (≥7 per catalog). The per-change penalty is `penaltyK · σ̂² · ln(n)` where
+/// σ̂² is the variance of the full series; a split is accepted only if it
+/// reduces SSE by more than the penalty.
+///
+/// [penaltyK] DEFAULTS TO 2.0 = BIC, and that 2 is not a taste setting. The
+/// reference implementation (`changepoint::penalty_decision`) gives
+/// BIC = (diffparam + 1)·log(n); for the Normal change-in-mean with known
+/// variance diffparam = 1, so BIC = 2·log(n) on the STANDARDISED cost, which is
+/// 2·σ̂²·ln(n) on the raw-SSE scale [_binSeg] compares against. This shipped at
+/// 1.0 — exactly HALF the criterion the docstring named — so the detector split
+/// more eagerly than the method it claimed to be. Use 3.0 for a flat MBIC-like
+/// approximation (the real MBIC also carries Zhang & Siegmund's
+/// Σ log(τᵢ − τᵢ₋₁) segment-length term, which this does not implement — so do
+/// not call it MBIC).
+///
+/// It does NOT cancel against the σ̂² inflation the note below describes: on a
+/// series containing a real shift the full-series σ̂² already over-penalises,
+/// and halving the constant was not a correction for that, it was a second
+/// error pointing the other way with no reason to match in size.
 ///
 /// Returns the change-point indices (start of each new segment), segment means,
 /// and segment spans.
 Metric<Segmentation> segmentChangePoints(
   List<double> x, {
   int minSeg = 7,
-  double penaltyK = 1.0,
+  double penaltyK = 2.0,
   double? penaltyOverride,
 }) {
   const inputs = ['daily_aggregate'];
@@ -213,7 +260,8 @@ Metric<Segmentation> segmentChangePoints(
     tier: Tier.estimate,
     inputs_used: inputs,
     note:
-        'binary segmentation w/ BIC-penalized change-in-mean; min-seg=$minSeg; '
+        'GREEDY binary segmentation (an approximation to the exact partition, '
+        'Killick 2012) w/ BIC-penalized change-in-mean; min-seg=$minSeg; '
         'below-MDC boundaries dropped=$dropped. Run on SMOOTHED aggregates '
         'only — do not celebrate regression-to-mean. RETROSPECTIVE ONLY: no '
         'forward alerting, and a boundary is a date that can MOVE when more '

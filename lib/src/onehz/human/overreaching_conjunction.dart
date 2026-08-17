@@ -26,7 +26,7 @@ class OverreachingConjunction {
   final double loadRatio;
 
   /// Nights in the recent window whose resting HR was above baseline by more
-  /// than the metric's MDC.
+  /// than the smallest worthwhile change (0.5 × the baseline's robust SD).
   final int nightsElevated;
   final int nightsConsidered;
 
@@ -56,9 +56,18 @@ class OverreachingConjunction {
 /// it must NOT contain the recent nights, or the elevation is compared against
 /// itself.
 ///
-/// A night counts as elevated only when it clears the MDC — a 1 bpm rise on
-/// four nights is arithmetic, not physiology. No dispersion in the baseline
-/// means no MDC means no elevated nights, ever.
+/// A night counts as elevated only when it clears the smallest worthwhile
+/// change — 0.5 × the robust SD of the baseline window, the same Plews-style SWC
+/// clinical/readiness_lnrmssd.dart bands lnRMSSD with. A 1 bpm rise on four
+/// nights is arithmetic, not physiology. No dispersion in the baseline means no
+/// gate means no elevated nights, ever.
+///
+/// THIS WAS `mdc()` UNTIL 2026-08-17, and with no measured typical error mdc()
+/// falls back to the trailing scaled MAD, so the bar was 2.77 × the between-night
+/// SD it was gating on: 7.93 bpm on 8 real gen4 nights, which NOTHING cleared on
+/// the elevated side, so the conjunction could never fire — not "rarely", never.
+/// Requiring [minNightsElevated] nights over the SWC is where this detector's
+/// conservatism belongs; the per-night bar only has to mean "above your usual".
 Metric<OverreachingConjunction> overreachingConjunction({
   required Metric<LoadState>? load,
   required List<double?> rhrRecent,
@@ -97,7 +106,8 @@ Metric<OverreachingConjunction> overreachingConjunction({
   }
   final base = robustBaseline(rhrBaselineWindow, minValid: minBaseline);
   final centre = base.center;
-  final gate = mdc(base);
+  final scale = base.scale;
+  final gate = (scale != null && scale > 0) ? 0.5 * scale : null;
   if (centre == null || gate == null || !base.sufficient) {
     return Metric<OverreachingConjunction>.absent(
       tier: Tier.estimate,

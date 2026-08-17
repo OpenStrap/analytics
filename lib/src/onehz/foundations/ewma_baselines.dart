@@ -251,12 +251,20 @@ class Baselines {
     if (state.nValid >= minNightsSeed && !isYoung) {
       final dev = (value - state.baseline).abs();
       if (dev > hardOutlierK * state.spread) {
+        // [nightsSinceUpdate] counts nights the baseline DID NOT MOVE — that is
+        // the only reading `computeStatus` uses it for (stale after 14). A
+        // rejected night moved nothing, so it increments, exactly like the
+        // missing-night and out-of-range holds above. It used to reset to 0
+        // here, so the same counter meant "nights since we heard from the
+        // sensor" on one branch and "nights since the baseline moved" on the
+        // other, and 14 straight rejected nights read as trusted.
+        final m = state.nightsSinceUpdate + 1;
         return BaselineState(
             baseline: state.baseline,
             spread: state.spread,
             nValid: state.nValid,
-            nightsSinceUpdate: 0,
-            status: computeStatus(state.nValid, 0));
+            nightsSinceUpdate: m,
+            status: computeStatus(state.nValid, m));
       }
     }
 
@@ -269,8 +277,15 @@ class Baselines {
     final clamped = math.max(lo, math.min(hi, value));
     final newBaseline = effLb * clamped + (1.0 - effLb) * state.baseline;
 
-    // Spread uses the UNCLAMPED value so true deviations are tracked.
-    final absDev = (value - newBaseline).abs();
+    // Spread uses the UNCLAMPED value so true deviations are tracked — and it
+    // is measured against the baseline the night ARRIVED at, not the one the
+    // night has already pulled toward itself. Measuring against `newBaseline`
+    // (what shipped) makes the deviation identically (1 − λ_B)·(value −
+    // baseline) for anything inside the Winsor band, so the spread tracker was
+    // fed a systematically shrunken deviation: −4.83 % at halfLifeB = 14 and
+    // −20.63 % while young (earlyHalfLifeB = 3). A too-tight spread inflates
+    // every z downstream, which means MORE alerts, not fewer.
+    final absDev = (value - state.baseline).abs();
     final newSpread =
         math.max(cfg.floorSpread, ls * absDev + (1.0 - ls) * state.spread);
     final newN = state.nValid + 1;
