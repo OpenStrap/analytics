@@ -134,6 +134,90 @@ void main() {
       expect(m.note, contains('could resolve up to'));
     });
 
+    // -----------------------------------------------------------------------
+    // WHOLE-NIGHT PERIODOGRAM regression. The old robustness surrogate took ONE
+    // periodogram over the whole input and re-sampled it on 300/450/700-point
+    // grids. Over a night the periodogram's bins are ~30x finer than that grid
+    // step, so the three grids read three near-independent NOISE samples of a
+    // band that (measured on 14 real nights) holds ~2600 local maxima. It
+    // withheld 17 of 30 of the owner's nights, and when it did publish, the
+    // number was often not even the band's maximum — one real night published
+    // 10.66 br/min where that night's own sub-windows agree on 16.97.
+    //
+    // Signal below: 8 h of RSA whose rate ramps 19 -> 16 br/min (the drift
+    // measured across his real nights), on a random-walk RR baseline. The
+    // time-median rate is 17.5 br/min.
+    // -----------------------------------------------------------------------
+    ({List<double> rr, List<double> t}) rsaNight(int seed, {double hours = 8}) {
+      final rnd = math.Random(seed);
+      final rr = <double>[], t = <double>[];
+      final totalSec = hours * 3600;
+      const f0 = 19.0 / 60, f1 = 16.0 / 60;
+      var tMs = 0.0, walk = 0.0;
+      while (tMs < totalSec * 1000) {
+        final sec = tMs / 1000;
+        // Phase is the INTEGRAL of the instantaneous frequency.
+        final phase =
+            2 * math.pi * (f0 * sec + (f1 - f0) * sec * sec / (2 * totalSec));
+        walk = (walk + (rnd.nextDouble() - 0.5) * 12) * 0.98;
+        final v = 1000.0 + walk + 40 * math.sin(phase);
+        tMs += v;
+        rr.add(v);
+        t.add(tMs);
+      }
+      return (rr: rr, t: t);
+    }
+
+    test('RSA: an 8-hour night resolves its time-median rate, not a noise spike',
+        () {
+      // Measured, same three noise seeds: OLD published 18.48 / 16.94 / 16.06 —
+      // three different answers to the same signal, each passing its own
+      // agreement gate. NEW: 17.52 / 17.52 / 17.49 against a truth of 17.5.
+      for (final seed in [11, 12, 13]) {
+        final s = rsaNight(seed);
+        final corr = correctRr(s.rr, rrTsMs: s.t);
+        final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+            artifactFraction: 1 - corr.cleanFraction);
+        expect(m.present, isTrue, reason: m.note);
+        expect(m.value!.brpm!, closeTo(17.5, 0.3),
+            reason: 'seed $seed got ${m.value!.brpm}');
+        expect(m.confidence, greaterThan(0.85), reason: m.note);
+      }
+    });
+
+    test('RSA: a shuffled (no-RSA) surrogate night is WITHHELD', () {
+      // The honesty half of the gate. Shuffling NN destroys the respiratory
+      // modulation and keeps the sampling geometry; measured sub-window
+      // consensus falls to ~20% (33-42 of ~190) against 100% for the real
+      // signal, and 15-28% on the owner's 14 real nights shuffled.
+      final s = rsaNight(11);
+      final corr = correctRr(s.rr, rrTsMs: s.t);
+      final shuffled = [...corr.nn]..shuffle(math.Random(3));
+      final m =
+          rsaRespRate(shuffled, corr.nnTimesMs, artifactFraction: 0);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('sub-windows'));
+    });
+
+    test('RSA: trimming the night barely moves the rate', () {
+      // The failure that started this: the SAME real night replayed with a
+      // 24-minute-longer sleep window was withheld once and published 17.56 the
+      // other time. Here, dropping the last 10% of the night (whose true
+      // time-median rises 17.5 -> 17.65) moves the estimate 17.52 -> 17.65,
+      // while the old rule moved 18.48 -> 16.37.
+      final s = rsaNight(11);
+      final corr = correctRr(s.rr, rrTsMs: s.t);
+      final full = rsaRespRate(corr.nn, corr.nnTimesMs, artifactFraction: 0);
+      final k = (corr.nn.length * 0.9).floor();
+      final trimmed = rsaRespRate(
+          corr.nn.sublist(0, k), corr.nnTimesMs.sublist(0, k),
+          artifactFraction: 0);
+      expect(full.present && trimmed.present, isTrue);
+      expect((full.value!.brpm! - trimmed.value!.brpm!).abs(), lessThan(0.5),
+          reason: '${full.value!.brpm} vs ${trimmed.value!.brpm}');
+    });
+
     test('RSA: absent on too-few beats -> null + confidence 0', () {
       final m =
           rsaRespRate([800, 810, 790], [800, 1610, 2400], artifactFraction: 0);

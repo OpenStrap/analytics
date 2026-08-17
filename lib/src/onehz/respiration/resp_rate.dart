@@ -4,9 +4,10 @@
 //   * RSA respiratory rate (PRIMARY) — Lomb-Scargle HF-peak on cleaned NN beat
 //     times. Respiratory sinus arrhythmia modulates RR at the breathing
 //     frequency; the HF (0.15–0.40 Hz) spectral peak => breaths/min.
-//     Pimentel 2017-style robustness: estimate over several Lomb-Scargle grid
-//     resolutions ("multiple AR-order surrogates") and keep the result only if
-//     they agree (low dispersion) — otherwise withhold.
+//     Welch 1967 segmentation: the peak is estimated on ~5-minute sub-windows
+//     and the night's rate is the MEDIAN across them; the robustness check is
+//     agreement of those sub-windows with each other. See [rsaRespRate] for why
+//     the whole-window periodogram it replaced could not work.
 //   * RIIV respiratory rate — band-pass 0.1–0.5 Hz on the 1 Hz green PPG ADC
 //     (respiratory-induced intensity variation), peak frequency => breaths/min.
 //   * Karlen 2013 SD-gate fusion — discard a window when the two estimates
@@ -81,17 +82,63 @@ class RespEstimate {
       };
 }
 
+/// Longest span (seconds) a single RSA periodogram may cover.
+///
+/// The Lomb-Scargle periodogram is an INCONSISTENT estimator: its variance does
+/// not fall as the record lengthens — a longer record buys more independent
+/// frequency bins (spacing 1/T), each still ~exponentially distributed around
+/// the true PSD. Over an 8-hour night 1/T is 3.5e-5 Hz, so the 0.15–0.5 Hz band
+/// holds ~10⁴ independent bins and (measured on 14 real nights) ~2600 local
+/// maxima; its global maximum is a noise spike, not the respiratory rate.
+/// Breathing is also non-stationary across a night — measured, this person's
+/// rate falls ~19 → 16 br/min from the first quarter to the last — so one
+/// spectrum over the whole night smears a drifting peak anyway.
+///
+/// 300 s is the classic compromise: long enough that 1/T = 0.0033 Hz (0.2
+/// br/min) resolves the HF band, short enough that breathing is stationary
+/// inside it.
+const double rsaSegmentSec = 300;
+
 /// RSA respiratory rate from cleaned NN beat times (PRIMARY 24/7 source).
 ///
 /// [nnMs] cleaned NN intervals (ms), [nnTimesMs] their cumulative beat times
 /// (ms). [artifactFraction] from RR-correction drives the confidence gate.
-/// Pimentel-style robustness: re-estimate the HF peak across several grid
-/// resolutions; accept only if they agree within [agreeBrpm] br/min.
+///
+/// METHOD (Welch 1967 segmentation + a data-perturbation robustness check).
+/// The input is cut into ~[rsaSegmentSec] sub-windows overlapping 50%, each gets
+/// its own Lomb-Scargle HF peak, and the reported rate is the MEDIAN of those
+/// peaks. The robustness test is whether the sub-windows AGREE: at least
+/// [minConsensus] of them must land within [tolBrpm] br/min of that median,
+/// otherwise the rate is withheld. That perturbs the DATA (different minutes of
+/// the same night), which is the actual question — is there a stable
+/// respiratory signal here?
+///
+/// WHAT THIS REPLACED, AND WHY. The previous check took ONE periodogram over
+/// the whole input and re-sampled it on 300/450/700-point grids, calling that
+/// "a deterministic analogue" of Pimentel 2017's AR-model-order surrogate. It
+/// is not one. Refining a grid re-reads the SAME spectrum, and over a night
+/// that spectrum's bins are spaced ~30× finer than the grid step, so the three
+/// grids were drawing three near-independent noise samples: measured on 14 real
+/// nights the three peaks scattered by up to 8 br/min, the gate withheld 17 of
+/// 30 nights, and on nights it did publish the number was often not even the
+/// band's true maximum (one night published 10.66 br/min where the same night's
+/// sub-windows agree on 16.96, and the fine-grid maximum was 18.55). Same night
+/// replayed twice with a 24-minute-longer sleep window: withheld once, 17.56
+/// the other time. The citation went with it — this is Welch segmentation, not
+/// Pimentel's surrogate.
+///
+/// [tolBrpm] 2.0 and [minConsensus] 0.5 are calibrated against a SURROGATE null
+/// (the same nights with their NN values shuffled, which destroys RSA and keeps
+/// the sampling geometry): surrogate consensus measured 15–28% across 14 real
+/// nights, real consensus 52–85%. Uniform peaks over the ~21 br/min searchable
+/// band would put ±2 br/min agreement at 19% by chance, which is what the
+/// surrogates show. 50% is ~2.5× chance and sits in the measured gap.
 Metric<RespEstimate> rsaRespRate(
   List<double> nnMs,
   List<double> nnTimesMs, {
   required double artifactFraction,
-  double agreeBrpm = 3.0,
+  double tolBrpm = 2.0,
+  double minConsensus = 0.5,
   double maxArtifact = 0.30,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
@@ -140,89 +187,133 @@ Metric<RespEstimate> rsaRespRate(
     );
   }
 
-  // Pimentel 2017 robustness surrogate: vary the spectral resolution (a
-  // deterministic analogue of varying the AR model order) and require the HF
-  // peak to be stable across them. A respiratory peak is sharp & resolution-
-  // invariant; spurious HRV structure or artifact is not.
+  // WELCH SEGMENTATION. Sub-windows of [rsaSegmentSec] (or half the input when
+  // it is shorter than two of them), overlapping 50%. Each gets its own
+  // periodogram on a grid oversampled 4× ITS OWN resolution (1/span) — a grid
+  // finer than that only re-reads the same bins, which is the trap the old
+  // 300/450/700 surrogate fell into.
+  var segSec = rsaSegmentSec;
+  if (spanSec < 2 * segSec) segSec = spanSec / 2;
+  if (segSec < 60) {
+    return Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'window spans ${round6(spanSec)} s — needs ≥120 s to test the '
+          'respiratory peak against itself over time',
+    );
+  }
   final peaks = <double>[]; // br/min
   final peakHz = <double>[]; // the same peaks in Hz, index-aligned
   final peakPwr = <double>[]; // their spectral power, index-aligned
-  var atCeiling = false;
-  for (final grid in const [300, 450, 700]) {
-    final freqs = freqGrid(rsaLoHz, hiHz, grid);
-    final ls = lombScargle(tSec, nnMs, freqs);
-    if (ls == null) continue;
-    final pk = ls.peakFreq(rsaLoHz, hiHz);
-    if (pk == null) continue;
+  var atCeiling = 0;
+  var belowBand = 0;
+  var thin = 0;
+  for (var s = tSec.first; s + segSec <= tSec.last + 1e-9; s += segSec / 2) {
+    final lo = _lowerBound(tSec, s);
+    final hi = _lowerBound(tSec, s + segSec);
+    final k = hi - lo;
+    // A sub-window has to be BOTH beat-dense and time-complete: a dropout in
+    // the middle leaves few beats spanning the full 5 minutes, and its
+    // periodogram is a window function, not a spectrum.
+    if (k < 30 || tSec[hi - 1] - tSec[lo] < segSec * 0.8) {
+      thin++;
+      continue;
+    }
+    final segT = tSec.sublist(lo, hi);
+    final segNn = nnMs.sublist(lo, hi);
+    final segSpan = segT.last - segT.first;
+    // Per sub-window Nyquist: heart rate moves through the night, so the
+    // resolvable ceiling does too. A sub-window whose beat rate cannot cover
+    // the HF band is dropped for the SAME alias reason as the whole window.
+    final segHi = rsaCeilingHz(segSpan / (k - 1));
+    if (segHi < rsaHiHz) {
+      belowBand++;
+      continue;
+    }
+    final grid = math.max(64, ((segHi - rsaLoHz) * 4 * segSpan).ceil());
+    final ls = lombScargle(segT, segNn, freqGrid(rsaLoHz, segHi, grid));
+    if (ls == null) {
+      thin++;
+      continue;
+    }
+    final pk = ls.peakFreq(rsaLoHz, segHi);
+    if (pk == null) {
+      thin++;
+      continue;
+    }
     // A peak pinned to the top of the searchable band means the true rate is
-    // at or above what this window can resolve. That is an ABSENCE, not a rate:
-    // reporting the edge would publish the ceiling as if it were a measurement.
-    final step = grid > 1 ? (hiHz - rsaLoHz) / (grid - 1) : hiHz - rsaLoHz;
-    if (pk >= hiHz - step) {
-      atCeiling = true;
+    // at or above what this sub-window can resolve. That is an ABSENCE, not a
+    // rate: reporting the edge would publish the ceiling as a measurement.
+    if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
+      atCeiling++;
       continue;
     }
     peaks.add(pk * 60.0);
     peakHz.add(pk);
     peakPwr.add(_powerAt(ls, pk));
   }
-  if (atCeiling && peaks.length < 2) {
+  if (peaks.length < 3) {
+    final dropped = atCeiling + belowBand + thin;
+    final why = dropped == 0
+        ? 'only ${peaks.length} usable sub-windows'
+        : (belowBand >= atCeiling && belowBand >= thin
+            ? '$belowBand of ${peaks.length + dropped} sub-windows had a beat '
+                'rate too low to cover the HF band (any peak could be an alias)'
+            : (atCeiling >= thin
+                ? '$atCeiling of ${peaks.length + dropped} sub-windows peaked '
+                    'at/above the resolvable ceiling '
+                    '(${round6(hiHz * 60)} br/min)'
+                : '$thin of ${peaks.length + dropped} sub-windows were too '
+                    'sparse or gappy to spectrum'));
     return Metric<RespEstimate>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'respiratory peak at/above the resolvable ceiling '
-          '(${round6(hiHz * 60)} br/min) — rate withheld',
+      note: 'no stable HF respiratory peak resolved — $why',
     );
   }
-  if (peaks.length < 2) {
-    return const Metric<RespEstimate>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'no stable HF respiratory peak resolved',
-    );
+  // AGREEMENT GATE — over TIME, not over grid resolution. How much of the night
+  // agrees with the night's own median?
+  final medBrpm0 = median(peaks)!;
+  var within = 0;
+  for (final p in peaks) {
+    if ((p - medBrpm0).abs() <= tolBrpm) within++;
   }
-  // Agreement gate (the robustness check).
-  final spread = (peaks.reduce(math.max) - peaks.reduce(math.min));
-  if (spread > agreeBrpm) {
+  final consensus = within / peaks.length;
+  if (consensus < minConsensus) {
     return Metric<RespEstimate>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'HF peak unstable across spectral resolutions '
-          '(spread ${round6(spread)} br/min) — withheld',
+      note: 'HF peak unstable across the window\'s own sub-windows — only '
+          '$within of ${peaks.length} ${round6(segSec)}s sub-windows fall '
+          'within ${round6(tolBrpm)} br/min of the median; withheld',
     );
   }
   // ONE SOURCE for the reported triple. `brpm` used to be median(peaks) while
-  // `peakHz`/`power` came from the highest-POWER grid, so `peak_hz * 60` and
-  // `brpm` could disagree by up to [agreeBrpm] inside a single RespEstimate.
-  // We now pick the MEDOID grid — the grid whose peak is closest to the median
-  // across grids — and report its rate, frequency and power together, so
+  // `peakHz`/`power` came from the highest-POWER estimate, so `peak_hz * 60`
+  // and `brpm` could disagree inside a single RespEstimate. We pick the MEDOID
+  // sub-window — the one whose peak is closest to the median across
+  // sub-windows — and report its rate, frequency and power together, so
   // `brpm == peakHz * 60` holds exactly and `power` is the power measured AT
-  // the reported frequency. (With three grids the medoid IS the median; with
-  // two, the nearer of the pair. Robustness still comes from the agreement gate
-  // above, which already rejected any disagreeing set.)
-  final medBrpm = median(peaks)!;
+  // the reported frequency.
   var best = 0;
   for (var i = 1; i < peaks.length; i++) {
-    if ((peaks[i] - medBrpm).abs() < (peaks[best] - medBrpm).abs()) best = i;
+    if ((peaks[i] - medBrpm0).abs() < (peaks[best] - medBrpm0).abs()) best = i;
   }
   final brpm = peaks[best];
   final bestPeakHz = peakHz[best];
   final bestPower = peakPwr[best];
-  // Confidence: high when clean & resolution-stable; penalize artifacts and
-  // wide spread. Cap below 1 (PRV ceiling).
-  final conf = clamp(
-    (1 - artifactFraction) * (1 - spread / (agreeBrpm * 2)),
-    0.2,
-    0.9,
-  );
+  // Confidence: how much of the window agrees with itself, discounted by
+  // artifacts. Cap below 1 (PRV ceiling).
+  final conf = clamp((1 - artifactFraction) * consensus, 0.2, 0.9);
   return Metric<RespEstimate>(
     value: RespEstimate(brpm, bestPeakHz, bestPower, 'rsa'),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
     note: 'RSA HF-peak respiratory rate (Lomb-Scargle on native beat times, '
-        'medoid of ${peaks.length} spectral resolutions — brpm, peak_hz and '
-        'power all come from that one grid); PRV-derived; this window could '
+        'median of ${peaks.length} ${round6(segSec)}s sub-windows, $within of '
+        'them within ${round6(tolBrpm)} br/min of it — brpm, peak_hz and power '
+        'all come from the medoid sub-window); PRV-derived; this window could '
         'resolve up to ${round6(hiHz * 60)} br/min',
   );
 }
@@ -426,6 +517,20 @@ Metric<FusedResp> fuseRespRate(
 double _confToVar(double conf) {
   final c = clamp(conf, 0.05, 1.0);
   return 1.0 / (c * c);
+}
+
+/// First index of [a] whose value is >= [v]. [a] must be non-decreasing.
+int _lowerBound(List<double> a, double v) {
+  var lo = 0, hi = a.length;
+  while (lo < hi) {
+    final m = (lo + hi) >> 1;
+    if (a[m] < v) {
+      lo = m + 1;
+    } else {
+      hi = m;
+    }
+  }
+  return lo;
 }
 
 /// Power at (or nearest to) a given frequency in a Lomb-Scargle spectrum.
