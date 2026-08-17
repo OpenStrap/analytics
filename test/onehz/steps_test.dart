@@ -239,6 +239,60 @@ void main() {
     });
   });
 
+  // ── OxWalk: the first ground truth this counter has ever met ──────────────
+  //
+  // Measured 2026-08-17 with `dart run tool/oxwalk_validate.dart` against
+  // OxWalk (Small, von Fritsch, Doherty, Khalid, Price; Oxford, Dec 2022,
+  // CC BY) — 39 adults, unscripted free living, dominant wrist + hip, camera
+  // ground truth. Chunked exactly as production does (`_minuteSamples = 6000`).
+  // Full write-up: edge/docs/internal/OXWALK_VALIDATION.md.
+  //
+  //   Wrist 100 Hz   MAPE 33.0%   bias -13.6%   median -19.5%   totals -19.8%
+  //                  per-participant ratio 0.33 - 3.00, only 5/39 within +-10%
+  //   Hip   100 Hz   MAPE 29.5%   bias -29.2%   totals -17.6%
+  //   Wrist  25 Hz   MAPE 91.9%                 totals -87.5%   <- dead
+  //   Hip    25 Hz   MAPE 94.5%                 totals -93.6%   <- dead
+  //   rate cliff (100 Hz wrist decimated): 50 Hz -27.0%, 33 Hz -60.1%,
+  //                                        25 Hz -86.5%, 20 Hz -89.9%
+  //   chunk sweep (wrist 100 Hz, MAPE):  25 s 37.4 | 30 s 34.5 | 60 s 33.0
+  //                                      | 2 min 34.3 | 5 min 37.7 | 1 h 55.1
+  //   best single gain 1.18 -> MAPE 27.9% (from 33.0%). Not applied: the error
+  //   is not multiplicative — see the doc.
+  //
+  // The dataset is 290 MB and is deliberately not committed, so nothing here
+  // re-measures it. What this pins is the CONFIGURATION those numbers describe:
+  // change any of it and the recorded numbers are stale, which is exactly when
+  // you want to be told.
+  group('Tier A — OxWalk-measured configuration (2026-08-17)', () {
+    test('the parameters OxWalk was measured against have not moved', () {
+      const why = 'OxWalk numbers in edge/docs/internal/OXWALK_VALIDATION.md '
+          'were measured against this exact configuration. If you changed it '
+          'deliberately, re-run tool/oxwalk_validate.dart on the 39 '
+          'participants and update BOTH the doc and this test.';
+      expect(StepParams.gain, 1.00, reason: why);
+      expect(StepParams.sens, 0.10, reason: why);
+      expect(StepParams.confirm, 8, reason: why);
+      expect(StepParams.filter, 8, reason: why);
+      expect(StepParams.window, 33, reason: why);
+      expect(StepParams.thrOrder, 4, reason: why);
+      expect(StepParams.maxMinTimeout, 120, reason: why);
+      expect(StepParams.minStepIntervalS, 0.2, reason: why);
+      expect(StepParams.maxStepIntervalS, 2.0, reason: why);
+    });
+
+    test('gain stays 1.00 — OxWalk found no single multiplier that works', () {
+      // Tempting and wrong. 1.18 minimises MAPE across the 39 and recovers only
+      // 5 points of a 33-point error, and the sign of the error FLIPS with
+      // activity level: participants with >=600 true steps/h under-count by a
+      // uniform -25.4%, while the 17 with <600 average +1.7% bias around a
+      // 42.9% MAPE because two of them over-count by 3x (P18: 217 true, 650
+      // counted; P28: 258 true, 685 counted). Multiplying by 1.18 improves the
+      // walkers slightly and pushes those two from +200%/+166% to +254%/+214%.
+      // A gain cannot fix an error whose sign depends on the input.
+      expect(StepParams.gain, 1.00);
+    });
+  });
+
   group('Calibration', () {
     test('credible walking bout seeds + refines the model', () {
       const live = PedometerResult(220, 120, 110.0, 0.25, 0.8);
