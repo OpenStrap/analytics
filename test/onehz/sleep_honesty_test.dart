@@ -539,6 +539,7 @@ void main() {
         nn.add(rr);
         ts.add(t);
       }
+      // ignore: deprecated_member_use_from_same_package
       final m = cardiopulmonaryCoupling(nn, ts);
       expect(m.present, isFalse);
       expect(m.value, isNull);

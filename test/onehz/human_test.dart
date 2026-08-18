@@ -506,6 +506,7 @@ void main() {
             weight: 0.12,
             lowerIsBetter: true),
       ];
+      // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
       final json = m.toJson((v) => v.toJson());
       expect(() => jsonEncode(json), returnsNormally);
