@@ -72,13 +72,41 @@ void main() {
       final m = relativeIntensityBands(enmo);
       expect(m.present, isTrue);
       final b = m.value!;
-      expect(b.lightCut, lessThan(b.moderateCut));
-      expect(b.moderateCut, lessThan(b.vigorousCut));
+      expect(b.lightCut!, lessThan(b.moderateCut!));
+      expect(b.moderateCut!, lessThan(b.vigorousCut!));
       expect(m.tier, Tier.relative);
       // a zero-ENMO minute is sedentary; the largest is vigorous.
       expect(b.labels.first, 'sedentary');
       expect(b.labels.last, 'vigorous');
       expect(b.minutesInBand.values.reduce((a, c) => a + c), 100);
+    });
+
+    test('frozen cut-points override the input\'s own percentiles', () {
+      // MT-11: the whole point. A rest day whose busiest minute is 0.03 g
+      // labels its own top decile "vigorous" when the cuts come from itself,
+      // and has no vigorous minute at all against cuts frozen over a real
+      // history. Same minutes, same function, two different readings — which
+      // is why the cuts have to be frozen before this is ever called.
+      final restDay = [for (var i = 0; i < 100; i++) 0.005 + i * 0.00025];
+      final self = relativeIntensityBands(restDay);
+      expect(self.value!.minutesInBand['vigorous'], greaterThan(0));
+
+      final frozen = relativeIntensityBands(
+        restDay,
+        frozenCuts: (light: 0.05, moderate: 0.15, vigorous: 0.30),
+      );
+      expect(frozen.value!.minutesInBand['vigorous'], 0);
+      expect(frozen.value!.minutesInBand['moderate'], 0);
+      expect(frozen.value!.vigorousCut, 0.30);
+      expect(frozen.note, contains('FROZEN'));
+    });
+
+    test('non-monotone frozen cut-points → absent, never reordered', () {
+      final m = relativeIntensityBands(
+        [for (var i = 0; i < 100; i++) i * 0.01],
+        frozenCuts: (light: 0.30, moderate: 0.15, vigorous: 0.05),
+      );
+      expect(m.present, isFalse);
     });
 
     test('empty input → absent, confidence 0', () {
@@ -115,14 +143,15 @@ void main() {
       return out;
     }
 
-    test('a still wrist reads dynAmp ≈ 0 at ANY gravity reading, while ENMO '
+    test(
+        'a still wrist reads dynAmp ≈ 0 at ANY gravity reading, while ENMO '
         'moves with the reference', () {
       // Same physical stillness, two orientations the sensor reads differently
       // (this ~0.05 g spread between postures is the real, measured fault).
-      final high = enmoSeries(_series(2, active: (_) => false, gz: 1.03),
-          gRef: 1.0);
-      final low = enmoSeries(_series(2, active: (_) => false, gz: 0.94),
-          gRef: 1.0);
+      final high =
+          enmoSeries(_series(2, active: (_) => false, gz: 1.03), gRef: 1.0);
+      final low =
+          enmoSeries(_series(2, active: (_) => false, gz: 0.94), gRef: 1.0);
       for (final m in high.minutes) {
         expect(m.dynAmp, closeTo(0.0, 1e-12));
       }
@@ -235,12 +264,42 @@ void main() {
     test('high-motion epoch → absent (no posture during motion)', () {
       final s = <AccelSample>[];
       for (var i = 0; i < 30; i++) {
-        // wild swings → jitter ≫ maxJitterG
+        // wild swings along ONE axis: direction constant, ‖a‖ swinging — the
+        // case only the magnitude gate can see.
         s.add(AccelSample(i * 1000.0, 0, 0, i.isEven ? 0.2 : 2.0));
       }
       final m = staticTilt(s);
       expect(m.present, isFalse);
       expect(m.confidence, 0);
+    });
+
+    test('a ROTATING wrist yields no posture (magnitude gate was blind to it)',
+        () {
+      // an-motion-3. mean |Δ‖a‖| cannot see rotation by construction, and the
+      // 1 Hz record ships a firmware-fused ~1 g vector, so the old gate could
+      // not fire on real data at all. Measured pre-fix: a 180° sweep scored
+      // jitter 4.6e-17 g, stillness 1.000, confidence 0.90, position
+      // 'lateral_right'.
+      final s = <AccelSample>[
+        for (var i = 0; i < 30; i++)
+          AccelSample(i * 1000.0, 0, 1.03 * math.sin(math.pi * i / 29.0),
+              1.03 * math.cos(math.pi * i / 29.0)),
+      ];
+      final m = staticTilt(s);
+      expect(m.present, isFalse, reason: 'got ${m.value?.position}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('rotating'));
+    });
+
+    test('10 min of continuous rotation publishes ZERO postures', () {
+      // Pre-fix positionSeries kept all 20 epochs and split them 10
+      // lateral_right / 10 lateral_left — a posture history of a turning wrist.
+      final s = <AccelSample>[
+        for (var i = 0; i < 600; i++)
+          AccelSample(i * 1000.0, 0, 1.03 * math.sin(2 * math.pi * i / 60.0),
+              1.03 * math.cos(2 * math.pi * i / 60.0)),
+      ];
+      expect(positionSeries(s), isEmpty);
     });
 
     test('positionSeries segments and emits stable supine posture', () {
@@ -360,14 +419,15 @@ void main() {
       }
       final medEnmo = res.minutes.isEmpty
           ? 0.0
-          : (res.minutes.map((m) => m.enmo).toList()..sort())[
-              res.minutes.length ~/ 2];
+          : (res.minutes.map((m) => m.enmo).toList()
+            ..sort())[res.minutes.length ~/ 2];
       // ignore: avoid_print
       print('REAL ENMO median/min = ${medEnmo.toStringAsFixed(4)} g');
       expect(medEnmo, lessThan(0.2), reason: 'median minute is restful');
 
       // Posture: low-motion epochs → stable, dominant posture, no crash.
-      final postures = positionSeries(accel, epochSec: 30, maxJitterG: 0.1);
+      final postures = positionSeries(accel,
+          epochSec: 30, maxRotationDeg: 6.0, maxJitterG: 0.1);
       // ignore: avoid_print
       print('REAL posture epochs=${postures.length} '
           'positions=${{for (final p in postures) p.position}}');
@@ -378,20 +438,24 @@ void main() {
       for (final p in postures) {
         counts[p.position] = (counts[p.position] ?? 0) + 1;
       }
-      final dominant =
-          counts.values.fold<int>(0, (a, c) => math.max(a, c));
+      final dominant = counts.values.fold<int>(0, (a, c) => math.max(a, c));
       expect(dominant / postures.length, greaterThan(0.5),
           reason: 'one body position dominates a rest snippet');
 
       // Energy fusion runs end-to-end without crashing; load is finite & small.
-      final fuse = branchedEnergyFusion(ts, [
-        for (final a in accel)
-          math.max(0.0, math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z) - res.gRef)
-      ], hr);
+      final fuse = branchedEnergyFusion(
+          ts,
+          [
+            for (final a in accel)
+              math.max(
+                  0.0, math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z) - res.gRef)
+          ],
+          hr);
       expect(fuse.present, isTrue);
       expect(fuse.value!.relativeLoad.isFinite, isTrue);
       // ignore: avoid_print
-      print('REAL energy relativeLoad=${fuse.value!.relativeLoad.toStringAsFixed(2)} '
+      print(
+          'REAL energy relativeLoad=${fuse.value!.relativeLoad.toStringAsFixed(2)} '
           'over ${fuse.value!.points.length} samples');
     });
   });

@@ -57,20 +57,34 @@ class MotionMinute {
   final double tsMinStartMs; // wall-clock start of the minute (ms)
   final int nSamples; // valid samples that fed this minute
 
-  /// ⚠️ MEANINGLESS ON THE WHOOP 1 Hz SUBSTRATE — diagnostics only.
+  /// ⚠️ SECOND-CHOICE ON THE WHOOP 1 Hz SUBSTRATE, and USELESS against a FIXED
+  /// gravity reference — prefer [dynAmp] for any decision.
   ///
-  /// ENMO is `mean(max(0, ‖a‖ − gRef))`, which assumes ‖a‖ carries dynamic
-  /// acceleration. The band's 1 Hz historical record does NOT: it ships a fused
-  /// gravity/orientation vector (see [dynAmp]). Measured over 269,486 real
-  /// samples, ‖a‖ sits at p50 = 1.027 g with only 0.030% above 1.3 g — during
-  /// the single most vigorous minute of a day it was 1.033 g ± 0.006.
+  /// ENMO is `mean(max(0, ‖a‖ − gRef))`, so it is only as good as `gRef`. The
+  /// band's 1 Hz record is a heavily smoothed, largely gravity-dominated
+  /// vector, and the per-family gravity offset is the same order as the signal:
+  /// measured over the FULL 671,847-row gen4 corpus, p50 ‖a‖ = 1.0239 g against
+  /// a calibrated gRef of 1.0277 (MG 1.0014, W5 0.9977). Subtract a hard 1.0
+  /// and you are reading calibration, not movement.
   ///
-  /// So on this substrate ENMO reduces to roughly `1.03 − gRef`: a pure
-  /// calibration artifact carrying ZERO signal. That is precisely why an early
-  /// step estimator built on it reported 42,155 steps at gRef 0.97 and 0 at
-  /// 1.02. Do NOT threshold this, and do NOT feed it to anything expecting
-  /// accelerometry (Brage fusion, MET/cut-point models). It stays only because
-  /// a HIGH-RATE source (the 100 Hz live stream) does carry real accel.
+  /// CORRECTED 2026-08-17 (audit MOT-07). This docstring used to say ‖a‖ was
+  /// "only 0.030 % above 1.3 g" and that ENMO carried "ZERO signal". Both are
+  /// wrong, and they were being cited as the reason real capability stayed
+  /// unwired. Re-measured over the full corpus: **2,018 samples (0.300 %)
+  /// exceed 1.3 g**, 419 exceed 1.5 g, 22 exceed 2 g, max 3.0437 g. Per-minute
+  /// ENMO against the auto-calibrated reference is p50 0.0050 / p75 0.0151 /
+  /// p90 0.0271 / p99 0.1184 / max 0.3802 g, and 391 minutes (3.49 %) clear
+  /// 0.05 g — the dominant-wrist light-activity boundary of the Hildebrand
+  /// cut-point family. Association with the same minute's mean HR:
+  /// **Spearman(ENMO, HR) = 0.244** against **Spearman(dynAmp, HR) = 0.689**
+  /// (Spearman(ENMO, dynAmp) = 0.207). So ENMO carries roughly a THIRD of
+  /// dynAmp's association with effort — not zero.
+  ///
+  /// What stays true: ENMO is calibration-FRAGILE where dynAmp is
+  /// calibration-INVARIANT, which is why an early step estimator built on it
+  /// reported 42,155 steps at gRef 0.97 and 0 at 1.02. Threshold it only
+  /// against a reference calibrated on the SAME data ([EnmoResult.gRef]), never
+  /// against a literal 1.0.
   final double enmo;
 
   /// ⚠️ Same caveat as [enmo] on the 1 Hz substrate — see above.
@@ -188,6 +202,7 @@ EnmoResult enmoSeries(
   double? gRef,
   int minSamplesPerMinute = 30,
   double gravityWindowS = defaultGravityWindowS,
+  int? expectedMinutes,
 }) {
   final valid = samples.where((s) => s.valid).toList()
     ..sort((a, b) => a.tsMs.compareTo(b.tsMs));
@@ -268,7 +283,14 @@ EnmoResult enmoSeries(
       dynAmp,
     ));
   }
-  final coverage = minutes.isEmpty ? 0.0 : covered / minutes.length;
+  // COVERAGE DENOMINATOR. `minutes` holds only the minutes that had at least
+  // one sample, so `covered / minutes.length` reported 1.0 for a day worn 4 h
+  // out of 24. Divide by the elapsed minute SPAN instead, which at least counts
+  // interior holes; pass [expectedMinutes] (e.g. 1440 for a calendar day) to
+  // count the unworn ends too.
+  final spanMinutes = minutes.isEmpty ? 0 : keys.last - keys.first + 1;
+  final denom = expectedMinutes ?? spanMinutes;
+  final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
   return EnmoResult(ref, minutes, coverage);
 }
 
@@ -277,10 +299,13 @@ EnmoResult enmoSeries(
 /// minute: sedentary / light / moderate / vigorous, by quartile of the user's
 /// own moving (ENMO>0) distribution. Sedentary is anything at/near zero ENMO.
 class IntensityBands {
-  /// percentile cut-points (g) on the user's moving distribution
-  final double lightCut;
-  final double moderateCut;
-  final double vigorousCut;
+  /// percentile cut-points (g) on the user's moving distribution.
+  /// NULL when there were too few moving minutes to set personal cut-points —
+  /// the labels are still valid (sedentary/light), the cut-points are simply
+  /// not yet knowable. Never NaN.
+  final double? lightCut;
+  final double? moderateCut;
+  final double? vigorousCut;
   final List<String> labels; // per input minute
   final Map<String, int> minutesInBand;
   const IntensityBands(
@@ -297,9 +322,25 @@ class IntensityBands {
 /// Cut-points are personal percentiles (50/75/90) of the user's MOVING
 /// minutes (ENMO above [sedentaryEnmo]); minutes at/under that floor are
 /// "sedentary". Honest: this is percentile-of-you, never a MET threshold.
+///
+/// THE CUT-POINTS MUST BE FROZEN. Without [frozenCuts] this takes percentiles
+/// OF ITS OWN INPUT, which means fed one day it labels the top decile of a rest
+/// day "vigorous" and a deconditioning period silently lowers the vigorous
+/// threshold to meet it — the same defect `personalDynFloor` is already frozen
+/// to avoid. Pass cut-points established once over a pooled history and
+/// persisted; the self-percentile path stays only for computing that pool the
+/// first time (and for tests), and its note says so.
+///
+/// SO: THE CONDITION FOR CALLING THIS AT ALL is that [frozenCuts] exists and is
+/// persisted. it has zero callers today for exactly that reason — nothing in
+/// edge stores a cut-point triple yet. wiring it on the self-percentile path
+/// "just to see it on screen" ships a label that redefines itself every time
+/// the user's week changes, which is worse than no label. build the pool and
+/// the column first, then call this with them.
 Metric<IntensityBands> relativeIntensityBands(
   List<double> enmoPerMin, {
   double sedentaryEnmo = 0.01,
+  ({double light, double moderate, double vigorous})? frozenCuts,
 }) {
   const inputs = ['enmo_per_min'];
   if (enmoPerMin.isEmpty) {
@@ -309,19 +350,47 @@ Metric<IntensityBands> relativeIntensityBands(
       note: 'no ENMO minutes',
     );
   }
+  if (frozenCuts != null) {
+    // Monotone or the labelling is nonsense (a "vigorous" cut under the
+    // "moderate" one makes every moderate minute vigorous). Refuse rather than
+    // reorder them: whatever produced them is wrong and should hear about it.
+    if (!(frozenCuts.light < frozenCuts.moderate &&
+        frozenCuts.moderate < frozenCuts.vigorous)) {
+      return const Metric<IntensityBands>.absent(
+        tier: Tier.relative,
+        inputs_used: inputs,
+        note: 'frozen cut-points not strictly increasing',
+      );
+    }
+    return _labelWithCuts(
+      enmoPerMin,
+      sedentaryEnmo,
+      frozenCuts.light,
+      frozenCuts.moderate,
+      frozenCuts.vigorous,
+      // The anchoring quality belongs to whoever froze the cuts, not to this
+      // day's minute count, so it is not re-derived from this input.
+      0.8,
+      'RELATIVE within-user intensity vs FROZEN personal cut-points; NOT METs',
+    );
+  }
   final moving = enmoPerMin.where((e) => e > sedentaryEnmo).toList();
   // Need a moving distribution to set personal cut-points.
   if (moving.length < 4) {
     final labels = [
       for (final e in enmoPerMin) e > sedentaryEnmo ? 'light' : 'sedentary'
     ];
-    final counts = <String, int>{'sedentary': 0, 'light': 0, 'moderate': 0, 'vigorous': 0};
+    final counts = <String, int>{
+      'sedentary': 0,
+      'light': 0,
+      'moderate': 0,
+      'vigorous': 0
+    };
     for (final l in labels) {
       counts[l] = counts[l]! + 1;
     }
     return Metric<IntensityBands>(
-      value: IntensityBands(
-          double.nan, double.nan, double.nan, labels, counts),
+      value: IntensityBands(null, null, null, labels, counts),
       confidence: 0.25,
       tier: Tier.relative,
       inputs_used: inputs,
@@ -329,9 +398,30 @@ Metric<IntensityBands> relativeIntensityBands(
           'too few moving minutes for personal cut-points; RELATIVE, not METs',
     );
   }
-  final light = percentile(moving, 50)!;
-  final moderate = percentile(moving, 75)!;
-  final vigorous = percentile(moving, 90)!;
+  return _labelWithCuts(
+    enmoPerMin,
+    sedentaryEnmo,
+    percentile(moving, 50)!,
+    percentile(moving, 75)!,
+    percentile(moving, 90)!,
+    // confidence scales with how much moving data anchors the percentiles.
+    clamp(moving.length / 60.0, 0.3, 0.8),
+    'RELATIVE within-user intensity (50/75/90th moving pct OF THIS INPUT — '
+    'cut-points not frozen); NOT METs',
+  );
+}
+
+/// The labelling half, shared by the frozen-cut and self-percentile paths so
+/// the two can never band the same minute differently.
+Metric<IntensityBands> _labelWithCuts(
+  List<double> enmoPerMin,
+  double sedentaryEnmo,
+  double light,
+  double moderate,
+  double vigorous,
+  double confidence,
+  String note,
+) {
   final labels = <String>[];
   final counts = <String, int>{
     'sedentary': 0,
@@ -353,13 +443,11 @@ Metric<IntensityBands> relativeIntensityBands(
     labels.add(l);
     counts[l] = counts[l]! + 1;
   }
-  // confidence scales with how much moving data anchors the percentiles.
-  final conf = clamp(moving.length / 60.0, 0.3, 0.8);
   return Metric<IntensityBands>(
     value: IntensityBands(light, moderate, vigorous, labels, counts),
-    confidence: conf,
+    confidence: confidence,
     tier: Tier.relative,
-    inputs_used: inputs,
-    note: 'RELATIVE within-user intensity (50/75/90th moving pct); NOT METs',
+    inputs_used: const ['enmo_per_min'],
+    note: note,
   );
 }

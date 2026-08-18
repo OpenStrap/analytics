@@ -31,7 +31,8 @@ void main() {
       final v = m.value!;
       expect(v.sjlHours, closeTo(2.0, 0.15));
       expect(v.absHours, closeTo(2.0, 0.15));
-      expect(v.sjlHours, greaterThan(0), reason: 'weekend runs later => positive');
+      expect(v.sjlHours, greaterThan(0),
+          reason: 'weekend runs later => positive');
     });
 
     test('insufficient free nights => absent', () {
@@ -68,7 +69,10 @@ void main() {
       for (var d = 0; d < 7; d++) {
         regular.addAll(day());
       }
-      final mReg = sleepRegularityIndex(regular, epochsPerDay: epd);
+      // sleepRegularityIndex was a SECOND, gap-blind Phillips SRI (A-21) and
+      // has been deleted; phillipsSri is the live one and takes a validity mask
+      // so holes cannot fabricate concordance.
+      final mReg = phillipsSri(regular, epd);
       expect(mReg.present, isTrue);
       expect(mReg.value!.sri, closeTo(100.0, 0.001),
           reason: 'identical days => perfect 24h concordance');
@@ -79,28 +83,11 @@ void main() {
         final shifted = d.isEven ? day() : day().map((b) => !b).toList();
         irregular.addAll(shifted);
       }
-      final mIrr = sleepRegularityIndex(irregular, epochsPerDay: epd);
+      final mIrr = phillipsSri(irregular, epd);
       expect(mIrr.value!.sri, lessThan(mReg.value!.sri));
       expect(mIrr.value!.sri, lessThan(40));
     });
 
-    test('forgiving streak survives one grace miss but not two', () {
-      // met,met,MISS,met,met  with grace=1 => one run of length 4, alive.
-      final s1 = forgivingStreak([true, true, false, true, true], grace: 1);
-      expect(s1.current, 4);
-      expect(s1.graceUsed, 1);
-      expect(s1.alive, isTrue);
-
-      // met,met,MISS,MISS,met  grace=1 => second miss breaks; trailing run = 1.
-      final s2 = forgivingStreak([true, true, false, false, true], grace: 1);
-      expect(s2.current, 1);
-      expect(s2.best, 2, reason: 'first run had 2 met days before the break');
-
-      // No grace: a single miss breaks immediately.
-      final s0 = forgivingStreak([true, true, false, true], grace: 0);
-      expect(s0.best, 2);
-      expect(s0.current, 1);
-    });
   });
 
   group('sleep debt — honest when no free night', () {
@@ -217,17 +204,39 @@ void main() {
     test('top-of-window value => high percentile', () {
       // 30 days centred ~50 with spread; tonight = 70 is near the top.
       final hist = List<double>.generate(30, (i) => 40.0 + i); // 40..69
-      final m = percentileOfYou(70, hist);
+      final m = percentileOfYou(70, hist, better: Better.higher);
       expect(m.present, isTrue);
       expect(m.value!.percentile, greaterThan(95));
       expect(m.value!.label, 'among your best');
+    });
+
+    test(
+        'the label follows `better`, so RHR is not congratulated for a bad night',
+        () {
+      // an-wellness-1. The band ladder used to be a bare pct->string map, so
+      // the RHR detail screen printed the user's WORST-ever resting HR as
+      // "among your best" and their best-ever as "among your lowest".
+      final nights = List<double>.generate(29, (i) => 54.0 + (i % 5)); // 54..58
+      final worst = percentileOfYou(72, nights, better: Better.lower);
+      expect(worst.value!.percentile, 100.0);
+      expect(worst.value!.label, 'among your worst');
+      final best = percentileOfYou(50, nights, better: Better.lower);
+      expect(best.value!.percentile, 0.0);
+      expect(best.value!.label, 'among your best');
+      // Same numbers, higher-is-better metric: the verdicts swap.
+      expect(percentileOfYou(72, nights, better: Better.higher).value!.label,
+          'among your best');
+      // No good end of the scale: position, not verdict.
+      expect(percentileOfYou(72, nights, better: Better.neither).value!.label,
+          'among your highest');
     });
 
     test('record gated by MDC: tiny beat is NOT a record, big beat is', () {
       final hist = List<double>.generate(30, (i) => 40.0 + (i % 10)); // spread
       final priorMax = hist.reduce((a, b) => a > b ? a : b);
       // Barely beats the max => within MDC noise => NOT a record.
-      final small = personalRecord(priorMax + 0.01, hist, better: Better.higher);
+      final small =
+          personalRecord(priorMax + 0.01, hist, better: Better.higher);
       expect(small.value!.isRecord, isFalse);
       // Clearly beats it.
       final big = personalRecord(priorMax + 50, hist, better: Better.higher);
@@ -236,13 +245,14 @@ void main() {
     });
 
     test('short history => absent', () {
-      final m = percentileOfYou(10, [1, 2, 3]);
+      final m = percentileOfYou(10, [1, 2, 3], better: Better.higher);
       expect(m.present, isFalse);
     });
   });
 
   group('glass-box readiness + deterministic narrative', () {
-    test('one driver off => narrative names that driver, breakdown complete', () {
+    test('one driver off => narrative names that driver, breakdown complete',
+        () {
       // HRV tanks tonight; everything else is dead-on the personal median.
       final hrvHist = List<double>.generate(20, (i) => 4.0 + (i % 5) * 0.02);
       final rhrHist = List<double>.generate(20, (i) => 55.0 + (i % 5) * 0.2);
@@ -251,7 +261,10 @@ void main() {
 
       final inputs = [
         GlassBoxInput(
-            label: 'hrv', value: 3.0, history: hrvHist, weight: wHrv), // way low
+            label: 'hrv',
+            value: 3.0,
+            history: hrvHist,
+            weight: wHrv), // way low
         GlassBoxInput(
             label: 'rhr',
             value: 55.4,
@@ -259,10 +272,16 @@ void main() {
             weight: wRhr,
             lowerIsBetter: true),
         GlassBoxInput(
-            label: 'resp', value: 14.2, history: respHist, weight: wResp,
+            label: 'resp',
+            value: 14.2,
+            history: respHist,
+            weight: wResp,
             lowerIsBetter: true),
         GlassBoxInput(
-            label: 'temp', value: 0.04, history: tempHist, weight: wTemp,
+            label: 'temp',
+            value: 0.04,
+            history: tempHist,
+            weight: wTemp,
             lowerIsBetter: true),
       ];
       // ignore: deprecated_member_use_from_same_package
@@ -280,13 +299,44 @@ void main() {
       expect(v.score, lessThan(50));
     });
 
-    test('a sub-MDC mover is never named as a driver', () {
-      // All inputs essentially at their median => no driver clears MDC.
+    test('RD-09: a real night off baseline names its driver', () {
+      // The user's own nightly resting HR from whoop-4.db (lowest 30-min mean,
+      // 00:00–06:00 IST). Baseline of seven, tonight the eighth.
+      const rhr = <double>[57.73, 57.07, 60.87, 56.90, 60.40, 55.97, 67.67];
+      const tonight = 60.93; // +3.20 bpm on a median of 57.73
+      // Robust scale of that window is 2.61 bpm, so the old gate — mdc(), which
+      // with no measured typical error is 2.77 × that same scale — stood at
+      // 7.23 bpm. NOTHING in this user's real spread reaches it, so
+      // `drivers` was empty and the narrative said "nothing moved beyond your
+      // normal day-to-day noise" every single night. The smallest worthwhile
+      // change is 1.30 bpm, and this night clears it.
+      final inputs = [
+        const GlassBoxInput(
+            label: 'rhr',
+            value: tonight,
+            history: rhr,
+            weight: wRhr,
+            lowerIsBetter: true),
+      ];
+      // ignore: deprecated_member_use_from_same_package
+      final m = glassBoxReadiness(inputs);
+      final v = m.value!;
+      expect(v.breakdown.single.beyondUsualSpread, isTrue);
+      expect(v.drivers, isNotEmpty);
+      expect(v.drivers.first.label, 'rhr');
+      expect(v.narrative.toLowerCase(), isNot(contains('noise')));
+    });
+
+    test('a mover inside the usual spread is never named as a driver', () {
+      // All inputs essentially at their median => nothing clears the SWC.
       final hist = List<double>.generate(20, (i) => 50.0 + (i % 5) * 0.1);
       final inputs = [
         GlassBoxInput(label: 'hrv', value: 50.2, history: hist, weight: wHrv),
         GlassBoxInput(
-            label: 'rhr', value: 50.2, history: hist, weight: wRhr,
+            label: 'rhr',
+            value: 50.2,
+            history: hist,
+            weight: wRhr,
             lowerIsBetter: true),
       ];
       // ignore: deprecated_member_use_from_same_package
@@ -300,7 +350,8 @@ void main() {
       final inputs = [
         GlassBoxInput(label: 'hrv', value: 64, history: hist, weight: wHrv),
         // temp has no history => dropped + reweighted, not zeroed.
-        GlassBoxInput(label: 'temp', value: 0.0, history: const [], weight: wTemp),
+        GlassBoxInput(
+            label: 'temp', value: 0.0, history: const [], weight: wTemp),
       ];
       // ignore: deprecated_member_use_from_same_package
       final m = glassBoxReadiness(inputs);
@@ -313,17 +364,16 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  group('PLAUSIBILITY on real ../whoop_hist.jsonl (single-night pieces only)', () {
+  group('PLAUSIBILITY on real ../whoop_hist.jsonl (single-night pieces only)',
+      () {
     final histFile = File('../whoop_hist.jsonl');
     test('real HR/RR feed the human layer without crashing', () {
       if (!histFile.existsSync()) {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final hr = <double>[];
       final rrMs = <double>[];
       for (final line in lines) {
@@ -361,14 +411,15 @@ void main() {
       expect(m, isNotNull);
       expect(Tier.all.contains(m.tier), isTrue);
       // ignore: avoid_print
-      print('REAL human-layer plausibility: realRHR=${realRhr.toStringAsFixed(1)} '
+      print(
+          'REAL human-layer plausibility: realRHR=${realRhr.toStringAsFixed(1)} '
           'realRMSSD=${realRmssd.toStringAsFixed(1)} '
           'state=${m.present ? m.value!.state : "absent"} '
           '(baseline SYNTHETIC — capture too short for multi-night)');
 
       // percentile-of-you against a synthetic 30-day window using the real RHR.
       final win = List<double>.generate(30, (i) => realRhr + (i - 15) * 0.3);
-      final p = percentileOfYou(realRhr, win);
+      final p = percentileOfYou(realRhr, win, better: Better.lower);
       expect(p.present, isTrue);
       expect(p.value!.percentile, inInclusiveRange(0, 100));
     });
@@ -430,6 +481,50 @@ void main() {
         totalDaysObserved: 21,
       );
       expect(m.value!.typeLabel, contains('evening'));
+    });
+  });
+
+  group('serialised envelopes are always jsonEncode-able', () {
+    test('an under-baselined glass-box input is ABSENT, never NaN', () {
+      // T-11 / A-00 — the worst finding in the R1 sweep. An input with fewer
+      // than `minHistory` days was still pushed into `breakdown` carrying
+      // `percentileOfYou: double.nan`; `round6` passed NaN straight through and
+      // edge's `jsonEncode(buildCrossDayBundle(...))` THREW, so a catch
+      // discarded the ENTIRE cross-day bundle — illness, anomaly, CTL/ATL/TSB,
+      // chronotype, sleep coach, VO2max, every percentile — for every user from
+      // day 3 to day 8, and permanently for anyone with a sparse input.
+      final inputs = [
+        GlassBoxInput(
+            label: 'hrv',
+            value: 60,
+            history: List<double>.generate(20, (i) => 50.0 + i),
+            weight: 0.40),
+        GlassBoxInput(
+            label: 'temp',
+            value: 0.5,
+            history: const [0.1, 0.2], // only 2 days
+            weight: 0.12,
+            lowerIsBetter: true),
+      ];
+      // ignore: deprecated_member_use_from_same_package
+      final m = glassBoxReadiness(inputs);
+      final json = m.toJson((v) => v.toJson());
+      expect(() => jsonEncode(json), returnsNormally);
+
+      final breakdown = (json['value'] as Map)['breakdown'] as List;
+      final temp = breakdown.firstWhere((b) => (b as Map)['label'] == 'temp')
+          as Map<String, dynamic>;
+      expect(temp['percentile_of_you'], isNull);
+      expect(temp['used'], isFalse);
+      // Machine-readable reason, the package convention.
+      expect(temp['note'], 'need_baseline:have=2,need=7');
+    });
+
+    test('round6 encodes a non-finite as null, not NaN', () {
+      expect(round6(double.nan), isNull);
+      expect(round6(double.infinity), isNull);
+      expect(round6(1.23456789), 1.234568);
+      expect(() => jsonEncode({'x': round6(double.nan)}), returnsNormally);
     });
   });
 }

@@ -26,7 +26,8 @@ void main() {
   // (1) A window with NO accelerometer at all must not be scored as sleep.
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — no accelerometer in the window', () {
-    test('a forced window holding zero samples yields NO sleep '
+    test(
+        'a forced window holding zero samples yields NO sleep '
         '(was: 8 h of light sleep, efficiency 100%)', () {
       // 4 h of perfectly good data, then a user-asserted 8 h window ~13 h later
       // that contains not one sample.
@@ -40,17 +41,16 @@ void main() {
       final s = segmentSleep(accel, hr,
           forcedWindow: (onsetSec: onset, offsetSec: onset + 8 * 3600));
 
-      // The window itself is the user's word, so it is honored...
-      expect(s.present, isTrue);
-      expect(s.inBedSec, 8 * 3600);
-      // ...but NOTHING inside it may be claimed as sleep.
-      expect(s.tstSec, 0, reason: 'no data ⇒ no sleep (pre-fix: 28800)');
-      expect(s.lightSec, 0, reason: 'pre-fix: the whole window read "light"');
-      expect(s.deepSec, 0);
-      expect(s.remSec, 0);
-      expect(s.wakeSec, 8 * 3600);
-      expect(s.efficiencyPct, 0.0, reason: 'pre-fix: 100.0');
-      expect(s.stages.every((x) => x == SleepStage.wake), isTrue);
+      // RE-PINNED 2026-08: this used to be `present` with tstSec 0 and
+      // efficiencyPct 0.0 — which reads to the user as "0 h 0 m slept, 0 %
+      // efficiency", a measurement of a night we never observed. A window in
+      // which not one second stages as sleep is an ABSTENTION.
+      expect(s.present, isFalse,
+          reason:
+              'was: present with tst 0 / efficiency 0 %; pre-that: 28800 s');
+      expect(s.tstSec, isNull);
+      expect(s.efficiencyPct, isNull);
+      expect(s.stages, isEmpty);
     });
   });
 
@@ -76,7 +76,8 @@ void main() {
       expect(cardioStager(withHr, accel).base.stages, isNotEmpty);
     });
 
-    test('the strap-on-the-nightstand night is not reported as a perfect sleep '
+    test(
+        'the strap-on-the-nightstand night is not reported as a perfect sleep '
         '(was: TST 7h54, efficiency 100%)', () {
       final accel = <AccelSample>[];
       final hr = <double>[];
@@ -85,8 +86,8 @@ void main() {
       void seg(int secs, {required bool active}) {
         for (var k = 0; k < secs; k++, i++) {
           final x = active ? (k.isEven ? 0.0 : 0.3) : 0.005;
-          accel.add(AccelSample(
-              (start + i) * 1000.0, x, 0.0, active ? 0.95 : 1.0));
+          accel.add(
+              AccelSample((start + i) * 1000.0, x, 0.0, active ? 0.95 : 1.0));
           hr.add(0.0); // NO heart rate at all — the band is off the wrist.
         }
       }
@@ -96,11 +97,11 @@ void main() {
       seg(2 * 3600, active: true);
 
       final s = segmentSleep(accel, hr, tzOffsetSec: 0);
-      expect(s.tstSec, 0, reason: 'pre-fix: 28438 s of sleep from zero HR');
-      expect(s.efficiencyPct, 0.0, reason: 'pre-fix: 100.0');
-      expect(s.remSec, 0);
-      expect(s.deepSec, 0);
-      expect(s.lightSec, 0);
+      // RE-PINNED 2026-08: absent, not "present with zero sleep" — see above.
+      expect(s.present, isFalse,
+          reason: 'pre-fix: 28438 s of sleep from zero HR');
+      expect(s.tstSec, isNull);
+      expect(s.efficiencyPct, isNull);
     });
   });
 
@@ -108,8 +109,9 @@ void main() {
   // (3) An accelerometer dropout must not be carried forward into "stillness".
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — bounded accel carry-forward', () {
-    test('a 6 h dropout inside an 8 h window stays unstaged '
-        '(was: TST 8 h, WASO 0, efficiency 100%)', () {
+    test(
+        'a 6 h dropout inside an 8 h window makes the night ABSENT '
+        '(was: TST 8 h, WASO 0, efficiency 100%; then WASO 6 h)', () {
       final accel = <AccelSample>[];
       final hr = <double>[];
       void block(int fromSec, int secs) {
@@ -125,15 +127,47 @@ void main() {
 
       final s = segmentSleep(accel, hr,
           forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+      // RE-PINNED 2026-08 (an-sleep-2): only 2 of the 8 h were observed — 25%,
+      // below the 50% floor — so there is no honest figure to publish. The
+      // previous pin (present, wake ≈ 6 h, efficiency < 30%) was itself the
+      // defect: it reported six hours of MEASURED wakefulness for six hours
+      // nobody recorded.
+      expect(s.present, isFalse);
+      expect(s.tstSec, isNull);
+      expect(s.wakeSec, isNull);
+      expect(s.efficiencyPct, isNull);
+      expect(s.absenceReason, contains('observed'),
+          reason: 'the absence must carry its reason, not be a bare hole');
+    });
+
+    test('a 2 h dropout inside an 8 h window is UNOBSERVED, not WASO', () {
+      // 75% observed — above the floor, so the night publishes, but the hole
+      // must not be counted as measured wake in any figure.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var k = 0; k < 8 * 3600; k++) {
+        if (k >= 3 * 3600 && k < 5 * 3600) continue; // 2 h hole
+        accel.add(AccelSample((_t0 + k) * 1000.0, 0.005, 0.0, 1.0));
+        hr.add(52);
+      }
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
       expect(s.present, isTrue);
       expect(s.inBedSec, 8 * 3600);
-      // Only the ~2 h that actually has data can be staged; the 6 h hole is
-      // wake. Allow the bounded 60 s carry-forward tail on each real block.
-      expect(s.tstSec!, lessThan(2 * 3600 + 2 * 61),
-          reason: 'pre-fix: 28800 — the whole window read as sleep');
-      expect(s.wakeSec!, greaterThan(5 * 3600 + 45 * 60),
-          reason: 'pre-fix: 0');
-      expect(s.efficiencyPct!, lessThan(30.0), reason: 'pre-fix: 100.0');
+      // Exactly the 7200 s hole: the seconds on either side of it have both a
+      // sample and a heart rate, so the ±15 s HR-evidence margin adds nothing
+      // here (it only bites where samples exist but HR does not).
+      expect(s.unobservedSec, 7200, reason: 'pre-fix: 0 (no such state)');
+      // NEW VALUES, and why they moved: the denominator is now the OBSERVED
+      // 28800-7200 = 21600 s, not the wall-clock 28800. WASO no longer absorbs
+      // the hole (pre-fix it was ~7200).
+      expect(s.wasoSec!, lessThan(120), reason: 'pre-fix: ~7200');
+      expect(s.tstSec! + s.wakeSec!, 8 * 3600 - 7200);
+      expect(s.efficiencyPct!, greaterThan(95.0),
+          reason:
+              'pre-fix: ~74.9 (7200 unrecorded seconds in the denominator)');
+      // The hypnogram must break at the hole rather than draw across it.
+      expect(s.stages4[4 * 3600], 'unobserved');
     });
 
     test('a SHORT dropout is still carried forward (the bound is 60 s, not 0)',
@@ -197,16 +231,21 @@ void main() {
       return c;
     }
 
-    test('cardio_stager: only the bout with REAL flanking sleep is bridged', () {
-      // 15 min sleep, then 5 × (10 min wake + 1 min sleep). The cardio rule
-      // table bridges ≤10 min of wake given ≥15 min of flanking sleep, so bout
-      // #1 legitimately bridges. Bouts #2-#5 are flanked by ONE minute of sleep
-      // and must survive — pre-fix each bridged bout was counted as context for
-      // the next, so all five collapsed and WASO went to 0.
-      final sm = fragmented(leadMin: 15, wakeMin: 10, reps: 5);
+    test('cardio_stager: only the bout with REAL flanking sleep is bridged',
+        () {
+      // 15 min sleep, then 5 × (4 min wake + 1 min sleep). The rule table is
+      // now Webster's published one — ≥15 min of flanking sleep bridges ≤4 min
+      // of wake — so bout #1 legitimately bridges. Bouts #2-#5 are flanked by
+      // ONE minute of sleep and must survive: pre-fix each bridged bout was
+      // counted as context for the next, so all five collapsed and WASO hit 0.
+      //
+      // RE-PINNED with the rule table: this used to use 10-min bouts, which the
+      // old non-published [15 → 10] row bridged. Under Webster a 10-min bout is
+      // never bridgeable at all, so the case stopped exercising the cascade.
+      final sm = fragmented(leadMin: 15, wakeMin: 4, reps: 5);
       websterRescoreCardio(sm, 30);
-      expect(wakeInBody(sm), 4 * 20,
-          reason: 'four 10-min bouts survive; pre-fix: 0 (full cascade)');
+      expect(wakeInBody(sm), 4 * 8,
+          reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
     });
 
     test('stager: only the bout with REAL flanking sleep is bridged', () {
@@ -321,7 +360,8 @@ void main() {
         () {
       const stdOffset = -5 * 3600; // e.g. EST
       const dstOffset = -4 * 3600; // e.g. EDT
-      const localMidsleep = 3 * 3600; // the sleeper is dead-on 03:00 every night
+      const localMidsleep =
+          3 * 3600; // the sleeper is dead-on 03:00 every night
       const switchDay = 8;
       // The transition instant: between day 7's and day 8's midsleep.
       final switchTs = _midnight + switchDay * 86400;
@@ -348,8 +388,8 @@ void main() {
 
       // The old behavior — ONE frozen offset for the whole history — splits the
       // days across two local clock times and lands the anchor half an hour out.
-      final frozen = habitualMidsleepSecFromHistory(history,
-          tzOffsetSeconds: dstOffset);
+      final frozen =
+          habitualMidsleepSecFromHistory(history, tzOffsetSeconds: dstOffset);
       expect(frozen!, closeTo(localMidsleep + 1800, 60));
       expect((frozen - dstCorrect).abs(), greaterThan(1500));
     });
@@ -378,7 +418,8 @@ void main() {
       for (var m = 30; m < 170; m++) {
         for (var b = 0; b < 40; b++) {
           rrTs.add((onset + m * 60) * 1000.0 + b * 1400.0);
-          rrMs.add(1000.0 + 30.0 * math.sin(m / 14.0) + (b.isEven ? 6.0 : -6.0));
+          rrMs.add(
+              1000.0 + 30.0 * math.sin(m / 14.0) + (b.isEven ? 6.0 : -6.0));
         }
       }
 
@@ -416,7 +457,8 @@ void main() {
       ];
     }
 
-    test('a record still to its last sample does not certify the final 5 min '
+    test(
+        'a record still to its last sample does not certify the final 5 min '
         '(pre-fix: spt_sec 3600 and immobile.last == true)', () {
       // Movement at 3280 sits just BEFORE the tail, so the pre-fix global
       // trailing window [n-win, n) never saw it and declared all 299 tail
@@ -437,17 +479,18 @@ void main() {
       expect(w.offsetIdx, lessThanOrEqualTo(n - win + 1));
 
       // ...and the tail is reported as UNDECIDABLE, not as movement.
-      expect(w.unresolvedTailSec, win - 1, reason: 'pre-fix: 0 (no such state)');
+      expect(w.undecidableSec, win - 1, reason: 'pre-fix: 0 (no such state)');
       expect(w.immobileUnknown.length, n);
       expect(w.immobileUnknown.sublist(n - win + 1).every((u) => u), isTrue);
       for (var i = 0; i < n - win + 1; i++) {
         expect(w.immobileUnknown[i], isFalse,
             reason: 'second $i has a full forward window — it is decided');
       }
-      expect(w.toJson()['unresolved_tail_sec'], win - 1);
+      expect(w.toJson()['undecidable_sec'], win - 1);
     });
 
-    test('a move inside the tail is resolved PER SECOND '
+    test(
+        'a move inside the tail is resolved PER SECOND '
         '(pre-fix: one shared verdict for all 299 tail seconds)', () {
       final m = vanHeesSleepWindow(record(moveAt: 3400));
       expect(m.present, isTrue);
@@ -470,7 +513,7 @@ void main() {
 
       // The two seconds must not share one answer — that is the whole bug.
       expect(w.immobileUnknown[3350] == w.immobileUnknown[3500], isFalse);
-      expect(w.unresolvedTailSec, 193, reason: 'pre-fix: 0 (no such state)');
+      expect(w.undecidableSec, 193, reason: 'pre-fix: 0 (no such state)');
     });
   });
 
@@ -478,30 +521,15 @@ void main() {
   // (9) CPC: the Thomas 2005 HFC/LFC ratio is a MEASUREMENT or it is nothing —
   //     never a sentinel, never a NaN dressed up as a number.
   // ═══════════════════════════════════════════════════════════════════════════
-  group('honesty — cardiopulmonary coupling ratio', () {
-    test('a spectrum with zero coupling power abstains '
-        '(pre-fix: present, hfc=0 lfc=0 cpc_ratio=0.0)', () {
-      // Every beat carries the SAME timestamp (a stuck clock / corrupt offload)
-      // and the NN deviations cancel exactly, so the Lomb-Scargle power is 0.0
-      // at every frequency and both bands integrate to exactly zero. HFC/LFC is
-      // then 0/0 — undefined. Pre-fix it shipped as cpc_ratio 0.0, i.e. "the
-      // least stable sleep measurable".
-      final nn = List<double>.filled(64, 1000.0);
-      nn[62] = 900.0;
-      nn[63] = 1100.0;
-      final ts = List<double>.filled(64, 0.0);
-
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isFalse, reason: 'pre-fix: present with cpc_ratio 0.0');
-      expect(m.value, isNull);
-      expect(m.confidence, 0);
-      expect(m.note, contains('undefined'));
-    });
-
-    test('a NaN anywhere in the NN series abstains '
-        '(pre-fix: present at confidence 0.85 with NaN band powers)', () {
-      // A full hour of beats → the length-driven confidence pins at its 0.85
-      // cap, which is exactly what made the pre-fix output so convincing.
+  group('honesty — cardiopulmonary coupling is WITHDRAWN', () {
+    test('always absent, with the reason attached', () {
+      // It never measured coupling. Thomas 2005 needs a respiration channel
+      // INDEPENDENT of the beat times; the "surrogate" here was the NN series
+      // linearly detrended, so sqrt(P_rr . P_resp) collapsed to P_rr and
+      // cpc_ratio equalled the plain RR periodogram HF/LF ratio — measured
+      // 84.493910 vs 84.493190 on this shape, a ratio of 1.0000085. A healthy
+      // record used to "still report a real ratio"; that was the bug, not the
+      // control case.
       final nn = <double>[];
       final ts = <double>[];
       var t = 0.0;
@@ -511,36 +539,139 @@ void main() {
         nn.add(rr);
         ts.add(t);
       }
-      nn[1000] = double.nan; // one poisoned beat
-
+      // ignore: deprecated_member_use_from_same_package
       final m = cardiopulmonaryCoupling(nn, ts);
-      // `variance <= 0` does not catch NaN, so the whole spectrum came out NaN
-      // and was published as hfc/lfc/vlfc = NaN with cpc_ratio 0.0.
-      expect(m.present, isFalse,
-          reason: 'pre-fix: present, conf 0.85, hfc/lfc/vlfc = NaN');
+      expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(m.confidence, 0);
-      expect(m.note, contains('non-finite'));
+      expect(m.note, contains('respiration channel'));
     });
 
-    test('a healthy RSA record still reports a real ratio', () {
-      // Guard against over-abstention: the control case must survive.
+    test('the ratio it used to publish was the RR periodogram HF/LF', () {
+      // The assertion that would have failed from the first commit (T-02).
       final nn = <double>[];
-      final ts = <double>[];
+      final tSec = <double>[];
       var t = 0.0;
-      for (var i = 0; i < 300; i++) {
+      for (var i = 0; i < 3600; i++) {
         final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
         t += rr;
         nn.add(rr);
-        ts.add(t);
+        tSec.add(t / 1000.0);
       }
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isTrue);
-      final c = m.value!;
-      expect(c.cpcRatio.isFinite, isTrue);
-      expect(c.cpcRatio, greaterThan(0));
-      expect(c.cpcRatio, isNot(999.0));
-      expect(c.lfc, greaterThan(0));
+      final freqs = freqGrid(0.001, 0.45, 200);
+      final ls = lombScargle(tSec, nn, freqs)!;
+      // The old "coupling spectrum" was sqrt(P_rr . P_resp) with resp = the
+      // detrended NN — reconstruct it and show it is P_rr to 5 significant
+      // figures, which is why the metric had to go.
+      final rrRatio = ls.bandPower(0.1, 0.4) / ls.bandPower(0.01, 0.1);
+      final coupling = LombScargle([
+        for (final pt in ls.spectrum)
+          LsPoint(pt.freqHz, math.sqrt(pt.psd * pt.psd))
+      ]);
+      final oldCpc =
+          coupling.bandPower(0.1, 0.4) / coupling.bandPower(0.01, 0.1);
+      expect(oldCpc / rrRatio, closeTo(1.0, 1e-4));
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // (an-sleep-3) An epoch with no heart rate can only ever be labelled asleep.
+  // ═══════════════════════════════════════════════════════════════════════════
+  group('honesty — no cardiac evidence is not sleep', () {
+    test('two 1 h PPG dropouts inside a 6 h still window are not credited', () {
+      // HR coverage 0.667 — comfortably above cardio_stager's `minHrCoverage`
+      // abstain floor, which only catches the all-or-nothing case. Every gate
+      // that can produce WAKE or REM needs a non-NaN HR while the fall-through
+      // is an unconditional NREM, so pre-fix all 7200 no-HR seconds came out
+      // asleep: tst 21600, efficiency 100.0, wake 0.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (var k = 0; k < 6 * 3600; k++) {
+        accel.add(AccelSample((_t0 + k) * 1000.0, 0.005, 0.0, 1.0));
+        final dropout =
+            (k >= 3600 && k < 2 * 3600) || (k >= 4 * 3600 && k < 5 * 3600);
+        hr.add(dropout ? 0.0 : 52.0);
+      }
+      final s = segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 6 * 3600));
+      expect(s.present, isTrue);
+      // 7200 s of dropout, less the +/-15 s HR-evidence margin reaching into
+      // each of the four dropout edges: 7200 - 4*15 = 7140.
+      expect(s.unobservedSec, 7140, reason: 'pre-fix: 0 (no such state)');
+      expect(s.tstSec!, lessThanOrEqualTo(6 * 3600 - 7140),
+          reason: 'pre-fix: 21600 — the dropouts were credited as Light');
+      expect(s.stages4[90 * 60], 'unobserved');
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // (SLP-03) Run decomposition. A run ends at an unobserved second.
+  // ═══════════════════════════════════════════════════════════════════════════
+  group('SLP-03 — wake-ups and the longest unbroken stretch', () {
+    /// A forced 8 h window built from [blocks] of (offsetSec, lengthSec,
+    /// active). Any second not covered by a block has NO sample at all, which
+    /// is what makes it unobserved.
+    SleepSegmentation night(List<(int, int, bool)> blocks) {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      for (final (from, secs, active) in blocks) {
+        for (var k = 0; k < secs; k++) {
+          accel.add(AccelSample(
+            (_t0 + from + k) * 1000.0,
+            active ? (k.isEven ? 0.0 : 0.35) : 0.004,
+            0.0,
+            active ? 0.93 : 1.0,
+          ));
+          hr.add(active ? 78 : 50);
+        }
+      }
+      return segmentSleep(accel, hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+    }
+
+    test('the longest stretch STOPS at a hole instead of bridging it', () {
+      // 3 h asleep, a 40-min recording hole, then 4 h 20 asleep. A naive
+      // longest-run over the stage labels draws straight through the hole and
+      // prints 7 h 20 of unbroken sleep — three quarters of an hour of which
+      // nobody watched.
+      final s = night([
+        (0, 3 * 3600, false),
+        (3 * 3600 + 2400, 8 * 3600 - (3 * 3600 + 2400), false),
+      ]);
+      expect(s.present, isTrue);
+      expect(s.unobservedSec, 2400);
+      expect(s.longestSleepRunSec, 15600, reason: 'the second block alone');
+      expect(
+        s.longestSleepRunSec!,
+        lessThan(s.tstSec!),
+        reason: 'pre-fix a naive run would equal or exceed total sleep time',
+      );
+      expect(s.sustainedAwakenings, 0, reason: 'a hole is not an awakening');
+    });
+
+    test('a sustained wake counts; the hole beside it still does not', () {
+      // Same night with a 10-minute genuine awakening after the hole.
+      final s = night([
+        (0, 3 * 3600, false),
+        (3 * 3600 + 2400, 600, true),
+        (3 * 3600 + 3000, 8 * 3600 - (3 * 3600 + 3000), false),
+      ]);
+      expect(s.unobservedSec, 2400);
+      expect(s.wakeSec, 600);
+      expect(s.sustainedAwakenings, 1);
+      // 40 min of hole + 10 min of wake, both broken out of the run.
+      expect(s.longestSleepRunSec, 15000);
+    });
+
+    test('a wake shorter than the stated bar is not an awakening', () {
+      final s = night([
+        (0, 4 * 3600, false),
+        (4 * 3600, 120, true), // 2 min, under the 5-minute bar
+        (4 * 3600 + 120, 8 * 3600 - (4 * 3600 + 120), false),
+      ]);
+      expect(s.sustainedAwakenings, 0);
+      // And the bar itself ships with the count so a screen can state it.
+      expect(s.toJson()['awakening_min_sec'], kSustainedAwakeningSec);
     });
   });
 }

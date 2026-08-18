@@ -41,6 +41,16 @@ class _Day {
     }
   }
 
+  /// A block the band never decoded gravity for: the edge hands these over as
+  /// exact (0,0,0) with `valid: false` (HR decoded, gravity did not). HR is
+  /// still real. This is the shape that used to read as perfect immobility.
+  void unmeasuredAccel(int minutes, {double bpm = 60}) {
+    for (var s = 0; s < minutes * 60; s++, _i++) {
+      accel.add(AccelSample(_i * 1000.0, 0, 0, 0, valid: false));
+      hr.add(bpm);
+    }
+  }
+
   /// A motionless block at one fixed orientation.
   /// `bpm <= 0` writes an HR gap — the substrate's own "no reading" encoding,
   /// which is what off-wrist and dropout actually look like.
@@ -505,6 +515,56 @@ void main() {
             reason: 'same nap, shifted $h h — detection must not move');
         expect(m.value!.single.tstSec, baseline.value!.single.tstSec);
       }
+    });
+  });
+
+  group('detectNaps — absent accel is not stillness (an-sleep-1)', () {
+    test('a 50-min all-invalid block emits NO nap', () {
+      // Reproduced pre-fix as `NAP {tib_sec: 3006, tst_sec: 3006,
+      // efficiency: 1.0, confidence: 0.85}` — the confidence CAP, for a nap
+      // built entirely out of missing data. The z-angle of an exact (0,0,0)
+      // sample is a perfectly well-formed constant 0.0 deg, which is why the
+      // angle rule could not see the difference.
+      final d = _Day()
+        ..active(120)
+        ..unmeasuredAccel(50)
+        ..active(120);
+
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.present, isTrue, reason: 'the DAY was judged; it just held no nap');
+      expect(m.value, isEmpty, reason: 'pre-fix: 1 nap, 3006 s, confidence 0.85');
+    });
+
+    test('a nap is reported at its OBSERVED length, not its wall-clock one',
+        () {
+      // 20 min of genuine stillness followed by 25 min the band never measured.
+      // The unmeasured seconds fail `stillAt` outright, so they neither extend
+      // the bout nor bridge into a second one: the user is told about the 20
+      // minutes we watched, and nothing about the 25 we did not.
+      final d = _Day()
+        ..active(120)
+        ..still(20)
+        ..unmeasuredAccel(25)
+        ..active(120);
+
+      final m = detectNaps(d.accel, d.hr);
+      final nap = m.value!.single;
+      expect(nap.tibSec, closeTo(20 * 60, 60),
+          reason: 'pre-fix: ~45 min — the unmeasured half read as more sleep');
+      expect(nap.tstSec, nap.tibSec);
+    });
+
+    test('a fully-measured nap of the same shape still lands', () {
+      // The control: identical geometry, valid samples throughout. Without this
+      // the two tests above would also pass if the detector had simply stopped
+      // working.
+      final d = _Day()
+        ..active(120)
+        ..still(45)
+        ..active(120);
+
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.value!.single.tibSec, greaterThan(40 * 60));
     });
   });
 }

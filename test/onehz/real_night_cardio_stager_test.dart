@@ -115,7 +115,15 @@ void main() {
     // Pre-fix (broken) output: wake=294 light=173 deep=26 rem=41.
     // Bands are wide — this is a wrist ESTIMATE, not a PSG-equivalence check —
     // but tight enough that the pre-fix numbers fail every one of them.
-    expect(wakeMin, lessThan(20),
+    // RE-PINNED 2026-08 (was `lessThan(20)`) when the Webster continuity
+    // rescore was restored to its PUBLISHED table (15 min context bridges ≤4
+    // min of wake, not ≤10). Measured on this fixture, that single change moves
+    // wake 17.5 → 26.0 min, light 295.0 → 289.5, REM 153.0 → 150.0, i.e. TST
+    // 516.5 → 508.0. The old table was closer to this night's Apple Watch label
+    // (wake=3) only because it was bridging up to 10 minutes of genuine
+    // awakening into light sleep; one wrist-reference night is not a licence to
+    // deviate from Webster 1982 / Cole 1992.
+    expect(wakeMin, lessThan(35),
         reason: 'WAKE over-call regression guard (pre-fix: 294 min)');
     expect(remMin, greaterThan(100),
         reason: 'REM under-call regression guard (pre-fix: 41 min)');

@@ -168,7 +168,8 @@ Metric<StagerResult> autonomicStager(
   // classic Webster rules (durations in minutes, converted to epochs):
   //   after ≥ 4 min sleep, ≤ 1 min wake → sleep
   //   after ≥10 min sleep, ≤ 3 min wake → sleep
-  //   after ≥15 min sleep, ≤ 4 min wake → sleep
+  //   after ≥15 min sleep, ≤ 5 min wake → sleep  (Webster says 4; the extra
+  //   minute is deliberate here — see the rules table for why)
   // (Symmetric in both directions: "surrounded by" sleep on either side.)
   _websterRescore(sm, epochSec);
 
@@ -229,7 +230,11 @@ void websterRescoreAutonomic(List<SleepStage> sm, int epochSec) =>
 /// genuine, sustained awakening). Rules (Webster, in epochs):
 ///   sleep-before ≥ 4 min  AND wake-run ≤ 1 min → sleep
 ///   sleep-before ≥10 min  AND wake-run ≤ 3 min → sleep
-///   sleep-before ≥15 min  AND wake-run ≤ 4 min → sleep
+///   sleep-before ≥15 min  AND wake-run ≤ 5 min → sleep
+/// The top row is 5, not Webster's 4, and the widening is deliberate: it
+/// absorbs the van Hees 5-min mask-smear artifact. See the rules table below.
+/// `cardio_stager`'s copy runs the published 4 because van Hees does not run
+/// on its forced-window paths at all.
 /// "sleep-before" is satisfied by sustained sleep on EITHER bracketing side,
 /// so an arousal sandwiched between two long sleep bouts is bridged.
 ///

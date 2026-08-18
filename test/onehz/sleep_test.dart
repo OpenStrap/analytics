@@ -28,6 +28,8 @@ import 'package:openstrap_analytics/src/onehz/sleep/stager.dart'
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
 void main() {
+  _slp13Tests();
+  _cv06Tests();
   // ------------------------------------------------ DST-aware tz offset (#1)
   group('segmentSleep — per-timestamp tz offset (DST-aware)', () {
     // Build active → still(low HR) → active overnight block; inject a resolver
@@ -173,36 +175,44 @@ void main() {
       // A 3h shift on an 8h sleep window: 6h of the 24 disagree → SRI=200·(18/24)-100=50.
       expect(m.value!.sri, closeTo(50, 1.0));
     });
-  });
 
-  // --------------------------------------------------------------- accounting
-  group('sleep accounting', () {
-    test('known in-bed window → TST/WASO/efficiency exact', () {
-      // 8h in bed (28800 s). Asleep except a 30-min WASO block at hour 3 and a
-      // 20-min sleep-latency wake at the very start.
-      const total = 8 * 3600;
-      final asleep = List<bool>.filled(total, true);
-      for (var i = 0; i < 20 * 60; i++) {
-        asleep[i] = false; // onset latency
-      }
-      final wasoStart = 3 * 3600;
-      for (var i = wasoStart; i < wasoStart + 30 * 60; i++) {
-        asleep[i] = false; // mid-night WASO
-      }
-      final m = sleepAccounting(asleep);
+    test(
+        'per-pair decomposition names the pair that broke it, and a '
+        'half-unobserved pair is NOT emitted', () {
+      // SLP-08. Four days: 0,1,2 identical; day 3 shifted 3 h AND only 300 of
+      // its 1440 minutes observed. The shifted pair is genuinely the worst
+      // pair, and it is exactly the pair that must not be reported, because
+      // it was compared on a fifth of the clock day.
+      const epochsPerDay = 1440;
+      List<bool> day(int shift) => List<bool>.generate(epochsPerDay, (e) {
+            final ee = (e - shift) % epochsPerDay;
+            final m = ee < 0 ? ee + epochsPerDay : ee;
+            return m < 7 * 60 || m >= 23 * 60;
+          });
+      final vec = [...day(0), ...day(0), ...day(90), ...day(3 * 60)];
+      final valid = [
+        ...List<bool>.filled(epochsPerDay, true),
+        ...List<bool>.filled(epochsPerDay, true),
+        ...List<bool>.filled(epochsPerDay, true),
+        ...List<bool>.generate(epochsPerDay, (e) => e < 300),
+      ];
+      final m = phillipsSri(vec, epochsPerDay, valid: valid);
       expect(m.present, isTrue);
-      final a = m.value!;
-      expect(a.onsetIdx, 20 * 60);
-      expect(a.wasoSec, 30 * 60); // only the mid-night block counts as WASO
-      expect(a.tstSec, total - 20 * 60 - 30 * 60);
-      // Efficiency = TST / in-bed, where in-bed = offset − onset + 1 (the sleep
-      // PERIOD, NOT the whole captured mask). Onset latency is excluded from the
-      // denominator: offset is the last asleep second (total-1), onset=1200.
-      final inBed = a.offsetIdx - a.onsetIdx + 1;
-      expect(inBed, total - 20 * 60); // 20-min latency trimmed off the front
-      expect(a.efficiencyPct, closeTo(100.0 * a.tstSec / inBed, 1e-6));
-      // And NOT the old whole-mask denominator.
-      expect(a.efficiencyPct, isNot(closeTo(100.0 * a.tstSec / total, 1e-6)));
+      final pairs = m.value!.pairs;
+      // pair 3 (the thin one) is dropped; pairs 1 and 2 survive.
+      expect([for (final p in pairs) p.dayIndex], [1, 2]);
+      // pair 1 is the two identical days; pair 2 carries the 90-min shift.
+      expect(pairs[0].sri, closeTo(100, 1e-6));
+      expect(pairs[1].sri, lessThan(pairs[0].sri));
+      // the decomposition is of the SAME arithmetic: dropping a thin pair from
+      // the LIST must not drop it from the published total.
+      var agree = 0, cases = 0;
+      for (final p in pairs) {
+        agree += p.agreement;
+        cases += p.cases;
+      }
+      expect(agree, lessThanOrEqualTo(cases));
+      expect(cases, lessThan(m.value!.cases));
     });
   });
 
@@ -222,6 +232,7 @@ void main() {
           t += 1000.0;
         }
       }
+
       active(dayH * 3600);
       final nightStart = out.length;
       final moves = moveAt.toSet();
@@ -261,7 +272,8 @@ void main() {
       return hr;
     }
 
-    test('(a) still + low-HR night → one window, tst≈in-bed, eff high, '
+    test(
+        '(a) still + low-HR night → one window, tst≈in-bed, eff high, '
         'figures consistent', () {
       final accel = _accel(2, 7, 1);
       final hr = _hr(2, 7, 1);
@@ -306,6 +318,20 @@ void main() {
       expect(j['in_bed_sec'], s.inBedSec);
       expect(j['tst_sec'], s.tstSec);
       expect(j['confidence'], greaterThan(0));
+
+      // SLP-01. Half of a night's confidence is the WINDOW's confidence, and it
+      // used to be van Hees' — a detector whose `onsetIdx`/`offsetIdx` this
+      // pipeline never reads. It is now van Hees' own construction (length up
+      // to a 7 h night, clamped to [0.3, 0.95]) applied to the window that
+      // actually shipped, so it is a statement about `in_bed_sec`.
+      // Every second here carries a valid HR and no RR was passed, so
+      // stagingConf is exactly (0.35 + 0.25*0) * 1.0 = 0.35 and the whole
+      // confidence is pinned.
+      final windowConf = (s.inBedSec! / (7 * 3600)).clamp(0.3, 0.95);
+      expect(
+          s.confidence,
+          closeTo(((windowConf + 0.35) / 2.0).clamp(0.0, kMaxSleepConfidence),
+              1e-9));
 
       // 4-CLASS HYPNOGRAM (Awake/Light/Deep/REM): the per-second stages4 stream
       // is aligned 1:1 with stages, uses only the four labels, and its Light/Deep
@@ -388,12 +414,14 @@ void main() {
       expect(s.confidence, 0);
     });
 
-    test('(c5) forced window honors a user window the auto path rejects (<3h) '
+    test(
+        '(c5) forced window honors a user window the auto path rejects (<3h) '
         'and stages within it (single-source)', () {
       // A 2h still night sits BELOW the 3h auto floor → auto returns absent.
       final accel = _accel(2, 2, 1);
       final hr = _hr(2, 2, 1);
-      expect(segmentSleep(accel, hr).present, isFalse, reason: 'auto rejects <3h');
+      expect(segmentSleep(accel, hr).present, isFalse,
+          reason: 'auto rejects <3h');
 
       // The user asserts sleep across the still block. tsMs == index*1000, so
       // epoch-seconds == index; the night runs [7200, 14400).
@@ -459,7 +487,8 @@ void main() {
       stillSleep(5 * 3600, bpm: 52);
       active(2 * 3600);
 
-      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
+      final s =
+          segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
       expect(s.present, isTrue);
       // The overnight block earns the timing bonus, so the chosen in-bed span is
       // the ~4h night rather than the longer daytime nap.
@@ -490,11 +519,13 @@ void main() {
 
       active(2 * 3600);
       stillSleep(3 * 3600, bpm: 49);
-      active(30 * 60, baseHr: 85); // real wake gap: preserved as WASO, not new day
+      active(30 * 60,
+          baseHr: 85); // real wake gap: preserved as WASO, not new day
       stillSleep(2 * 3600, bpm: 50);
       active(4 * 3600);
 
-      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
+      final s =
+          segmentSleep(accel, hr, hrBaseline: List<double>.filled(120, 72));
       expect(s.present, isTrue);
       // The selector bridges adjacent overnight fragments (<60 min gap) into
       // one main sleep span rather than picking only the longest fragment.
@@ -515,8 +546,7 @@ void main() {
         [200 * 60, 200 * 60 + 180], // 3 min at ~3.3h
         [300 * 60, 300 * 60 + 150], // 2.5 min at 5h
       ];
-      bool inArousal(int s) =>
-          arousals.any((a) => s >= a[0] && s < a[1]);
+      bool inArousal(int s) => arousals.any((a) => s >= a[0] && s < a[1]);
       final accel = <AccelSample>[];
       final hr = <double>[];
       var t = 0.0;
@@ -542,7 +572,8 @@ void main() {
         hr.add(72 + (i % 5).toDouble());
         t += 1000.0;
       }
-      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
+      final s =
+          segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
       expect(s.present, isTrue);
       // Arousals total < 8 min over a ~7h night; Webster rescoring bridges them
       // so efficiency stays high. (The Walch stager leaves a little more residual
@@ -584,7 +615,8 @@ void main() {
         hr.add(72 + (i % 5).toDouble());
         t += 1000.0;
       }
-      final s = segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
+      final s =
+          segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
       expect(s.present, isTrue);
       // The 30-min block (1800 s) must be counted as wake/WASO, not bridged.
       // Allow epoch/HR-dip edge trimming but require most of the 30-min block
@@ -634,30 +666,23 @@ void main() {
   });
 
   // ---------------------------------------------------------------------- CPC
-  group('Cardiopulmonary Coupling', () {
-    test('NN with injected ~0.25 Hz respiration → HF coupling band', () {
-      // Synthesize an NN tachogram at mean 1000 ms with a strong RSA at 0.25 Hz
-      // (15 breaths/min). Beat-to-beat at ~1 beat/s. The coupling spectrum's
-      // dominant frequency should fall in the HFC band (0.1–0.4 Hz).
+  group('Cardiopulmonary Coupling (WITHDRAWN)', () {
+    test('abstains — no respiration channel independent of the beat times', () {
+      // Was: "NN with injected ~0.25 Hz respiration → HF coupling band". That
+      // passed because the respiration surrogate WAS the NN series, so of
+      // course the "coupling" peak sat at the RSA frequency. See cpc.dart.
       final nn = <double>[];
       final times = <double>[];
       var t = 0.0;
-      const fResp = 0.25; // Hz
       for (var i = 0; i < 1800; i++) {
-        // RR modulated by respiration (RSA): ±40 ms at 0.25 Hz.
-        final rr = 1000 + 40 * math.sin(2 * math.pi * fResp * (t / 1000.0));
+        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
         t += rr;
         nn.add(rr);
         times.add(t);
       }
       final m = cardiopulmonaryCoupling(nn, times);
-      expect(m.present, isTrue);
-      final c = m.value!;
-      // Dominant coupling frequency near the injected respiration.
-      expect(c.dominantHz, closeTo(fResp, 0.05),
-          reason: 'coupling peak should sit at the respiratory frequency');
-      // HFC should dominate (stable-NREM-like) vs LFC.
-      expect(c.hfc, greaterThan(c.lfc));
+      expect(m.present, isFalse);
+      expect(m.note, contains('respiration channel'));
     });
   });
 
@@ -669,8 +694,7 @@ void main() {
       final x = <double>[];
       for (var d = 0; d < 7; d++) {
         for (var h = 0; h < eph; h++) {
-          final a =
-              1 + math.cos(2 * math.pi * (h - 14) / 24); // 0..2, peak @14
+          final a = 1 + math.cos(2 * math.pi * (h - 14) / 24); // 0..2, peak @14
           x.add(a);
         }
       }
@@ -702,10 +726,8 @@ void main() {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final accel = <AccelSample>[];
       final hr = <double>[];
       final immobileFromRest = <bool>[];
@@ -803,8 +825,9 @@ void main() {
 
       // No "light"/4th stage ever appears — strictly 3-class.
       expect(
-          consolidated.toSet().difference(
-              {SleepStage.wake, SleepStage.nrem, SleepStage.rem}),
+          consolidated
+              .toSet()
+              .difference({SleepStage.wake, SleepStage.nrem, SleepStage.rem}),
           isEmpty);
 
       // Totals preserved to within a couple of bouts (minBoutEp=10 here): the
@@ -845,7 +868,8 @@ void main() {
   // ------------------------------------------------ sleepCyclesMetric (#6)
   group('sleepCyclesMetric — direct coverage', () {
     test('empty RR → honest absent (no fabricated cycles)', () {
-      final m = sleepCyclesMetric(const <double>[], const <double>[], 0, 8 * 3600);
+      final m =
+          sleepCyclesMetric(const <double>[], const <double>[], 0, 8 * 3600);
       expect(m.present, isFalse);
       expect(m.value, isNull);
       expect(m.tier, Tier.estimate);
@@ -895,4 +919,169 @@ SleepStage _dominant(List<SleepStage> xs) {
     }
   });
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// SLP-13 — stage minutes are INTERVALS, sized by the night's own confidence.
+// ---------------------------------------------------------------------------
+void _slp13Tests() {
+  group('SLP-13 stage intervals', () {
+    ({int lo, int hi}) rem(double conf) {
+      final r = stageIntervals(
+        lightSec: 12000,
+        deepSec: 3600,
+        remSec: 3600,
+        tstSec: 21600,
+        confidence: conf,
+      ).rem;
+      return (lo: r.loSec, hi: r.hiSec);
+    }
+
+    test('deep is wider than REM at the same minutes', () {
+      final s = stageIntervals(
+        lightSec: 12000,
+        deepSec: 3600,
+        remSec: 3600,
+        tstSec: 21600,
+        confidence: kMaxSleepConfidence,
+      );
+      expect(
+          s.deep.hiSec - s.deep.loSec, greaterThan(s.rem.hiSec - s.rem.loSec));
+      // and the exact count is still there for Investigate
+      expect(s.deep.pointSec, 3600);
+    });
+
+    test('a better-observed night gets a narrower interval', () {
+      final good = rem(kMaxSleepConfidence);
+      final poor = rem(0.0);
+      expect(good.hi - good.lo, lessThan(poor.hi - poor.lo));
+    });
+
+    test('zero deep publishes a floor, never 0-0', () {
+      final s = stageIntervals(
+        lightSec: 18000,
+        deepSec: 0,
+        remSec: 0,
+        tstSec: 18000,
+        confidence: 0.5,
+      );
+      expect(s.deep.loSec, 0);
+      expect(s.deep.hiSec, kStageIntervalFloorSec);
+    });
+
+    test('no stage interval can exceed the sleep it is part of', () {
+      final s = stageIntervals(
+        lightSec: 1000,
+        deepSec: 5000,
+        remSec: 6000,
+        tstSec: 12000,
+        confidence: 0.0,
+      );
+      expect(s.deep.hiSec, lessThanOrEqualTo(12000));
+      expect(s.rem.hiSec, lessThanOrEqualTo(12000));
+      expect(s.light.loSec, greaterThanOrEqualTo(0));
+    });
+
+    test('light inherits deep\'s ABSOLUTE half-width, not its relative one',
+        () {
+      final s = stageIntervals(
+        lightSec: 14400,
+        deepSec: 3600,
+        remSec: 3600,
+        tstSec: 21600,
+        confidence: 0.4,
+      );
+      expect(s.light.hiSec - s.light.loSec, s.deep.hiSec - s.deep.loSec);
+    });
+
+    test('an absent night has no ranges', () {
+      expect(SleepSegmentation.absent.stageRanges, isNull);
+      expect(SleepSegmentation.absent.toJson()['deep_range_sec'], isNull);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// CV-06 — the shape of the night: per-bin RMSSD.
+// ---------------------------------------------------------------------------
+({List<double> nn, List<double> t}) _syntheticNight({
+  required double hours,
+  required double Function(double hourIntoNight) ampMs,
+  ({double fromH, double toH})? gap,
+}) {
+  final nn = <double>[];
+  final t = <double>[];
+  var now = 0.0; // ms
+  var i = 0;
+  while (now < hours * 3600000) {
+    final h = now / 3600000;
+    // A 4-beat cycle [0, +2a, 0, -2a] => every successive difference is 2*amp,
+    // so the bin RMSSD is exactly 2*amp and the expected shape is constructed,
+    // not guessed at. It used to be a straight alternation, which has the same
+    // RMSSD but a difference-series lag-1 ACF of exactly −1 — indistinguishable
+    // from pure beat-timing jitter, which `hrvTime` now refuses outright
+    // (kNnDiffAcf1Floor). This shape has ACF1 = 0 and no real night alternates.
+    final v = 1000.0 + 2 * ampMs(h) * math.sin(2 * math.pi * i / 4);
+    now += v;
+    i++;
+    if (gap != null && h >= gap.fromH && h < gap.toH) continue;
+    nn.add(v);
+    t.add(now);
+  }
+  return (nn: nn, t: t);
+}
+
+void _cv06Tests() {
+  group('CV-06 nightly HRV shape', () {
+    test('recovers a suppressed first third and a recovered last third', () {
+      final n = _syntheticNight(
+        hours: 8,
+        ampMs: (h) => h < 2.7 ? 5.0 : (h < 5.3 ? 15.0 : 30.0),
+      );
+      final m = nightHrvShape(n.nn, n.t);
+      expect(m.present, isTrue);
+      final v = m.value!;
+      expect(v.bins.length, 16); // 8 h of 30-min bins
+      expect(v.bins.every((b) => b.present), isTrue);
+      expect(v.firstThirdMs, closeTo(10, 1)); // 2 * 5 ms
+      expect(v.lastThirdMs, closeTo(60, 2)); // 2 * 30 ms
+      expect(v.lastOverFirst, greaterThan(3));
+      // and every published bin carries a BAND, not just a point
+      for (final b in v.bins) {
+        expect(b.loMs, lessThan(b.rmssdMs!));
+        expect(b.hiMs, greaterThan(b.rmssdMs!));
+      }
+    });
+
+    test('a gapped bin ABSTAINS and stays in the series as a hole', () {
+      final n = _syntheticNight(
+        hours: 8,
+        ampMs: (_) => 20.0,
+        gap: (fromH: 3.0, toH: 3.9),
+      );
+      final m = nightHrvShape(n.nn, n.t);
+      final v = m.value!;
+      expect(v.bins.length, 16);
+      final holes = v.bins.where((b) => !b.present).toList();
+      expect(holes, isNotEmpty);
+      // the hole reports WHY (how many beats it had), it is not a bare dash
+      expect(holes.first.nBeats, lessThan(kMinBeatsPerHrvBin));
+      // and the abstention costs confidence
+      expect(m.confidence, lessThan(0.8));
+    });
+
+    test('a short night has no shape to describe', () {
+      final n = _syntheticNight(hours: 1, ampMs: (_) => 20.0);
+      final m = nightHrvShape(n.nn, n.t);
+      expect(m.present, isFalse);
+      expect(m.note, contains('no shape'));
+    });
+
+    test('CV-06 does not publish a time-to-max (deliberately cut)', () {
+      final n = _syntheticNight(hours: 8, ampMs: (_) => 20.0);
+      final j = nightHrvShape(n.nn, n.t).value!.toJson();
+      expect(j.keys, isNot(contains('time_to_max_sec')));
+      expect(j.toString(), isNot(contains('time_to')));
+    });
+  });
 }

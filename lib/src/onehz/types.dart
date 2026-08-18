@@ -103,12 +103,13 @@ class Metric<T> {
   /// numerics/maps). When absent, emits the honest `"—"` placeholder.
   Map<String, dynamic> toJson([Object? Function(T v)? encode]) {
     final m = <String, dynamic>{};
-    if (value == null) {
-      m['value'] = '—';
-    } else {
-      m['value'] = encode != null ? encode(value as T) : value;
-    }
-    m['confidence'] = round6(confidence);
+    final enc = value == null ? null : (encode != null ? encode(value as T) : value);
+    // A non-finite scalar is not a measurement, and jsonEncode throws on it —
+    // one such field used to discard the caller's entire bundle. Treat it as
+    // absent (last-resort backstop; producers should abstain properly instead).
+    final bad = enc is double && !enc.isFinite;
+    m['value'] = (enc == null || bad) ? '—' : enc;
+    m['confidence'] = round6(bad ? 0.0 : confidence);
     m['tier'] = tier;
     m['inputs_used'] = inputs_used;
     if (drivers != null) m['drivers'] = drivers!.map((d) => d.toJson()).toList();

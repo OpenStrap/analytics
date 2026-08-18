@@ -1,13 +1,15 @@
 // auto_detect.dart — opt-in "did you just work out?" SUGGESTION detector.
 //
 // Opt-in workout suggestion detector (ported from AutoWorkoutDetector.swift).
-// DELIBERATELY conservative (low sensitivity): a sustained ≥12-min
-// elevation of HR ≥ resting+30 bpm, brief (≤90 s) dips tolerated, near windows
-// merged, optional motion confirmation, overlap-excluded against saved spans.
+// DELIBERATELY conservative (low sensitivity): a sustained ≥12-min elevation of
+// HR ≥ max(RHR+[elevatedMarginBPM], RHR+[hrrFloorFraction]·HRR) — RHR+59 at
+// RHR 60 / HRmax 190 — brief (≤90 s) dips tolerated, near windows merged,
+// optional motion confirmation, overlap-excluded against saved spans.
+// (The header and the note used to quote "RHR+30", the margin this detector
+// deliberately abandoned: see [hrrFloorFraction] for the 30 false windows on a
+// sedentary week that motivated replacing it.)
 //
-// This NEVER writes a row — it only ever SUGGESTS. It is separate from the
-// persistent per-day [WorkoutDetector] (workout_detect.dart), which computes
-// calories/zones/strain for the durable "detected" rows.
+// This NEVER writes a row — it only ever SUGGESTS.
 //
 // HYBRID SEAM: every surviving bout is run through a [SportClassifier]; the
 // default returns "detected" (no sport typing). OpenStrap's motion-based HAR typer
@@ -101,6 +103,16 @@ class AutoWorkoutDetector {
 
   /// A dip below the gate no longer than this does NOT break the span.
   static const int maxDipS = 90;
+
+  /// A GAP IN THE DATA longer than this breaks the span.
+  ///
+  /// A dip is "HR present and low"; a gap is "no HR at all", and only the dip
+  /// used to be time-bounded — so an off-wrist stretch produced no samples, the
+  /// loop never saw it, and the span simply resumed at the next elevated
+  /// sample. Two 12-minute efforts 40 minutes apart came out as one 64-minute
+  /// workout whose mean HR (a mean over present samples only) still read
+  /// normal. Absence of data is not evidence of continuity.
+  static const int maxGapS = 90;
 
   /// Two windows whose gap is strictly < this are merged (5 min).
   static const int mergeGapS = 5 * 60;
@@ -219,6 +231,8 @@ class AutoWorkoutDetector {
     }
 
     for (var k = 0; k < n; k++) {
+      // Break on a hole in the record before anything else — see [maxGapS].
+      if (k > 0 && spanStart != null && ts[k] - ts[k - 1] > maxGapS) closeSpan();
       if (bpm[k] >= floor) {
         spanStart ??= ts[k];
         spanEnd = ts[k];
@@ -382,7 +396,9 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
     confidence: list.isEmpty ? 0.0 : 0.6,
     tier: Tier.estimate,
     inputs_used: const ['hr_1hz', 'resting_hr', 'motion_1hz'],
-    note: 'opt-in workout suggestion (HR ≥ RHR+30 sustained ≥12 min); '
+    note: 'opt-in workout suggestion (HR ≥ max(RHR+'
+        '${AutoWorkoutDetector.elevatedMarginBPM}, RHR+'
+        '${AutoWorkoutDetector.hrrFloorFraction}·HRR) sustained ≥12 min); '
         'wrist-HR ESTIMATE, not medical advice',
   );
 }

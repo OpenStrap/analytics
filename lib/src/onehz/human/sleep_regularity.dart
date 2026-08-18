@@ -1,79 +1,45 @@
-// HUMAN LAYER — Sleep Regularity Index + sleep debt vs personal need.
-// Catalog §A: True SRI [PUB Phillips 2017; Windred 2023] and sleep debt
-// vs personal need (Kitamura 2016 OSD) [PUB].
+// HUMAN LAYER — your longer unconstrained nights vs your habitual sleep.
 //
-// SRI = 200·(P_agreement) − 100, where P_agreement is the probability that a
-// person is in the SAME state (asleep/awake) at two time-points exactly 24 h
-// apart, averaged over all epochs. This is the TRUE epoch-by-epoch concordance,
-// NOT the SD-of-midsleep shortcut (catalog explicitly forbids the shortcut).
+// SRI does NOT live here despite the file name — the live one is `phillipsSri`
+// in sleep/sri.dart. This file used to carry a second SRI header and an unused
+// result class after the implementation was deleted; both are gone.
 //
-// Sleep debt: Kitamura's "optimal sleep duration" is estimated from the
-// rebound on unconstrained (free) nights; debt = OSD − recent habitual sleep.
+// THIS IS NOT KITAMURA'S OSD, and it used to say it was (SLP-03). Kitamura 2016
+// (PMC5075948) defines optimal sleep duration as the ASYMPTOTE of an
+// exponential-decay fit to PSG total sleep time across NINE CONSECUTIVE NIGHTS
+// AT 12 h TIME IN BED: OSD 8.41 ± 0.18 h, habitual 7.37 ± 0.27 h, potential debt
+// 1.04 ± 0.24 h, with night 1 at 10.59 ± 0.19 h — a 3.22 h rebound that then
+// decays. The paper's whole point is that UNCONSTRAINED SLEEP IS NOT OSD; it
+// understates it by about an hour.
+//
+// What we actually compute is `percentile(freeNightSleepH, 75)` over ordinary
+// ad-lib nights — a habitual-sleep percentile. So the "debt" it yields is
+// systematically near zero or negative, and downstream (`crossday_pipeline`
+// clamps this into [7.0, 9.5] h and floors debt at 0.0) what most users see is
+// the clamp, not a measurement. Reported as what it is: how long your longer
+// unconstrained nights run, against your recent typical night.
+//
+// Doing it properly needs a saturating fit across a RUN of consecutive free
+// days, and a refusal when no such run exists — not a wider percentile.
+//
 // Returns null when there is no free night yet, rather than assuming a generic
 // 8 h target.
 
 import '../types.dart';
 import '../util.dart';
 
-class Sri {
-  final double sri; // -100..100, higher = more regular
-  final int epochsPerDay; // epochs in 24 h (sample rate)
-  final int comparedPairs; // # of (t, t+24h) comparisons used
-  final String band; // coarse within-context label
-  const Sri(this.sri, this.epochsPerDay, this.comparedPairs, this.band);
-  Map<String, dynamic> toJson() => {
-        'sri': round6(sri),
-        'epochs_per_day': epochsPerDay,
-        'compared_pairs': comparedPairs,
-        'band': band,
-      };
-}
-
-/// True Phillips Sleep Regularity Index from a CONTIGUOUS binary sleep/wake
-/// vector. `asleep[i]` = is the person asleep in epoch i. [epochsPerDay] is the
-/// number of epochs spanning 24 h (e.g. 1440 for 1-min epochs, 96 for 15-min).
-///
-/// We compare every epoch with the epoch exactly one day later and score
-/// agreement. Needs strictly more than one day of data.
-Metric<Sri> sleepRegularityIndex(List<bool> asleep, {required int epochsPerDay}) {
-  const inputs = ['sleep_wake_binary'];
-  if (epochsPerDay <= 0 || asleep.length <= epochsPerDay) {
-    return const Metric<Sri>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'SRI needs more than one full day of sleep/wake epochs',
-    );
-  }
-  var agree = 0;
-  final pairs = asleep.length - epochsPerDay;
-  for (var i = 0; i < pairs; i++) {
-    if (asleep[i] == asleep[i + epochsPerDay]) agree++;
-  }
-  final p = agree / pairs;
-  final sri = 200.0 * p - 100.0;
-  final band = sri >= 80
-      ? 'very regular'
-      : sri >= 60
-          ? 'regular'
-          : sri >= 40
-              ? 'somewhat irregular'
-              : 'irregular';
-  // Confidence scales with how many days were compared.
-  final days = pairs / epochsPerDay;
-  return Metric<Sri>(
-    value: Sri(sri, epochsPerDay, pairs, band),
-    confidence: clamp(days / 7.0, 0.3, 0.95),
-    tier: Tier.high,
-    inputs_used: inputs,
-    note: 'epoch-by-epoch 24-h concordance (true SRI, not SD-of-midsleep)',
-  );
-}
-
 class SleepDebt {
-  final double? osdHours; // estimated personal optimal sleep duration (h)
+  /// p75 of your UNCONSTRAINED nights (h) — "where your longer free nights
+  /// land". NOT Kitamura's optimal sleep duration; see the file header.
+  final double? osdHours;
   final double habitualHours; // recent habitual sleep (h)
-  final double? debtHours; // OSD − habitual (positive = under-slept)
-  final bool hasFreeNight; // could we estimate OSD honestly?
+
+  /// [osdHours] − [habitualHours]. The gap between your longer free nights and
+  /// your typical one, not a sleep debt in Kitamura's sense — an ad-lib
+  /// percentile understates OSD by ~1 h, so this runs near zero by
+  /// construction.
+  final double? debtHours;
+  final bool hasFreeNight; // did we have any unconstrained night at all?
   const SleepDebt(
       this.osdHours, this.habitualHours, this.debtHours, this.hasFreeNight);
   Map<String, dynamic> toJson() => {
@@ -84,13 +50,14 @@ class SleepDebt {
       };
 }
 
-/// Sleep debt vs personal need (Kitamura OSD).
+/// Your longer unconstrained nights vs your habitual night.
 ///
 /// [recentSleepH] recent nightly sleep durations (h), oldest→newest.
 /// [freeNightSleepH] sleep durations on UNCONSTRAINED nights (no alarm / free
-/// days), used to estimate the personal optimal sleep duration as their rebound
-/// plateau. With no free nights we report habitual sleep but DECLINE to claim a
-/// debt (honest: "no free night yet").
+/// days). We take their 75th percentile. With no free nights we report habitual
+/// sleep but DECLINE to compare (honest: "no free night yet").
+///
+/// NOT Kitamura's OSD — see the file header for what that would require.
 Metric<SleepDebt> sleepDebt(
   List<double> recentSleepH,
   List<double> freeNightSleepH, {
@@ -115,8 +82,9 @@ Metric<SleepDebt> sleepDebt(
       note: 'no free night yet — cannot honestly estimate your sleep need',
     );
   }
-  // OSD ≈ the rebound plateau: the upper part of free-night durations (75th
-  // percentile is a robust "when unconstrained, this is where you settle").
+  // The upper part of free-night durations: "when unconstrained, this is where
+  // your longer nights land". A percentile of ad-lib nights, NOT a rebound
+  // asymptote — see the file header.
   final osd = percentile(freeNightSleepH, 75)!;
   final debt = osd - habitual;
   return Metric<SleepDebt>(
@@ -124,6 +92,8 @@ Metric<SleepDebt> sleepDebt(
     confidence: clamp(freeNightSleepH.length / 5.0, 0.3, 0.85),
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'OSD from free-night rebound (Kitamura); debt = need − habitual',
+    note: 'p75 of your unconstrained nights vs your habitual night — a '
+        'percentile of ad-lib sleep, NOT a measured sleep need (that needs a '
+        'run of consecutive free days and a saturating fit)',
   );
 }

@@ -1,7 +1,11 @@
 // WELLNESS — relative skin-temp health signals (illness flag + menstrual).
 //
-// Both operate on the NIGHTLY-MEAN RELATIVE skin-temp (z-scored or raw ADC).
-// NEVER absolute °C / fever.
+// Both operate on the RAW NIGHTLY-MEAN skin-temp in the device's own unit —
+// NOT a z-score. Each standardises once, internally, against its own window;
+// handing them an already-standardised series standardises it twice and the
+// thresholds below stop meaning what they say. `nightlySkinTemp` (temp_circadian
+// .dart) is the canonical producer and also gates out nights the strap spent
+// warming up. NEVER absolute °C / fever.
 //
 // 1. Skin-temp z-score illness flag (Smarr 2020) — nightly relative-temp z vs a
 //    trailing personal baseline; flags a sustained elevation. MUST be
@@ -52,10 +56,22 @@ class TempIllnessDay {
 
 /// Nightly relative skin-temp z-score illness flag, cycle-aware.
 ///
-/// [dates] labels; [nightlyTemp] nightly-mean RELATIVE temp ADC (null = missing
-/// night); [luteal] OPTIONAL per-night luteal-phase flag (true => suppress).
-/// [baselineDays] trailing robust-baseline window; [zThresh] flag elevation
-/// above this robust z; [persistDays] consecutive elevated nights required.
+/// [dates] labels; [nightlyTemp] the RAW nightly-mean skin-temp in the device's
+/// own unit (gen4 ADC counts, gen5 centi-°C) — `nightlySkinTemp(...).value.mean`
+/// is the canonical producer. Null = missing night. [luteal] OPTIONAL per-night
+/// luteal-phase flag (true => suppress). [baselineDays] trailing robust-baseline
+/// window; [zThresh] flag elevation above this robust z; [persistDays]
+/// consecutive elevated nights required.
+///
+/// DO NOT PASS A Z-SCORE. This function standardises internally against its own
+/// trailing window (`robustBaseline(...).modZ`), so a pre-standardised series
+/// gets standardised twice and `zThresh = 2.0` stops meaning anything: an
+/// already-z-scored value whose own denominator came from as few as 3 nights
+/// carries ~50 % relative error before this ever sees it. The function cannot
+/// detect the unit — the contract is the only guard there is, which is why it
+/// is written here in capitals rather than left in a header line. (Smarr et al.,
+/// Sci Rep 2020;10:21640 reports +0.63 °C against a per-subject baseline and
+/// supplies NO z threshold; 2.0 is ours, on an uncalibrated relative channel.)
 ///
 /// HONESTY: when MAD baseline is degenerate (quantized/flat) we report null z
 /// and stay `normal` — we never invent a deviation. In luteal nights an
@@ -72,13 +88,16 @@ List<TempIllnessDay> tempIllnessFlag(
 }) {
   final n = nightlyTemp.length;
   final out = <TempIllnessDay>[];
+  // CALENDAR days, not rows — see [calendarDays].
+  final day = calendarDays(dates);
   var elevatedRun = 0;
+  var lastScoredDay = -1 << 20;
   for (var i = 0; i < n; i++) {
     final t = nightlyTemp[i];
     final lut = (luteal != null && i < luteal.length) ? luteal[i] : false;
-    final lo = i - baselineDays < 0 ? 0 : i - baselineDays;
     final window = <double>[];
-    for (var j = lo; j < i; j++) {
+    for (var j = i - 1; j >= 0; j--) {
+      if (day[i] - day[j] > baselineDays) break;
       final v = nightlyTemp[j];
       if (v != null) window.add(v);
     }
@@ -101,6 +120,9 @@ List<TempIllnessDay> tempIllnessFlag(
       elevatedRun = 0;
       continue;
     }
+    // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows.
+    if (day[i] - lastScoredDay > 1) elevatedRun = 0;
+    lastScoredDay = day[i];
     final elevated = zz >= zThresh;
     if (elevated) {
       elevatedRun++;
@@ -149,19 +171,43 @@ class OvulationEvent {
 ///
 /// For each candidate night i: the coverline = max of the prior [lookback]
 /// nights; if night i and the next ([confirm]-1) nights all exceed
-/// (coverline + [threshold]) ADC counts, ovulation is confirmed, estimated at
-/// the night just before the rise (i-1).
+/// (coverline + [threshold]), ovulation is confirmed, estimated at the night
+/// just before the rise (i-1).
+///
+/// UNITS: [threshold] is in WHATEVER UNIT [nightlyTemp] carries — this function
+/// is unit-agnostic and cannot check, so there is NO default: it used to be 1.0
+/// (documented as ADC counts) while the caller passed z-scores, which silently
+/// turned the classic ~0.2 °F rule into "one whole SD above the prior 6 nights"
+/// and confirmed ovulation essentially never. Pass the threshold in the unit of
+/// the series you hand in, and set [inputLabel] so the envelope names it.
 ///
 /// HONESTY: confirmation ONLY — this NEVER predicts a future ovulation. Returns
-/// all detected events over the series. `relative` tier (ADC counts, no °C).
+/// all detected events over the series. `relative` tier — never an absolute
+/// temperature.
+///
+/// UNCALLED TODAY, AND THE CONDITION FOR CALLING IT IS A THRESHOLD. edge
+/// unwired it after passing z-scores against a 1.0 default (see the note at the
+/// old call site in local_repository_impl.dart). restoring it needs a threshold
+/// defensible IN THE UNIT PASSED, ON THIS SENSOR, with a stated basis — not a
+/// number chosen because it makes events appear. nobody has one yet.
+///
+/// AN EMPTY EVENT LIST IS NOT AN ANSWER ABOUT HER BODY. the temperature channel
+/// is populated at ~1.5% of a sleep window on real data, so a null coverline
+/// result is dominated by measurement failure, not physiology. the app may make
+/// a statement about its own detector and never about her ovulation. the word
+/// "anovulatory", and every paraphrase of it, stays out of this codebase and
+/// out of the copy. whatever renders this either says nothing in the no-event
+/// state or states the coverage it had IN THE SAME SENTENCE, with no
+/// cycle-level interpretation — not in a footnote, not on a second screen.
 Metric<List<OvulationEvent>> menstrualCoverline(
   List<String> dates,
   List<double?> nightlyTemp, {
+  required double threshold,
   int lookback = 6,
   int confirm = 3,
-  double threshold = 1.0,
+  String inputLabel = 'nightly_skin_temp',
 }) {
-  const inputs = ['nightly_skin_temp_adc'];
+  final inputs = [inputLabel];
   final n = nightlyTemp.length;
   if (n < lookback + confirm) {
     return Metric<List<OvulationEvent>>.absent(

@@ -156,8 +156,12 @@ double? theilSen(List<double> y, [List<double>? x]) {
 }
 
 /// 6-dp rounding used for stable JSON output.
-double round6(double x) {
-  if (x.isNaN || x.isInfinite) return x;
+///
+/// Returns `null` for a non-finite input. NaN/Infinity is not a measurement, and
+/// `jsonEncode` THROWS on it — one bad field used to take down a whole
+/// serialised bundle. Absence is the only honest encoding of "not a number".
+double? round6(double x) {
+  if (!x.isFinite) return null;
   return (x * 1e6).roundToDouble() / 1e6;
 }
 
@@ -166,25 +170,43 @@ double roundTo(double x, int decimals) {
   return (x * f).roundToDouble() / f;
 }
 
-/// One spectral estimate (power at an angular/ordinary frequency).
+/// One spectral estimate: power spectral DENSITY at an ordinary frequency.
+///
+/// UNITS — this is the whole contract, and getting it wrong has shipped a
+/// "Total power 0.1 ms²" for a night whose true total was 1260 ms²:
+/// [psd] is in (unit of y)² per Hz. For an RR series in ms sampled on beat
+/// times in SECONDS, that is **ms²/Hz**. Integrating it over a band (see
+/// [LombScargle.bandPower]) therefore yields **ms²**, the unit the HRV
+/// literature reports LF/HF/VLF/total in.
 class LsPoint {
   final double freqHz;
-  final double power;
-  const LsPoint(this.freqHz, this.power);
+  final double psd;
+  const LsPoint(this.freqHz, this.psd);
 }
 
 class LombScargle {
   final List<LsPoint> spectrum;
   const LombScargle(this.spectrum);
 
-  /// Total power = Σ P(f)·Δf (trapezoid-free rectangular sum over the grid).
+  /// Band power = ∫ PSD(f)·df over [loHz, hiHz), rectangular sum over the grid.
+  ///
+  /// Returns (unit of y)² — **ms² for an RR series in ms** (see [LsPoint.psd]).
+  /// Integrated over the full resolvable band it approximates the series
+  /// variance, i.e. SDNN²; that identity is the unit test for this scaling.
   double bandPower(double loHz, double hiHz) {
     var p = 0.0;
-    for (var i = 1; i < spectrum.length; i++) {
+    for (var i = 0; i < spectrum.length; i++) {
       final f = spectrum[i].freqHz;
       if (f < loHz || f >= hiHz) continue;
-      final df = spectrum[i].freqHz - spectrum[i - 1].freqHz;
-      p += spectrum[i].power * df;
+      // Bin width: the step to the previous grid point, or (for the first grid
+      // point) the step to the next. Starting the loop at i=1 used to drop the
+      // grid's lowest point entirely, which zeroed narrow low-frequency bands.
+      final df = i > 0
+          ? spectrum[i].freqHz - spectrum[i - 1].freqHz
+          : (spectrum.length > 1
+              ? spectrum[1].freqHz - spectrum[0].freqHz
+              : 0.0);
+      p += spectrum[i].psd * df;
     }
     return p;
   }
@@ -195,8 +217,8 @@ class LombScargle {
     var bestP = double.negativeInfinity;
     for (final pt in spectrum) {
       if (pt.freqHz < loHz || pt.freqHz > hiHz) continue;
-      if (pt.power > bestP) {
-        bestP = pt.power;
+      if (pt.psd > bestP) {
+        bestP = pt.psd;
         best = pt.freqHz;
       }
     }
@@ -204,13 +226,24 @@ class LombScargle {
   }
 }
 
-/// Lomb–Scargle periodogram for UNEVENLY-sampled data (Press & Rybicki 1989,
-/// classic form with Horne–Baliunas normalization by data variance).
+/// Lomb–Scargle PSD for UNEVENLY-sampled data (Press & Rybicki 1989).
 ///
-/// [t] sample times (any consistent unit — pass SECONDS for Hz output),
+/// [t] sample times — pass SECONDS, so the grid and the output are in Hz.
 /// [y] sample values. Computed on the supplied [freqsHz] grid. The series is
 /// mean-subtracted; the τ phase-offset makes the estimate time-shift
-/// invariant. Returns null if <4 points or zero variance.
+/// invariant. Returns null if <4 points, zero variance, or zero time span.
+///
+/// UNITS: the returned [LsPoint.psd] is a PHYSICAL density in (unit of y)²/Hz —
+/// NOT the dimensionless Horne–Baliunas variance-normalised power. The classic
+/// normalisation divides the periodogram by the data variance, which cancels
+/// the very unit the caller wants: `bandPower` then returns Hz, and labelling
+/// it ms² understates a real 1260 ms² night as 0.1. So we keep the unnormalised
+/// periodogram `0.5·(term1+term2)` and apply the standard one-sided
+/// periodogram→density scaling `2·Δt`, with Δt the MEAN sample interval. The
+/// identity that pins it: ∫PSD df over the resolvable band ≈ var(y).
+///
+/// Ratios of band powers (LF/HF, nu_lf, coherence) are unaffected by this
+/// scaling — it is a single positive constant across the whole spectrum.
 ///
 /// This operates on NATIVE sample times — no resampling — which is exactly why
 /// it's the correct PSD for unevenly-sampled beat-time RR.
@@ -225,6 +258,16 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   }
   variance /= (n - 1);
   if (variance <= 0) return null;
+
+  var tMin = t[0], tMax = t[0];
+  for (final ti in t) {
+    if (ti < tMin) tMin = ti;
+    if (ti > tMax) tMax = ti;
+  }
+  final span = tMax - tMin;
+  if (span <= 0) return null;
+  // One-sided periodogram → density: 2·Δt, with Δt the MEAN sample interval.
+  final psdScale = 2.0 * span / (n - 1);
 
   final out = <LsPoint>[];
   for (final fHz in freqsHz) {
@@ -253,8 +296,7 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
     }
     final term1 = cDen == 0 ? 0.0 : (cNum * cNum) / cDen;
     final term2 = sDen == 0 ? 0.0 : (sNum * sNum) / sDen;
-    final power = 0.5 * (term1 + term2) / variance;
-    out.add(LsPoint(fHz, power));
+    out.add(LsPoint(fHz, 0.5 * (term1 + term2) * psdScale));
   }
   return LombScargle(out);
 }
@@ -269,3 +311,115 @@ List<double> freqGrid(double loHz, double hiHz, int n) {
 
 /// Natural log guard: ln of a positive value, else null.
 double? safeLn(double x) => x > 0 ? math.log(x) : null;
+
+/// Calendar-day index (days since epoch) for each `yyyy-MM-dd` label.
+///
+/// Trailing windows and "N nights running" counters in this package used to be
+/// POSITIONAL — N rows, not N days — and the callers feed them only the days
+/// that produced a derived row. After a wear gap a "28-day baseline" spanned
+/// months, and `persistDays: 2` meant two RECORDED nights, so an elevated
+/// Monday plus an elevated night three weeks later escalated an illness CUSUM
+/// to red "sustained elevation". Index by these instead.
+///
+/// An unparseable label falls back to its position — that is exactly the old
+/// behaviour, so a caller with non-ISO labels is no worse off than before.
+List<int> calendarDays(List<String> dates) {
+  final out = List<int>.filled(dates.length, 0);
+  for (var i = 0; i < dates.length; i++) {
+    final d = DateTime.tryParse(dates[i]);
+    out[i] = d == null
+        ? i
+        : DateTime.utc(d.year, d.month, d.day).millisecondsSinceEpoch ~/
+            86400000;
+  }
+  return out;
+}
+
+/// Average ranks, 1-based, ties sharing their mean rank.
+///
+/// Tie handling is not a detail wherever this is used: journal fields are full
+/// of ties (mood is 1–5, most people log the same 2 coffees most days) and so
+/// are quantised daily metrics. Ranking ties arbitrarily invents an ordering
+/// nobody reported.
+List<double> averageRanks(List<double> xs) {
+  final idx = List<int>.generate(xs.length, (i) => i)
+    ..sort((a, b) => xs[a].compareTo(xs[b]));
+  final ranks = List<double>.filled(xs.length, 0);
+  var i = 0;
+  while (i < idx.length) {
+    var j = i;
+    while (j + 1 < idx.length && xs[idx[j + 1]] == xs[idx[i]]) {
+      j++;
+    }
+    // Ranks are 1-based, so positions i..j map to ranks i+1..j+1.
+    final shared = (i + 1 + j + 1) / 2.0;
+    for (var k = i; k <= j; k++) {
+      ranks[idx[k]] = shared;
+    }
+    i = j + 1;
+  }
+  return ranks;
+}
+
+/// Two-sided p for a standard-normal z. `2·(1 − Φ(|z|))`.
+///
+/// Numerical Recipes' `erfcc` — a Chebyshev fit to erfc with fractional error
+/// under 1.2e-7 everywhere, which is four orders of magnitude finer than any
+/// gate that reads it. No special-function dependency, no table.
+double normalTwoSidedP(double zScore) {
+  if (!zScore.isFinite) return 1.0;
+  final x = zScore.abs() / math.sqrt2;
+  final t = 1.0 / (1.0 + 0.5 * x);
+  final ans = t *
+      math.exp(-x * x -
+          1.26551223 +
+          t *
+              (1.00002368 +
+                  t *
+                      (0.37409196 +
+                          t *
+                              (0.09678418 +
+                                  t *
+                                      (-0.18628806 +
+                                          t *
+                                              (0.27886807 +
+                                                  t *
+                                                      (-1.13520398 +
+                                                          t *
+                                                              (1.48851587 +
+                                                                  t *
+                                                                      (-0.82215223 +
+                                                                          t * 0.17087277)))))))));
+  return clamp(ans, 0.0, 1.0);
+}
+
+/// Benjamini-Hochberg (1995) step-up FDR adjustment over a family of p-values.
+///
+/// Returns q-values POSITIONALLY ALIGNED to [ps]; a null p (a test that could
+/// not be run) stays null and does not enter the family size — a test we
+/// abstained from is not a test we performed.
+///
+/// WHY THIS IS NOT OPTIONAL where it is used: a per-test 0.05 gate over a grid
+/// of 36 simultaneous tests produces ~2 "findings" from pure noise, every time,
+/// for every user. BH controls the expected FRACTION of the published findings
+/// that are false, which is the quantity a screen full of "this moves your
+/// recovery" rows is actually promising.
+///
+/// The step-up enforcement (running minimum from the largest p downwards) is
+/// the part everyone drops: without it the q-values are not monotone in p and a
+/// weaker test can be published while a stronger one is refused.
+List<double?> benjaminiHochberg(List<double?> ps) {
+  final idx = <int>[
+    for (var i = 0; i < ps.length; i++)
+      if (ps[i] != null) i
+  ]..sort((a, b) => ps[a]!.compareTo(ps[b]!));
+  final m = idx.length;
+  final out = List<double?>.filled(ps.length, null);
+  var running = 1.0;
+  for (var k = m - 1; k >= 0; k--) {
+    final q = ps[idx[k]]! * m / (k + 1);
+    running = math.min(running, q);
+    out[idx[k]] = running;
+  }
+  return out;
+}

@@ -46,6 +46,7 @@ HrLedWindow? hrLedSleepWindow(
   int minDurationSec = 2 * 3600,
   int bridgeGapSec = 30 * 60,
   double smoothSec = 300,
+  int maxSampleGapSec = 5 * 60,
 }) {
   final n = hr1hz.length < tsSec.length ? hr1hz.length : tsSec.length;
   if (n < minDurationSec ~/ 2) return null;
@@ -87,13 +88,22 @@ HrLedWindow? hrLedSleepWindow(
     }
     var j = i;
     while (j < n) {
+      // A HOLE IN THE RECORD ends the run. Two "low" samples three hours apart
+      // are two observations, not a three-hour low-HR stretch — and the run's
+      // duration below is WALL CLOCK, so without this the proposed window (the
+      // one the user is shown and asked to confirm) was inflated by hours of
+      // data we never had.
+      if (j > i && tsSec[j] - tsSec[j - 1] > maxSampleGapSec) break;
       if (low(j)) {
         j++;
         continue;
       }
       // Look ahead: bridge a short non-low gap (arousal / brief wake) by TIME.
       var k = j;
-      while (k < n && !low(k) && (tsSec[k] - tsSec[j]) < bridgeGapSec) {
+      while (k < n &&
+          !low(k) &&
+          (tsSec[k] - tsSec[j]) < bridgeGapSec &&
+          (k == 0 || tsSec[k] - tsSec[k - 1] <= maxSampleGapSec)) {
         k++;
       }
       if (k < n && low(k) && (tsSec[k] - tsSec[j]) < bridgeGapSec) {

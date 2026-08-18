@@ -36,14 +36,31 @@
 // (DREAMT) via `tool/stager_harness.dart`, that design scored kappa 0.036 —
 // deep PPV 5.7% against a 4.5% base rate, REM PPV 12.1% against 14.0%, i.e. at
 // or below chance for both minority classes. Per-subject effect sizes explain
-// why: RMSSD does not separate the stages at all (54% of subjects, d -0.02;
-// Herzig 2017 reports the same flatness on PSG+ECG), mean HR in deep sleep runs
+// why: RMSSD did not separate the stages in our measurement (54% of subjects,
+// d -0.02) — BUT SEE THE NEXT PARAGRAPH, that number is probably wrong — mean
+// HR in deep sleep runs
 // HIGHER than light on the wrist (62% of subjects, d +0.31 — the old gate was
 // inverted), and the two axes that DO separate (Rk d -0.53/+0.43, sdnn
 // -0.41/+0.32) were respectively throttled to z>4 and not computed at all.
 // AND-ing one good gate with one null and one inverted gate is why deep sleep
 // emerged as isolated 30-second specks that the 3-min bout rule then deleted.
 // A weighted sum degrades gracefully where a conjunction vetoes.
+//
+// THE RMSSD d -0.02 IS PROBABLY WRONG, AND IT IS NOT HERZIG'S FAULT (SLP-06).
+// R(k) is defined below as mean |ΔIHR| over the window — a successive-difference
+// statistic on the SAME beat train RMSSD uses, differing only by the 1/RR²
+// rescaling and mean-abs vs RMS. Measured on three real rest blocks at the
+// windows this file actually uses (R(k) ±90 s, RMSSD ±150 s) they correlate
+// 0.876 / 0.778 / 0.778; at a matched ±90 s, 0.928 / 0.853 / 0.856. And
+// corr(R(k), mean HR) is 0.065 / 0.282 / -0.341, so R(k) is not a disguised
+// heart-rate feature either. Two statistics correlated 0.78-0.93 on the target
+// signal cannot both score d -0.02 and d -0.53 against the same labels; under a
+// bivariate-normal argument RMSSD should be at least ~0.4 in the same
+// direction. So the local DREAMT effect-size measurement for RMSSD is
+// unreliable and Herzig 2017 is currently lending its authority to it.
+// TODO: re-run the DREAMT effect size for RMSSD at ±90 s and publish both
+// numbers side by side. DO NOT move the shipped weights on the strength of
+// this — it says the measurement is untrustworthy, not which way it moves.
 // Post: Webster continuity rescore (bridges brief arousals into sleep — this is
 // what kills the over-call) + consolidateSleepStages (no single-epoch flicker).
 //
@@ -75,6 +92,12 @@ class CardioStagerResult {
 }
 
 const int _epochSec = 30;
+
+/// Minimum fraction of epochs that must carry a valid HR before this stager
+/// will label anything. Below it every HR-relative gate is silent and the
+/// classifier degenerates to "all light sleep" — see the gate in
+/// [classifyCardioEpochs].
+const double minHrCoverage = 0.5;
 
 // The previous rule OR-ed three boolean axes (RMSSD drop as PRIMARY, plus
 // LF/HF and R(k) throttled to z>4.0) and was calibrated against a single
@@ -137,9 +160,24 @@ const double _wDeepLfhf = 0.33;
 /// Held-out result at the shipped cutoffs (49 unseen subjects): kappa 0.132,
 /// Deep 56.0% sens / 10.9% PPV, REM 51.9% / 21.5%, against base rates of 4.5%
 /// Deep and 14% REM — so both minority classes are called well above chance
-/// where the previous rules sat at or below it. Still far short of the
-/// 0.60-0.66 literature ceiling; the bulk of what remains is the WAKE rule
-/// (11% sensitivity), untouched by this change.
+/// where the previous rules sat at or below it. The bulk of what remains is the
+/// WAKE rule (11% sensitivity), untouched by this change.
+///
+/// THE COMPARATOR (SLP-08). The honest one is the consumer-device range in
+/// `segment.dart`'s [kMaxSleepConfidence] — κ 0.21-0.53 on wrist devices vs PSG
+/// — which we are BELOW, the vendor firmware on this very band scoring 0.37.
+/// This used to measure itself against a "0.60-0.66 literature ceiling". That
+/// is Radha et al. 2021 (npj Digital Medicine 4), four-class κ 0.65 ± 0.11,
+/// accuracy 76.4 ± 7.6 %, from a deep recurrent network PRETRAINED ON 584 ECG
+/// RECORDINGS and transfer-learned to 101 CONTINUOUS WRIST-PPG recordings with
+/// beat-to-beat intervals at native sampling resolution. It is the ceiling for
+/// continuous-PPG deep models, not for rules on our substrate: `rr_ts_ms` is
+/// `rec_ts * 1000` on 100 % of rows, RR is band-saturated at [333, 2400],
+/// 3.2-11.8 % of beats in a rest block share a timestamp with another beat,
+/// coverage runs 78.5-92.9 %, and there is no PPG waveform in the database at
+/// all. Quoting it as a ceiling made 0.132 look like a gap to close rather than
+/// a different problem. Reaching 0.65 needs a continuous PPG or true beat
+/// timestamps — a protocol/edge change, not a stager change.
 ///
 /// HONESTY: proportion-matching is distributional plausibility, NOT accuracy.
 /// It says the hypnogram has a believable shape, not that any given epoch is
@@ -310,7 +348,8 @@ SleepUserProfile? cardioUserProfile;
 /// internal buffer. The edge sets this before a night's staging and reads the
 /// buffer with [takeCardioObservations] afterward to fold the MAIN sleep.
 bool cardioRecordObservations = false;
-final List<SleepNightObservation> _cardioObservations = <SleepNightObservation>[];
+final List<SleepNightObservation> _cardioObservations =
+    <SleepNightObservation>[];
 
 /// Drain and clear the recorded observations (returns a copy).
 List<SleepNightObservation> takeCardioObservations() {
@@ -405,7 +444,10 @@ CardioStagerResult cardioStager(
     }
     motion[e] = ms / (t - s);
     // hr mean/sd over valid (>0) seconds
-    final hv = <double>[for (var i = s; i < t; i++) if (hr1hz[i] > 0) hr1hz[i]];
+    final hv = <double>[
+      for (var i = s; i < t; i++)
+        if (hr1hz[i] > 0) hr1hz[i]
+    ];
     if (hv.isNotEmpty) hr[e] = mean(hv)!;
     if (hv.length >= 2) hrSd[e] = stddev(hv) ?? 0;
     // rmssd over RR beats within a ±2.5-min window centred on the epoch
@@ -542,22 +584,34 @@ CardioStagerResult classifyCardioEpochs(
   // local, not this repositioning-detection threshold.
   final motSample = [for (final m in motion) m];
   final motMed = median(motSample) ?? 0;
-  final motMad = (mad(motSample) ?? 0).clamp(1e-9, double.infinity);
+  // MAD == 0 means MORE THAN HALF the epochs share one motion value — the
+  // guaranteed case when accel is mostly absent. Clamping to 1e-9 made
+  // `bigMoveCut` = motMed + 5e-9, so every epoch fractionally above the median
+  // became a "big move" and drove the WAKE gate. This is the same MAD-0 class
+  // that produced the blank-readiness and nocturnalRhr bugs, and RobustScale.of
+  // already refuses it. Abstain from the motion axis instead: null thresholds
+  // mean `still` is true everywhere (baseline selection falls back to the whole
+  // window) and `bigMove` is never asserted, so WAKE has to come from HR.
+  final motMadRaw = mad(motSample) ?? 0;
+  final motUsable = motMadRaw > 0 && motMadRaw.isFinite;
+  final motMad = motUsable ? motMadRaw : 0.0;
   // Personal-baseline blend (P2): pull each LOCAL threshold a bounded fraction
   // toward the sleeper's rolling profile value. `_pw` (≤0.5) grows with nights,
   // so per-night-local always leads; a null profile axis ⇒ no blend for it.
   final double _pw = profile?.personalWeight ?? 0.0;
   double blendP(double local, double? personal) =>
-      (personal == null || _pw == 0) ? local : local * (1 - _pw) + personal * _pw;
+      (personal == null || _pw == 0)
+          ? local
+          : local * (1 - _pw) + personal * _pw;
   // "still" (for baseline selection) = motion near the night's typical low.
   final stillCut = blendP(motMed + 1.5 * motMad, profile?.enmoStillCut);
-  bool still(int e) => motion[e] <= stillCut;
+  bool still(int e) => !motUsable || motion[e] <= stillCut;
   // "big move" = clearly elevated motion (getting up / large reposition), used
   // for the WAKE decision — a much higher bar than `still` so normal in-sleep
   // repositioning (which the van-Hees window already certified as sleep) is NOT
   // mistaken for wake.
   final bigMoveCut = blendP(motMed + 5.0 * motMad, profile?.enmoMoveCut);
-  bool bigMove(int e) => motion[e] > bigMoveCut;
+  bool bigMove(int e) => motUsable && motion[e] > bigMoveCut;
 
   final sleepHr = <double>[
     for (var e = 0; e < nEpoch; e++)
@@ -572,8 +626,19 @@ CardioStagerResult classifyCardioEpochs(
   // fabrication look like a real baseline. A window with SOME HR still gets the
   // whole-window mean as the baseline when no epoch qualifies as `still` (that
   // is a real measurement, just not a quiet one).
-  final hrAll = <double>[for (final h in hr) if (!h.isNaN) h];
-  if (hrAll.isEmpty) return _abstain(epochSec);
+  final hrAll = <double>[
+    for (final h in hr)
+      if (!h.isNaN) h
+  ];
+  // ...and "no HR anywhere" is not the same test as "enough HR to stage with".
+  // The gate used to be `hrAll.isEmpty`, i.e. ONE valid epoch in 900 passed it.
+  // With HR NaN for most epochs neither `hrUp` nor `hrTowardWake` can ever be
+  // true, so no epoch can be wake and none can be REM: a sparse HR stream (the
+  // gen5 device family) came out ~100 % light sleep, TST = time in bed,
+  // efficiency ~100 %, at confidence up to 0.6. Abstention is the honest
+  // failure.
+  final hrCov = nEpoch == 0 ? 0.0 : hrAll.length / nEpoch.toDouble();
+  if (hrCov < minHrCoverage) return _abstain(epochSec);
   final hrMedGlobal = median(sleepHr) ?? mean(hrAll)!;
 
   // ── LOCAL rolling HR baseline for the WAKE/REM autonomic gates ─────────────
@@ -600,8 +665,7 @@ CardioStagerResult classifyCardioEpochs(
   // median already fixed for the arousal gate above.
   const int _hrWinEpochs = 180; // 90 min half-window — one ultradian cycle
   final hrMedLocal = List<double>.filled(nEpoch, hrMedGlobal);
-  final hrArousalLocal =
-      List<double>.filled(nEpoch, hrMedGlobal + 6.0);
+  final hrArousalLocal = List<double>.filled(nEpoch, hrMedGlobal + 6.0);
   final hrP25Local = List<double>.filled(nEpoch, hrMedGlobal);
   for (var e = 0; e < nEpoch; e++) {
     final lo = math.max(0, e - _hrWinEpochs);
@@ -678,6 +742,15 @@ CardioStagerResult classifyCardioEpochs(
     // WAKE is autonomic-led: HR risen to/above the arousal threshold, OR a big
     // movement that ALSO carries some HR lift (truly up), OR sustained big
     // movement. Movement at sleeping HR = repositioning, NOT wake.
+    // ASYMMETRY, DELIBERATELY LEFT HERE AND HANDLED UPSTREAM. Every gate that
+    // can produce WAKE or REM needs a non-NaN HR, while the fall-through below
+    // is an unconditional NREM — so an epoch with no heart rate at all can only
+    // ever come out asleep. [minHrCoverage] catches the all-or-nothing case;
+    // between 50 % and 100 % coverage it does not. There is no fourth
+    // [SleepStage] to express "no cardiac evidence" in, so the abstention is
+    // made where the numbers are: `segmentSleep` labels a second with no HR
+    // within half an epoch 'unobserved' and keeps it out of TST, WASO and the
+    // efficiency denominator.
     final hrUp = !hr[e].isNaN && hr[e] >= hrArousal;
     final bigPrev = e > 0 && bigMove(e - 1);
     final bigMoveWake =
@@ -721,11 +794,14 @@ CardioStagerResult classifyCardioEpochs(
     //
     // rmssd and mean HR are deliberately ABSENT from both scores. Neither
     // earns a weight, and hr's deep contribution was actively harmful.
-    final rkZ = (sleepRk.length >= 4 && !rk[e].isNaN) ? rkScale?.z(rk[e]) : null;
-    final sdnnZ =
-        (sleepSdnn.length >= 4 && !sdnn[e].isNaN) ? sdnnScale?.z(sdnn[e]) : null;
-    final lfhfZ =
-        (sleepLfhf.length >= 4 && !lfhf[e].isNaN) ? lfhfScale?.z(lfhf[e]) : null;
+    final rkZ =
+        (sleepRk.length >= 4 && !rk[e].isNaN) ? rkScale?.z(rk[e]) : null;
+    final sdnnZ = (sleepSdnn.length >= 4 && !sdnn[e].isNaN)
+        ? sdnnScale?.z(sdnn[e])
+        : null;
+    final lfhfZ = (sleepLfhf.length >= 4 && !lfhf[e].isNaN)
+        ? lfhfScale?.z(lfhf[e])
+        : null;
     // Same >=4-sample floor and unmeasurable-epoch rejection as the axes above.
     // hrSd[e] == 0 means "fewer than 2 valid HR samples", never "perfectly
     // steady" — see the sleepHrSd comment. An absent input must contribute
@@ -827,10 +903,20 @@ CardioStagerResult classifyCardioEpochs(
   final tot = sm.length.toDouble();
   // Confidence: a wrist ESTIMATE ceiling, scaled by RR coverage (RMSSD is what
   // makes REM/deep honest — with no RR we're motion+HR only, lower confidence).
-  final rrCov = nEpoch == 0
+  final rrCov = nEpoch == 0 ? 0.0 : sleepRmssd.length / nEpoch.toDouble();
+  // HR coverage is folded in: `rrCov` alone said nothing about whether the
+  // HR-relative gates (wake, REM floor, deep trough) had anything to fire on.
+  final hrCovConf = nEpoch == 0
       ? 0.0
-      : sleepRmssd.length / nEpoch.toDouble();
-  final conf = clamp(0.35 + 0.25 * rrCov, 0.3, 0.6);
+      : clamp(
+          [
+                for (final h in hr)
+                  if (!h.isNaN) h
+              ].length /
+              nEpoch.toDouble(),
+          0.0,
+          1.0);
+  final conf = clamp((0.35 + 0.25 * rrCov) * hrCovConf, 0.15, 0.6);
 
   return CardioStagerResult(
     StagerResult(
@@ -988,6 +1074,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     }
     return c;
   }
+
   int runAfter(int i) {
     var c = 0, k = i + 1;
     while (k <= lastSleep && isSleep(snap[k])) {
@@ -996,14 +1083,23 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     }
     return c;
   }
-  // Context (min sleep flanking) → max bridgeable wake (min). Slightly more
-  // generous than Webster's classic table: the van Hees window already certified
-  // this span as the consolidated rest period, so brief arousals inside it are
-  // far more likely repositioning than true wake.
+
+  // Context (min sleep flanking) → max bridgeable wake (min). THE PUBLISHED
+  // TABLE, unmodified: Webster et al. 1982 / Cole et al. 1992 rescoring rules —
+  // 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15 bridges ≤4.
+  //
+  // This used to run [15→10], [10→5], [4→2] — 2.5x the published bridge — on
+  // the argument that the van Hees window had already certified the span as the
+  // consolidated rest period. That argument does not hold: on the forced-window
+  // paths (manual / confirmed / auto_fallback) van Hees never runs at all, and
+  // even where it does, a genuine 9-minute 3 a.m. awakening flanked by 15 min of
+  // sleep was being relabelled light sleep. TST was over-reported, WASO
+  // under-reported and efficiency inflated, potentially several times a night,
+  // disclosed only in a code comment the user never sees.
   final rules = <List<double>>[
-    [minToEp(15), minToEp(10)],
-    [minToEp(10), minToEp(5)],
-    [minToEp(4), minToEp(2)],
+    [minToEp(15), minToEp(4)],
+    [minToEp(10), minToEp(3)],
+    [minToEp(4), minToEp(1)],
   ];
   var i = onset;
   while (i <= lastSleep) {
@@ -1064,17 +1160,18 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     }
     beats.add(v);
     // Rebase to the window start (lo), NOT absolute epoch ms. Lomb–Scargle is
-      // time-shift invariant (the τ phase reference cancels any offset), so the
-      // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
-      // instead of ~1.75e9 s. Absolute epoch seconds force every sin/cos in the
-      // periodogram onto libm's __kernel_rem_pio2 multi-precision slow path
-      // (args ~9e9 rad), which — run per 30-s epoch over a full night on the
-      // main isolate — caused main-thread ANRs on Android (Crashlytics: libm.so
-      // __kernel_rem_pio2 / sin / cos, 0.9.13).
-      beatTsSec.add((ts - lo) / 1000.0);
+    // time-shift invariant (the τ phase reference cancels any offset), so the
+    // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
+    // instead of ~1.75e9 s. Absolute epoch seconds force every sin/cos in the
+    // periodogram onto libm's __kernel_rem_pio2 multi-precision slow path
+    // (args ~9e9 rad), which — run per 30-s epoch over a full night on the
+    // main isolate — caused main-thread ANRs on Android (Crashlytics: libm.so
+    // __kernel_rem_pio2 / sin / cos, 0.9.13).
+    beatTsSec.add((ts - lo) / 1000.0);
     prev = v;
   }
-  if (beats.length < 16) return (lfhf: null, rk: null); // spectral stability gate
+  if (beats.length < 16)
+    return (lfhf: null, rk: null); // spectral stability gate
   // R(k): mean absolute successive difference of instantaneous HR (bpm).
   var rkSum = 0.0;
   var rkCnt = 0;

@@ -45,11 +45,12 @@ class SleepWindow {
   final List<bool> immobile;
 
   /// Per-second "undecidable" mask, full length and index-aligned with
-  /// [immobile]. `true` marks a second whose forward sustained-inactivity
-  /// window is truncated by the end of the record AND which shows no movement
-  /// in the data we do have — i.e. it could still resolve either way once the
-  /// next samples arrive. Such seconds are `false` in [immobile] (not claimed
-  /// as rest) and are excluded from the detected sleep period.
+  /// [immobile]. `true` marks a second that shows no movement in the data we do
+  /// have but whose forward sustained-inactivity window cannot be certified —
+  /// either it is truncated by the end of the record (it could still resolve
+  /// either way once the next samples arrive) or it spans seconds the device
+  /// never measured. Such seconds are `false` in [immobile] (not claimed as
+  /// rest) and are excluded from the detected sleep period.
   ///
   /// Consumers that only read [immobile] therefore degrade conservatively (an
   /// unresolved tail second reads as "not asserted immobile"), never
@@ -73,9 +74,9 @@ class SleepWindow {
     this.immobileUnknown = const <bool>[],
   });
 
-  /// Seconds at the end of the record whose immobility is genuinely
-  /// undecidable (see [immobileUnknown]).
-  int get unresolvedTailSec {
+  /// Seconds whose immobility is genuinely undecidable — an unresolved record
+  /// tail, or a stretch the device never measured (see [immobileUnknown]).
+  int get undecidableSec {
     var c = 0;
     for (final u in immobileUnknown) {
       if (u) c++;
@@ -89,7 +90,7 @@ class SleepWindow {
         if (onsetMs != null) 'onset_ms': onsetMs,
         if (offsetMs != null) 'offset_ms': offsetMs,
         'spt_sec': sptSec,
-        if (unresolvedTailSec > 0) 'unresolved_tail_sec': unresolvedTailSec,
+        if (undecidableSec > 0) 'undecidable_sec': undecidableSec,
       };
 }
 
@@ -112,14 +113,21 @@ class ImmobilityMask {
   /// ASSERTED immobile (see [SleepWindow.immobile]).
   final List<bool> immobile;
 
-  /// Undecidable — forward window truncated by the record end (see
+  /// Undecidable — either the forward window is truncated by the record end, or
+  /// it contains seconds the device never measured (see
   /// [SleepWindow.immobileUnknown]).
   final List<bool> immobileUnknown;
 
-  /// Smoothed per-second z-angle (deg).
+  /// Smoothed per-second z-angle (deg). NaN where [AccelSample.valid] is false:
+  /// absent gravity is stored as exact (0,0,0), whose z-angle is a perfectly
+  /// well-formed 0.0° that is not a measurement of anything.
   final List<double> zAngleDeg;
 
-  /// |Δ z-angle| vs the previous second (index 0 is 0 by definition).
+  /// |Δ z-angle| vs the previous second (index 0 is 0 by definition). NaN when
+  /// either endpoint second is invalid — the arm may have moved across the gap
+  /// and the record cannot say. Every comparison against NaN is false, so a
+  /// consumer testing `deltaDeg[k] < threshold` degrades to "not still", never
+  /// to "perfectly still".
   final List<double> deltaDeg;
 
   /// The sustained-inactivity window actually used, in seconds.
@@ -161,8 +169,18 @@ ImmobilityMask immobilityMask(
   }
 
   // 1–2. z-angle + rolling-median smoothing.
+  //
+  // A second whose gravity vector was never decoded ([AccelSample.valid] false)
+  // is handed over as exact (0,0,0). That has a z-angle — 0.0°, constant — so a
+  // run of them reads as a wrist held perfectly still, which is how a decode gap
+  // became a "nap" at the confidence cap. Absence is not a measurement: those
+  // seconds carry NaN from here on, and every rule below asks about them
+  // explicitly instead of comparing against a number that isn't one.
   final raw = List<double>.generate(
-      n, (i) => zAngle(accel[i].x, accel[i].y, accel[i].z));
+      n,
+      (i) => accel[i].valid
+          ? zAngle(accel[i].x, accel[i].y, accel[i].z)
+          : double.nan);
   final ang = _rollingMedian(raw, smoothSec);
 
   // 3. per-second immobility: |Δ z-angle| < threshold sustained for ≥ window.
@@ -188,10 +206,20 @@ ImmobilityMask immobilityMask(
   //   * no movement seen, window short ⇒ UNDECIDABLE. We do not assert rest
   //     (that would extrapolate stillness past the end of the record) and we
   //     record it in `immobileUnknown` rather than guessing either way.
+  //
+  // A window containing an UNMEASURED second lands in the same two cases, for
+  // the same reason: movement already seen decides it (the sustained rule has
+  // failed on the data in hand), otherwise the arm could have moved where we
+  // were not looking ⇒ undecidable, never asserted rest.
   for (var i = 0; i < n; i++) {
     final hi = math.min(n, i + win);
     var maxd = 0.0;
+    var gap = !accel[i].valid;
     for (var k = i + 1; k < hi; k++) {
+      if (!accel[k].valid) {
+        gap = true;
+        break;
+      }
       if (dAng[k] > maxd) {
         maxd = dAng[k];
         if (maxd >= angleThresholdDeg) break;
@@ -199,8 +227,8 @@ ImmobilityMask immobilityMask(
     }
     final still = maxd < angleThresholdDeg;
     final fullWindow = hi - i >= win;
-    immobile[i] = still && fullWindow;
-    immobileUnknown[i] = still && !fullWindow;
+    immobile[i] = still && fullWindow && !gap;
+    immobileUnknown[i] = still && (!fullWindow || gap);
   }
 
   return ImmobilityMask(
@@ -326,21 +354,31 @@ Metric<SleepWindow> vanHeesSleepWindow(
     inputs_used: inputs,
     note: 'van Hees angle-based REST window (5°/${sustainedMin}min); '
         'a rest period, not PSG sleep'
-        '${unresolved > 0 ? '; last ${unresolved}s of the record are '
-            'undecidable (forward window truncated) and are excluded' : ''}',
+        '${unresolved > 0 ? '; ${unresolved}s are undecidable (forward window '
+            'truncated by the record end, or unmeasured gravity) and are '
+            'excluded' : ''}',
   );
 }
 
 /// Centered rolling median (window `w`, odd-ish), edge-clamped.
+///
+/// NaN in = NaN out AT THAT INDEX: an unmeasured second must not inherit an
+/// angle smoothed out of its measured neighbours, or the whole point of marking
+/// it absent is undone one line later. Neighbouring NaNs are simply skipped
+/// when smoothing a second that WAS measured.
 List<double> _rollingMedian(List<double> x, int w) {
   final n = x.length;
   if (w <= 1) return [...x];
   final half = w ~/ 2;
-  final out = List<double>.filled(n, 0);
+  final out = List<double>.filled(n, double.nan);
   for (var i = 0; i < n; i++) {
+    if (x[i].isNaN) continue;
     final lo = math.max(0, i - half);
     final hi = math.min(n - 1, i + half);
-    final seg = x.sublist(lo, hi + 1);
+    final seg = <double>[
+      for (var k = lo; k <= hi; k++)
+        if (!x[k].isNaN) x[k]
+    ];
     out[i] = median(seg)!;
   }
   return out;

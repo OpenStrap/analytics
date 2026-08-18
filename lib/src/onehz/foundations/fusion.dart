@@ -2,8 +2,7 @@
 //
 // Inverse-variance fusion (Aitken 1935): the minimum-variance unbiased linear
 // combination of independent estimates weights each by 1/σ²; the fused
-// variance is 1/Σ(1/σ²). Simple GUM (JCGM 100:2008) uncertainty propagation for
-// a weighted sum gives the combined standard uncertainty.
+// variance is 1/Σ(1/σ²).
 //
 // Biased motion-artifact inputs are gated OUT, not down-weighted: a caller
 // passes `trusted=false` for any channel the SQI gate rejected, and those are
@@ -45,7 +44,13 @@ FusionResult inverseVarianceFuse(List<FusionInput> inputs) {
   var wsum = 0.0; // Σ 1/σ²
   var vwsum = 0.0; // Σ value/σ²
   for (final inp in inputs) {
-    if (!inp.trusted || inp.variance <= 0 || inp.value.isNaN) {
+    // NOTE: `variance <= 0` is FALSE for a NaN variance, so test finiteness
+    // explicitly — otherwise a NaN variance sails past the guard and poisons
+    // `wsum`, and the absent branch below can never fire.
+    if (!inp.trusted ||
+        !inp.variance.isFinite ||
+        inp.variance <= 0 ||
+        !inp.value.isFinite) {
       dropped.add(inp.label);
       continue;
     }
@@ -71,26 +76,4 @@ FusionResult inverseVarianceFuse(List<FusionInput> inputs) {
     used: used,
     dropped: dropped,
   );
-}
-
-/// Map a per-input SNR (or contact-quality 0..1) to a variance, so the SQI
-/// channel directly drives fusion weight. Higher quality => lower variance.
-/// variance = baseVariance / max(quality, floor).
-double varianceFromQuality(double quality, double baseVariance,
-    {double floor = 0.05}) {
-  final q = quality < floor ? floor : (quality > 1 ? 1 : quality);
-  return baseVariance / q;
-}
-
-/// GUM combined standard uncertainty for a weighted sum y = Σ wᵢ·xᵢ with
-/// independent inputs: u_c = √(Σ (wᵢ·uᵢ)²). Returns null on length mismatch.
-double? gumWeightedSumUncertainty(
-    List<double> weights, List<double> stdUncertainties) {
-  if (weights.length != stdUncertainties.length || weights.isEmpty) return null;
-  var s = 0.0;
-  for (var i = 0; i < weights.length; i++) {
-    final term = weights[i] * stdUncertainties[i];
-    s += term * term;
-  }
-  return math.sqrt(s);
 }

@@ -63,6 +63,7 @@ import 'package:openstrap_protocol/openstrap_protocol.dart';
 }
 
 void main() {
+  _resp01Tests();
   // -------------------------------------------------------------------------
   // 1. SYNTHETIC KNOWN-ANSWER
   // -------------------------------------------------------------------------
@@ -89,9 +90,137 @@ void main() {
       expect(m.value!.brpm!, closeTo(12, 1.5));
     });
 
-    test('RSA: absent on too-few beats -> null + confidence 0', () {
-      final m = rsaRespRate([800, 810, 790], [800, 1610, 2400],
+    test('RSA: 26.4 br/min is REPORTED, not folded to a plausible 22', () {
+      // an-motion-1. The search band stopped at rsaHiHz (0.40 Hz = 24 br/min)
+      // while the anti-alias guard tested respHiHz (0.5), so the guard was dead
+      // code and any real rate above 24 br/min came back as the largest
+      // SPURIOUS in-band peak at confidence 0.90. Measured pre-fix:
+      // 26.4 -> 22.23, 28.8 -> 17.43, both present. The search now runs to the
+      // window's own beat-rate Nyquist.
+      for (final trueBrpm in [26.4, 28.8]) {
+        final s = syntheticRsaRr(
+            modHz: trueBrpm / 60.0, hrBpm: 75, ampMs: 40, beats: 600);
+        final corr = correctRr(s.rr);
+        final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+            artifactFraction: 1 - corr.cleanFraction);
+        expect(m.present, isTrue, reason: m.note);
+        expect(m.value!.brpm!, closeTo(trueBrpm, 1.5),
+            reason: 'got ${m.value!.brpm} for a true $trueBrpm br/min');
+      }
+    });
+
+    test('RSA: a rate the BEAT RATE cannot resolve is ABSENT, not a number',
+        () {
+      // The tachogram is sampled once per beat, so at HR 43 (NN ~1400 ms) the
+      // Nyquist is ~21 br/min — below the HF band itself. A 26 br/min breather
+      // folds to a full-height peak at 16.9 br/min that no spectral test can
+      // tell from a genuine 16.9. The honest output is nothing.
+      final s =
+          syntheticRsaRr(modHz: 26 / 60.0, hrBpm: 43, ampMs: 40, beats: 600);
+      final corr = correctRr(s.rr);
+      final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('alias'));
+    });
+
+    test('RSA: the note states the ceiling actually enforced', () {
+      // It used to say "1 Hz Nyquist caps rate at 30 br/min" while enforcing 24.
+      final s = syntheticRsaRr(modHz: 0.25, hrBpm: 60, ampMs: 40, beats: 500);
+      final corr = correctRr(s.rr);
+      final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.note, contains('could resolve up to'));
+    });
+
+    // -----------------------------------------------------------------------
+    // WHOLE-NIGHT PERIODOGRAM regression. The old robustness surrogate took ONE
+    // periodogram over the whole input and re-sampled it on 300/450/700-point
+    // grids. Over a night the periodogram's bins are ~30x finer than that grid
+    // step, so the three grids read three near-independent NOISE samples of a
+    // band that (measured on 14 real nights) holds ~2600 local maxima. It
+    // withheld 17 of 30 of the owner's nights, and when it did publish, the
+    // number was often not even the band's maximum — one real night published
+    // 10.66 br/min where that night's own sub-windows agree on 16.97.
+    //
+    // Signal below: 8 h of RSA whose rate ramps 19 -> 16 br/min (the drift
+    // measured across his real nights), on a random-walk RR baseline. The
+    // time-median rate is 17.5 br/min.
+    // -----------------------------------------------------------------------
+    ({List<double> rr, List<double> t}) rsaNight(int seed, {double hours = 8}) {
+      final rnd = math.Random(seed);
+      final rr = <double>[], t = <double>[];
+      final totalSec = hours * 3600;
+      const f0 = 19.0 / 60, f1 = 16.0 / 60;
+      var tMs = 0.0, walk = 0.0;
+      while (tMs < totalSec * 1000) {
+        final sec = tMs / 1000;
+        // Phase is the INTEGRAL of the instantaneous frequency.
+        final phase =
+            2 * math.pi * (f0 * sec + (f1 - f0) * sec * sec / (2 * totalSec));
+        walk = (walk + (rnd.nextDouble() - 0.5) * 12) * 0.98;
+        final v = 1000.0 + walk + 40 * math.sin(phase);
+        tMs += v;
+        rr.add(v);
+        t.add(tMs);
+      }
+      return (rr: rr, t: t);
+    }
+
+    test('RSA: an 8-hour night resolves its time-median rate, not a noise spike',
+        () {
+      // Measured, same three noise seeds: OLD published 18.48 / 16.94 / 16.06 —
+      // three different answers to the same signal, each passing its own
+      // agreement gate. NEW: 17.52 / 17.52 / 17.49 against a truth of 17.5.
+      for (final seed in [11, 12, 13]) {
+        final s = rsaNight(seed);
+        final corr = correctRr(s.rr, rrTsMs: s.t);
+        final m = rsaRespRate(corr.nn, corr.nnTimesMs,
+            artifactFraction: 1 - corr.cleanFraction);
+        expect(m.present, isTrue, reason: m.note);
+        expect(m.value!.brpm!, closeTo(17.5, 0.3),
+            reason: 'seed $seed got ${m.value!.brpm}');
+        expect(m.confidence, greaterThan(0.85), reason: m.note);
+      }
+    });
+
+    test('RSA: a shuffled (no-RSA) surrogate night is WITHHELD', () {
+      // The honesty half of the gate. Shuffling NN destroys the respiratory
+      // modulation and keeps the sampling geometry; measured sub-window
+      // consensus falls to ~20% (33-42 of ~190) against 100% for the real
+      // signal, and 15-28% on the owner's 14 real nights shuffled.
+      final s = rsaNight(11);
+      final corr = correctRr(s.rr, rrTsMs: s.t);
+      final shuffled = [...corr.nn]..shuffle(math.Random(3));
+      final m =
+          rsaRespRate(shuffled, corr.nnTimesMs, artifactFraction: 0);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('sub-windows'));
+    });
+
+    test('RSA: trimming the night barely moves the rate', () {
+      // The failure that started this: the SAME real night replayed with a
+      // 24-minute-longer sleep window was withheld once and published 17.56 the
+      // other time. Here, dropping the last 10% of the night (whose true
+      // time-median rises 17.5 -> 17.65) moves the estimate 17.52 -> 17.65,
+      // while the old rule moved 18.48 -> 16.37.
+      final s = rsaNight(11);
+      final corr = correctRr(s.rr, rrTsMs: s.t);
+      final full = rsaRespRate(corr.nn, corr.nnTimesMs, artifactFraction: 0);
+      final k = (corr.nn.length * 0.9).floor();
+      final trimmed = rsaRespRate(
+          corr.nn.sublist(0, k), corr.nnTimesMs.sublist(0, k),
           artifactFraction: 0);
+      expect(full.present && trimmed.present, isTrue);
+      expect((full.value!.brpm! - trimmed.value!.brpm!).abs(), lessThan(0.5),
+          reason: '${full.value!.brpm} vs ${trimmed.value!.brpm}');
+    });
+
+    test('RSA: absent on too-few beats -> null + confidence 0', () {
+      final m =
+          rsaRespRate([800, 810, 790], [800, 1610, 2400], artifactFraction: 0);
       expect(m.present, isFalse);
       expect(m.confidence, 0);
     });
@@ -169,7 +298,8 @@ void main() {
       var s = 0;
       while (s < totalSec) {
         // Sinusoidal HR modulation: 60 ± 6 bpm, period = cycleSec.
-        final hr = 60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
+        final hr =
+            60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
         final r = 60000.0 / hr; // ms
         nn.add(r);
         t += r;
@@ -185,6 +315,59 @@ void main() {
       expect(v.cvhrPerHour, greaterThan(0));
       // Honesty: it's a screen, never a diagnosis — note says so.
       expect(m.note!.toLowerCase(), contains('screen'));
+    });
+
+    test('CVHR: an off-wrist HOLE does not dilute the per-hour index', () {
+      // an-motion-6. analyzedHours was the first-to-last beat SPAN and
+      // _resampleLinear drew a straight line across the hole, so the identical
+      // beats with a 2 h gap in the middle read 53.33/h instead of 80.00/h — a
+      // 33% "improvement" in an apnea screen bought by taking the band off.
+      const cycleSec = 60;
+      final nn = <double>[];
+      final nnTimes = <double>[];
+      var t = 0.0;
+      var s = 0;
+      while (s < cycleSec * 14) {
+        final hr =
+            60.0 - 6.0 * math.sin(2 * math.pi * (s % cycleSec) / cycleSec);
+        final r = 60000.0 / hr;
+        nn.add(r);
+        t += r;
+        nnTimes.add(t);
+        s = (t / 1000.0).floor();
+      }
+      final whole = cvhrApneaScreen(nn, nnTimes, artifactFraction: 0);
+
+      // Same beats, second half displaced by a 2 h hole.
+      final half = nnTimes.length ~/ 2;
+      final gapped = [
+        for (var i = 0; i < nnTimes.length; i++)
+          i < half ? nnTimes[i] : nnTimes[i] + 2 * 3600 * 1000
+      ];
+      final holed = cvhrApneaScreen(nn, gapped, artifactFraction: 0);
+
+      expect(holed.present, isTrue, reason: holed.note);
+      expect(
+          holed.value!.analyzedHours, closeTo(whole.value!.analyzedHours, 0.02),
+          reason: 'the 2 h hole is not observed time');
+      expect(holed.value!.cvhrPerHour, closeTo(whole.value!.cvhrPerHour, 3.0),
+          reason: 'pre-fix this fell by a third');
+    });
+
+    test('CVHR: no cycles means mean depth/width are ABSENT, not 0', () {
+      // an-motion-7. They were non-nullable and filled with 0, serialising an
+      // absence as a measurement.
+      final rr = List<double>.filled(400, 1000.0);
+      final jit = [
+        for (var i = 0; i < rr.length; i++) rr[i] + (i.isEven ? 5 : -5)
+      ];
+      final corr = correctRr(jit);
+      final m = cvhrApneaScreen(corr.nn, corr.nnTimesMs,
+          artifactFraction: 1 - corr.cleanFraction);
+      expect(m.value!.cycleCount, 0);
+      expect(m.value!.meanDepthMs, isNull);
+      expect(m.value!.meanWidthSec, isNull);
+      expect(m.value!.toJson()['mean_depth_ms'], isNull);
     });
 
     test('CVHR: a steady (non-cyclic) RR yields ~0 cycles', () {
@@ -284,10 +467,8 @@ void main() {
         markTestSkipped('whoop_hist.jsonl not found beside the repo');
         return;
       }
-      final lines = histFile
-          .readAsLinesSync()
-          .where((l) => l.trim().isNotEmpty)
-          .toList();
+      final lines =
+          histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
 
       final rrMs = <double>[];
       final green = <double>[];
@@ -410,8 +591,94 @@ void main() {
       final m = rsaRespRate(corr.nn, corr.nnTimesMs,
           artifactFraction: 1 - corr.cleanFraction);
       final j = m.value!.toJson();
-      expect((j['peak_hz'] as double) * 60.0,
-          closeTo(j['brpm'] as double, 1e-4));
+      expect(
+          (j['peak_hz'] as double) * 60.0, closeTo(j['brpm'] as double, 1e-4));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// RESP-01 / RESP-02 (gate half) — the 30-night personal CVHR distribution.
+// ---------------------------------------------------------------------------
+void _resp01Tests() {
+  CvhrNight night(int day, double perHour,
+          {double hours = 7, bool irregular = false}) =>
+      CvhrNight(
+        dayKey: '2026-01-${day.toString().padLeft(2, '0')}',
+        cvhrPerHour: perHour,
+        analyzedHours: hours,
+        irregularRhythm: irregular,
+      );
+
+  group('RESP-01 personal distribution', () {
+    test('under 5 qualifying nights is ABSENT with a machine-readable note',
+        () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 4; d++) night(d, 10),
+      ]);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.note, contains('need_baseline:nights=4/5'));
+    });
+
+    test('thin nights (<4 analyzed hours) never weigh on the screen', () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        for (var d = 6; d <= 10; d++) night(d, 90, hours: 1),
+      ]);
+      expect(m.present, isTrue);
+      expect(m.value!.nightsUsed, 5);
+      expect(m.value!.nightsExcludedThin, 5);
+      expect(m.value!.weightedMean, closeTo(10, 1e-9));
+    });
+
+    test(
+        'RESP-02 cross-gate: irregular-rhythm nights are EXCLUDED, not weighted',
+        () {
+      final withAf = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        night(6, 200, irregular: true),
+      ]);
+      expect(withAf.value!.nightsUsed, 5);
+      expect(withAf.value!.nightsExcludedIrregular, 1);
+      // the AF night's 200/h moved nothing
+      expect(withAf.value!.weightedMean, closeTo(10, 1e-9));
+    });
+
+    test('nights are weighted by their OWN analyzed hours', () {
+      final m = cvhrPersonalDistribution([
+        night(1, 20, hours: 8),
+        night(2, 10, hours: 4),
+        night(3, 10, hours: 4),
+        night(4, 10, hours: 4),
+        night(5, 10, hours: 4),
+      ]);
+      // unweighted mean would be 12.0; hours-weighted is 20*8+10*16 over 24
+      expect(m.value!.weightedMean, closeTo((20 * 8 + 10 * 16) / 24, 1e-9));
+    });
+
+    test('the only comparison is against the user own retained spread', () {
+      final quiet = cvhrPersonalDistribution([
+        for (var d = 1; d <= 10; d++) night(d, 10),
+      ]);
+      expect(quiet.value!.aboveOwnUsual, isFalse);
+      final rising = cvhrPersonalDistribution([
+        for (var d = 1; d <= 8; d++) night(d, 5),
+        night(9, 40),
+        night(10, 40),
+        night(11, 40),
+      ]);
+      expect(rising.value!.aboveOwnUsual, isTrue);
+      // and it still refuses to be an AHI or a severity
+      expect(rising.toJson().toString(), isNot(contains('ahi')));
+    });
+
+    test('a re-derived day counts once', () {
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 10),
+        night(5, 10),
+      ]);
+      expect(m.value!.nightsUsed, 5);
     });
   });
 }

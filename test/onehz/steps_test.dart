@@ -123,6 +123,176 @@ void main() {
     });
   });
 
+  // These pin the numbers the 2026-08-16 audit measured, so the +10.6% gain
+  // cannot be re-derived from a comment and the physiological interval bounds
+  // cannot be quietly dropped again. Every expectation below is a MEASUREMENT
+  // of the shipping algorithm, not a target.
+  group('Tier A — the gain is 1.00 and the raw count is already exact', () {
+    test('gain is 1.00 — the default is not a population fudge factor', () {
+      // Was 1.11, claiming to fix "raw 90 -> ~100". Measured, it manufactured
+      // a +10.6% over-count on gait the raw counter already got right.
+      expect(StepParams.gain, 1.00);
+    });
+
+    test('raw/truth is 1.00 at 60, 80, 100, 120, 140 and 180 spm', () {
+      // The whole basis for removing the gain: there is no under-count to
+      // correct anywhere in the human cadence range. Exact figures measured on
+      // 300 s of _walk at 0.25 g, 100 Hz.
+      for (final (spm, want) in const [
+        (60, 299),
+        (80, 399),
+        (100, 498),
+        (120, 598),
+        (140, 698),
+        (180, 898),
+      ]) {
+        final truth = (300 * spm / 60).round();
+        final (x, y, z) = _walk(300.0, spm / 60.0);
+        final got = livePedometer(x, y, z).steps;
+        expect(got, want, reason: '$spm spm');
+        expect(got / truth, closeTo(1.00, 0.005), reason: '$spm spm raw/truth');
+      }
+    });
+
+    test('the residual deficit is a FLAT -0.9% chunk-boundary loss, not a gain',
+        () {
+      // still -> N steps at 110 spm -> still, counted in 60 s chunks the way
+      // calcSteps does. A gain error would scale with N and an offset would
+      // shrink with it; this does neither, because it is ~2 steps lost per
+      // minute boundary while the state machine re-earns CONFIRM. It is 0.9%,
+      // it is known, and it is deliberately not chased.
+      int chunked(int n) {
+        final walkS = n / (110 / 60.0);
+        final (wx, wy, wz) = _walk(walkS, 110 / 60.0);
+        final sig = <double>[
+          ...List<double>.filled(300, 1.0),
+          for (var i = 0; i < wx.length; i++)
+            math.sqrt(wx[i] * wx[i] + wy[i] * wy[i] + wz[i] * wz[i]),
+          ...List<double>.filled(300, 1.0),
+        ];
+        final minutes = <List<double>>[
+          for (var i = 0; i < sig.length; i += 6000)
+            sig.sublist(i, math.min(i + 6000, sig.length))
+        ];
+        return calcSteps(minutes);
+      }
+
+      expect(chunked(100), 100); // one chunk, no boundary, no loss
+      expect(chunked(1000), 991); // -0.9%
+      expect(chunked(10000), 9910); // -0.9% — flat, 10x the bout
+    });
+  });
+
+  group('Tier A — step-interval bounds (0.2-2.0 s, from AN-2554)', () {
+    int stepsAt(double spm, double durationS,
+        {double amp = 0.30, double fs = 100, double? tellRate}) {
+      final (x, y, z) = _walk(durationS, spm / 60.0, fs: fs, ampG: amp);
+      return livePedometer(x, y, z, sampleRateHz: tellRate ?? fs).steps;
+    }
+
+    test('the bounds are the ones the note states, and they are named', () {
+      expect(StepParams.minStepIntervalS, 0.2); // max ~5 steps/s
+      expect(StepParams.maxStepIntervalS, 2.0); // min ~0.5 steps/s
+    });
+
+    test('faster than 5 steps/s is rejected outright', () {
+      // PRE-FIX these counted at raw/truth 1.00 (320 spm -> 638/640) and 0.95
+      // (350 spm -> 666/700): nothing bounded the rhythm, and the only thing
+      // that eventually broke lock was the width of the centred peak window.
+      expect(stepsAt(305, 120), 0);
+      expect(stepsAt(320, 120), 0);
+      expect(stepsAt(350, 120), 0);
+    });
+
+    test('the ceiling sits exactly at the stated 5 steps/s, not below it', () {
+      // A sprint cadence a human can actually produce must still count — the
+      // guard is physiology, not a convenient way to lose the hard cases.
+      expect(stepsAt(250, 120), 498);
+      expect(stepsAt(300, 120), 598);
+    });
+
+    test('40 spm still counts — it is inside physiology, so nothing rejects it',
+        () {
+      // The audit flagged "1.00 at 40 spm with no floor". 40 spm is 0.67
+      // steps/s, above the note's 0.5 steps/s minimum, so the correct floor
+      // does NOT reject it. Pinning that so the bound does not get tightened
+      // into a slow-walk deleter.
+      expect(stepsAt(40, 600, fs: 50), 399);
+    });
+
+    test('slower than 0.5 steps/s is rejected — at the buffer\'s REAL rate', () {
+      // This is the case that proves the bounds are computed from the sample
+      // rate rather than a hardcoded 100. `maxMinTimeout` is 120 SAMPLES, so
+      // it already covers the slow end at 100 Hz but stretches to 2.4 s at
+      // 50 Hz and lets 20-28 spm through. Told the truth, the 2.0 s bound
+      // rejects them; told "100 Hz" about a 50 Hz buffer, the same signal
+      // reads a full 250 steps.
+      expect(stepsAt(25, 600, fs: 50), 0);
+      expect(stepsAt(28, 600, fs: 50), 0);
+      expect(stepsAt(25, 600, fs: 50, tellRate: 100), 250);
+    });
+
+    test('the bounds cost nothing inside the walking band', () {
+      // The guards must not pay for themselves with real steps.
+      expect(stepsAt(110, 600, fs: 50, amp: 0.25), 1098);
+      expect(stepsAt(120, 300, amp: 0.25), 598);
+    });
+  });
+
+  // ── OxWalk: the first ground truth this counter has ever met ──────────────
+  //
+  // Measured 2026-08-17 with `dart run tool/oxwalk_validate.dart` against
+  // OxWalk (Small, von Fritsch, Doherty, Khalid, Price; Oxford, Dec 2022,
+  // CC BY) — 39 adults, unscripted free living, dominant wrist + hip, camera
+  // ground truth. Chunked exactly as production does (`_minuteSamples = 6000`).
+  // Full write-up: edge/docs/internal/OXWALK_VALIDATION.md.
+  //
+  //   Wrist 100 Hz   MAPE 33.0%   bias -13.6%   median -19.5%   totals -19.8%
+  //                  per-participant ratio 0.33 - 3.00, only 5/39 within +-10%
+  //   Hip   100 Hz   MAPE 29.5%   bias -29.2%   totals -17.6%
+  //   Wrist  25 Hz   MAPE 91.9%                 totals -87.5%   <- dead
+  //   Hip    25 Hz   MAPE 94.5%                 totals -93.6%   <- dead
+  //   rate cliff (100 Hz wrist decimated): 50 Hz -27.0%, 33 Hz -60.1%,
+  //                                        25 Hz -86.5%, 20 Hz -89.9%
+  //   chunk sweep (wrist 100 Hz, MAPE):  25 s 37.4 | 30 s 34.5 | 60 s 33.0
+  //                                      | 2 min 34.3 | 5 min 37.7 | 1 h 55.1
+  //   best single gain 1.18 -> MAPE 27.9% (from 33.0%). Not applied: the error
+  //   is not multiplicative — see the doc.
+  //
+  // The dataset is 290 MB and is deliberately not committed, so nothing here
+  // re-measures it. What this pins is the CONFIGURATION those numbers describe:
+  // change any of it and the recorded numbers are stale, which is exactly when
+  // you want to be told.
+  group('Tier A — OxWalk-measured configuration (2026-08-17)', () {
+    test('the parameters OxWalk was measured against have not moved', () {
+      const why = 'OxWalk numbers in edge/docs/internal/OXWALK_VALIDATION.md '
+          'were measured against this exact configuration. If you changed it '
+          'deliberately, re-run tool/oxwalk_validate.dart on the 39 '
+          'participants and update BOTH the doc and this test.';
+      expect(StepParams.gain, 1.00, reason: why);
+      expect(StepParams.sens, 0.10, reason: why);
+      expect(StepParams.confirm, 8, reason: why);
+      expect(StepParams.filter, 8, reason: why);
+      expect(StepParams.window, 33, reason: why);
+      expect(StepParams.thrOrder, 4, reason: why);
+      expect(StepParams.maxMinTimeout, 120, reason: why);
+      expect(StepParams.minStepIntervalS, 0.2, reason: why);
+      expect(StepParams.maxStepIntervalS, 2.0, reason: why);
+    });
+
+    test('gain stays 1.00 — OxWalk found no single multiplier that works', () {
+      // Tempting and wrong. 1.18 minimises MAPE across the 39 and recovers only
+      // 5 points of a 33-point error, and the sign of the error FLIPS with
+      // activity level: participants with >=600 true steps/h under-count by a
+      // uniform -25.4%, while the 17 with <600 average +1.7% bias around a
+      // 42.9% MAPE because two of them over-count by 3x (P18: 217 true, 650
+      // counted; P28: 258 true, 685 counted). Multiplying by 1.18 improves the
+      // walkers slightly and pushes those two from +200%/+166% to +254%/+214%.
+      // A gain cannot fix an error whose sign depends on the input.
+      expect(StepParams.gain, 1.00);
+    });
+  });
+
   group('Calibration', () {
     test('credible walking bout seeds + refines the model', () {
       const live = PedometerResult(220, 120, 110.0, 0.25, 0.8);
@@ -140,18 +310,18 @@ void main() {
       final prior = const StepCalibration(cadenceSpm: 110, refEnmo: 0.06, n: 5);
       // low confidence
       expect(
-          calibrateCadence(prior, const PedometerResult(10, 30, 110, 0.2, 0.2),
-                  0.06),
+          calibrateCadence(
+              prior, const PedometerResult(10, 30, 110, 0.2, 0.2), 0.06),
           same(prior));
       // implausible cadence (200 spm)
       expect(
-          calibrateCadence(prior, const PedometerResult(100, 30, 200, 0.2, 0.9),
-                  0.06),
+          calibrateCadence(
+              prior, const PedometerResult(100, 30, 200, 0.2, 0.9), 0.06),
           same(prior));
       // too short
       expect(
-          calibrateCadence(prior, const PedometerResult(20, 10, 110, 0.2, 0.9),
-                  0.06),
+          calibrateCadence(
+              prior, const PedometerResult(20, 10, 110, 0.2, 0.9), 0.06),
           same(prior));
     });
 
@@ -182,10 +352,10 @@ void main() {
       expect(personalDynFloor(pool, quantile: 0.5), closeTo(0.5, 0.01));
     });
 
-    test('the minimum-history requirement is a named, overridable constant', () {
+    test('the minimum-history requirement is a named, overridable constant',
+        () {
       expect(personalDynFloorMinMinutes, 2000);
-      expect(
-          personalDynFloor(List<double>.filled(50, 0.4), minMinutes: 10),
+      expect(personalDynFloor(List<double>.filled(50, 0.4), minMinutes: 10),
           closeTo(0.4, 1e-9));
     });
   });
@@ -240,8 +410,8 @@ void main() {
 
     test('uncovered minutes do not count toward the summary', () {
       // 200 rows but all sparse → below the covered-minute floor → null.
-      expect(dailyDynSummary(mins(List<double>.filled(200, 0.4), n: 5)),
-          isNull);
+      expect(
+          dailyDynSummary(mins(List<double>.filled(200, 0.4), n: 5)), isNull);
     });
 
     test('summarises this day at the same quantile the floor is defined on',
@@ -275,7 +445,8 @@ void main() {
         ];
     const sedDyn = 0.02; // a sedentary minute's dynamic amplitude (g)
     const walkDyn = 0.60; // an ambulatory minute's (g)
-    const floorG = 0.375; // the kind of value personalDynFloor yields in practice
+    const floorG =
+        0.375; // the kind of value personalDynFloor yields in practice
     // A day = `sed` sedentary minutes then `walk` ambulatory minutes.
     List<MotionMinute> day(int sed, int walk) => rows([
           ...List<double>.filled(sed, sedDyn),
@@ -284,13 +455,63 @@ void main() {
     // A measured personal cadence from Tier A (100 Hz, real counts).
     const cal = StepCalibration(cadenceSpm: 110, refEnmo: 0.06, n: 10);
 
-    test('COLD START: no personal floor → ABSTAIN with a need_baseline note', () {
+    test('COLD START: no personal floor → ABSTAIN with a need_baseline note',
+        () {
       final m = dailyActiveMinutes(day(120, 30),
-          personalDynFloorG: null, pooledMinutesAvailable: 640);
+          personalDynFloorG: null, historyDaysAvailable: 3);
       expect(m.present, isFalse, reason: 'no constant fallback is permitted');
       expect(m.confidence, 0);
       expect(m.tier, Tier.estimate);
-      expect(m.note, 'need_baseline:have=640,need=$personalDynFloorMinMinutes');
+      // DAYS, not minutes: the only floor builder a storage-bound caller can
+      // use (personalDynFloorFromDailySummaries) is gated on days, and edge
+      // passes a day count. This used to read have=3,need=2000.
+      expect(m.note, 'need_baseline:have=3,need=$personalDynFloorMinDays');
+    });
+
+    test('an off-wrist HOUR between moving minutes does not make one bout', () {
+      // an-motion-2. Four isolated moving minutes an hour apart. enmoSeries
+      // emits NO MotionMinute for a fully-absent minute, so the old test
+      // `idx[end+1] == idx[end] + 1` was adjacency in the gap-COMPACTED list
+      // and these four sat "consecutive". PRE-FIX: activeMinutes 4, bouts 1.
+      final scattered = [
+        for (final min in [0, 60, 120, 180])
+          MotionMinute(min * 60000.0, 60, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      final m = dailyActiveMinutes(scattered,
+          personalDynFloorG: floorG, minBoutMin: 3);
+      expect(m.value!.activeMinutes, 0);
+      expect(m.value!.boutCount, 0);
+    });
+
+    test('a run broken by ONE absent minute is two sub-bout stretches', () {
+      // Same root cause, minimum case: minutes 0,1 then 3,4 (minute 2 absent).
+      // Adjacent in the list, an hour apart or one minute apart it makes no
+      // difference — the clock says they are not one run of 4.
+      final split = [
+        for (final min in [0, 1, 3, 4])
+          MotionMinute(min * 60000.0, 60, 0.055, 0.02, 1.055, walkDyn),
+      ];
+      final m =
+          dailyActiveMinutes(split, personalDynFloorG: floorG, minBoutMin: 3);
+      expect(m.value!.activeMinutes, 0, reason: 'neither stretch reaches 3');
+      expect(m.value!.boutCount, 0);
+    });
+
+    test('a partially-worn day reports coverage against the DAY, not the span',
+        () {
+      // an-motion-5. 4 h worn out of 24. enmoSeries(expectedMinutes: 1440)
+      // reports 0.167 for this substrate; dailyActiveMinutes reported 1.000
+      // (and confidence 0.30, its ceiling) because it divided by the WORN span.
+      final worn = day(210, 30); // 240 contiguous covered minutes
+      final honest = dailyActiveMinutes(worn,
+          personalDynFloorG: floorG, expectedMinutes: 1440);
+      expect(honest.value!.coverage, closeTo(240 / 1440, 1e-9)); // 0.1667
+      expect(honest.confidence, closeTo(0.1, 1e-9),
+          reason: 'confidence keys off coverage; 0.30 was the pre-fix value');
+      // Without expectedMinutes the span denominator still applies — that is a
+      // different, documented claim, not the fraction of a day.
+      final spanOnly = dailyActiveMinutes(worn, personalDynFloorG: floorG);
+      expect(spanOnly.value!.coverage, 1.0);
     });
 
     test('a non-positive floor is treated as absent, not as "pass everything"',
@@ -300,7 +521,8 @@ void main() {
       expect(m.note, startsWith('need_baseline:'));
     });
 
-    test('REGRESSION: a day whose sedentary minutes sit just above an ABSOLUTE '
+    test(
+        'REGRESSION: a day whose sedentary minutes sit just above an ABSOLUTE '
         '0.05 g floor produces no active minutes', () {
       // The measured failure shape: a calibration excursion lifted every
       // sedentary minute of one day above the old absolute 0.05 g gate, and the
@@ -356,8 +578,7 @@ void main() {
     test('more movement → more active minutes', () {
       final few = dailyActiveMinutes(day(120, 10), personalDynFloorG: floorG);
       final many = dailyActiveMinutes(day(120, 40), personalDynFloorG: floorG);
-      expect(many.value!.activeMinutes,
-          greaterThan(few.value!.activeMinutes));
+      expect(many.value!.activeMinutes, greaterThan(few.value!.activeMinutes));
     });
 
     test('NO CEILING: the highest-amplitude minutes still COUNT', () {
@@ -386,10 +607,11 @@ void main() {
       final m = dailyActiveMinutes(day(120, 30), personalDynFloorG: floorG);
       expect(m.value!.activeMinutes, 30);
       expect(m.inputs_used, isNot(contains('hr_per_min')),
-            reason: 'the metric must not claim an HR input it never reads');
+          reason: 'the metric must not claim an HR input it never reads');
     });
 
-    test('BOUT GATE: an isolated elevated minute does not count on its own', () {
+    test('BOUT GATE: an isolated elevated minute does not count on its own',
+        () {
       final d = List<double>.filled(60, sedDyn);
       d[30] = walkDyn;
       final m = dailyActiveMinutes(rows(d), personalDynFloorG: floorG);
@@ -402,22 +624,25 @@ void main() {
       final d2 = List<double>.filled(60, sedDyn);
       d2[30] = walkDyn;
       d2[31] = walkDyn;
-      expect(dailyActiveMinutes(rows(d2), personalDynFloorG: floorG)
-          .value!
-          .activeMinutes,
+      expect(
+          dailyActiveMinutes(rows(d2), personalDynFloorG: floorG)
+              .value!
+              .activeMinutes,
           0);
 
       final d3 = List<double>.filled(60, sedDyn);
       d3[30] = walkDyn;
       d3[31] = walkDyn;
       d3[32] = walkDyn;
-      expect(dailyActiveMinutes(rows(d3), personalDynFloorG: floorG)
-          .value!
-          .activeMinutes,
+      expect(
+          dailyActiveMinutes(rows(d3), personalDynFloorG: floorG)
+              .value!
+              .activeMinutes,
           3);
     });
 
-    test('BOUT GATE: a coverage gap breaks the run rather than stitching two '
+    test(
+        'BOUT GATE: a coverage gap breaks the run rather than stitching two '
         'short bouts together', () {
       // 4 elevated minutes total but never 3 adjacent, so none of it counts.
       final d = List<double>.filled(60, sedDyn);
@@ -507,8 +732,8 @@ void main() {
           final x = (axis == 0 ? p : 0.0);
           final y = (axis == 1 ? p : 0.0) - 0.05;
           final z = (axis == 2 ? p : 0.0) + 1.03;
-          out.add(AccelSample(
-              i * 1000.0, gx * x + bx, gy * y + by, gz * z + bz));
+          out.add(
+              AccelSample(i * 1000.0, gx * x + bx, gy * y + by, gz * z + bz));
         }
       }
       return out;
@@ -538,11 +763,9 @@ void main() {
           amp: poolAmp, gx: gx, gy: gy, gz: gz, bx: bx, by: by, bz: bz));
       final today = enmoSeries(synth(720,
           amp: dayAmp, gx: gx, gy: gy, gz: gz, bx: bx, by: by, bz: bz));
-      final floor =
-          personalDynFloor([for (final m in pool.minutes) m.dynAmp]);
+      final floor = personalDynFloor([for (final m in pool.minutes) m.dynAmp]);
       expect(floor, isNotNull, reason: '2400 pooled minutes is enough history');
-      final est =
-          dailyActiveMinutes(today.minutes, personalDynFloorG: floor);
+      final est = dailyActiveMinutes(today.minutes, personalDynFloorG: floor);
       expect(est.present, isTrue);
       return (active: est.value!.activeMinutes, floor: floor!);
     }
@@ -586,22 +809,60 @@ void main() {
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       // 1440 minutes at a low HR (40% HRmax → below active surplus)
       final hr = List<double>.filled(1440, 70.0);
-      final e = Calories.dailyEnergy(hr, profile: profile);
+      final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
       expect(e.basal, closeTo(1780.0, 1.0));
       expect(e.active, closeTo(0.0, 60.0)); // tiny if any
       expect(e.total, greaterThanOrEqualTo(e.basal));
-      // no hrmax passed, so this ran on the fallback anchor - flagged.
-      expect(e.usedDefaultHrmax, isTrue);
     });
 
-    test('usedDefaultHrmax is false once a real profile + hrmax are both given', () {
+    test('the flex gate moves with the CALLER-SUPPLIED ceiling, not 220−age',
+        () {
+      // TS-03a: there is no `220 − age` fallback left in here — `hrmax` is
+      // required, and it is the only thing that sets the flex gate. Two
+      // ceilings for the same 30 y/o (220−30 = 190 vs Tanaka 208−0.7·30 = 187)
+      // put the gate at 123.5 vs 121.55 bpm, so a day spent at 122 bpm is
+      // entirely basal on one and entirely active on the other. That divergence
+      // is the bug the single dispatched definition exists to remove; this pins
+      // that the number in front of it is what decides.
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
-      final hr = List<double>.filled(1440, 70.0);
-      final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
-      expect(e.usedDefaultHrmax, isFalse);
+      final hr = List<double>.filled(1440, 122.0);
+      final wide = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
+      final tanaka = Calories.dailyEnergy(hr, profile: profile, hrmax: 187);
+      expect(wide.active, 0.0);
+      expect(tanaka.active, greaterThan(0.0));
     });
 
+    test('MOT-02: the flex point is 0.65·HRmax, not 0.50 — a 100 bpm day is '
+        'not "active"', () {
+      // 0.50 put the gate at 93.5 bpm for a 30 y/o, inside the region where
+      // Keytel is extrapolating off the end of its own fitted exercise data.
+      // MEASURED on whoop-4.db (9 days, 70 kg/170 cm/30 y male stand-in, Tanaka
+      // 187): billed wake minutes 39.4 % → 4.9 %, daily ACTIVE energy
+      // min/median/max 769/1955/4062 → 9/48/1917 kcal, daily TOTAL
+      // 1544–5582 → 793–3437 kcal. Everyone's active energy drops; the quiet
+      // days lose nearly all of it, which is the point.
+      expect(Calories.defaultActiveFraction, 0.65);
+      final profile = const WorkoutUserProfile(
+          weightKg: 70, heightCm: 170, age: 30, sex: 'male');
+      // 16 h of ordinary waking at 100 bpm — clears the old gate, not the new.
+      final quiet = List<double>.filled(960, 100.0);
+      expect(Calories.dailyEnergy(quiet, profile: profile, hrmax: 187).active,
+          0.0);
+      expect(
+          Calories.dailyEnergy(quiet,
+                  profile: profile, hrmax: 187, activeFraction: 0.50)
+              .active,
+          greaterThan(4000.0),
+          reason: 'the number the old gate published for sitting around');
+      // A real session still bills: 45 min at 145 bpm.
+      final session = <double>[
+        ...List<double>.filled(915, 100.0),
+        ...List<double>.filled(45, 145.0),
+      ];
+      expect(Calories.dailyEnergy(session, profile: profile, hrmax: 187).active,
+          closeTo(553.0, 5.0));
+    });
 
     test('an exercise block adds active calories on top of basal', () {
       final profile = const WorkoutUserProfile(
@@ -640,9 +901,10 @@ void main() {
       final trackedCounts = <int>[];
       for (final k in const [1.0, 1.5, 2.0, 3.0]) {
         final d = gradedDay(k);
-        frozenCounts.add(dailyActiveMinutes(rowsOf(d), personalDynFloorG: frozen)
-            .value!
-            .activeMinutes);
+        frozenCounts.add(
+            dailyActiveMinutes(rowsOf(d), personalDynFloorG: frozen)
+                .value!
+                .activeMinutes);
         // What a self-referential floor converges to: this day's own p90.
         final sorted = [...d]..sort();
         final p90 = sorted[(sorted.length * 0.9).floor()];
@@ -683,8 +945,8 @@ void main() {
 
     test('enrollment window is longer than the bare minimum for the median',
         () {
-      expect(enrollmentDaysForFrozenFloor,
-          greaterThan(personalDynFloorMinDays));
+      expect(
+          enrollmentDaysForFrozenFloor, greaterThan(personalDynFloorMinDays));
     });
   });
 }

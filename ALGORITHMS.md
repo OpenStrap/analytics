@@ -61,7 +61,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `illnessCusum` | `clinical/illness_cusum.dart` | Online CUSUM state machine (green/yellow/red) over RHR — "NightSignal" | Alavi et al. 2022; Mishra et al. 2020 |
 | `readinessLnRmssd` | `clinical/readiness_lnrmssd.dart` | ln(RMSSD) z-scored against a rolling prior-nights baseline | Plews et al. 2013 |
 | `cosinor` | `clinical/cosinor.dart` | Cosinor rhythmometry (MESOR/amplitude/acrophase) | Halberg & Nelson 1979 |
-| `banisterTrimp` / `edwardsTrimp` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991; Edwards 1993 |
+| `banisterTrimp` / `StrainScorer.edwardsTRIMP` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991; Edwards 1993 |
 | `strainScoreMetric` | `clinical/load_trimp.dart` | log-squash of TRIMP onto a 0-21 scale | — |
 | `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
