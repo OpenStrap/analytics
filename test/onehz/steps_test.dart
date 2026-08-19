@@ -809,8 +809,8 @@ void main() {
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       // 1440 minutes at a low HR (40% HRmax → below active surplus)
       final hr = List<double>.filled(1440, 70.0);
-      final e =
-          Calories.dailyEnergy(hr, profile: profile, hrmax: 190, restingHr: 60);
+      final e = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
       expect(e.basal, closeTo(1780.0, 1.0));
       expect(e.active, closeTo(0.0, 60.0)); // tiny if any
       expect(e.total, greaterThanOrEqualTo(e.basal));
@@ -828,10 +828,10 @@ void main() {
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       final hr = List<double>.filled(1440, 111.0);
-      final wide =
-          Calories.dailyEnergy(hr, profile: profile, hrmax: 190, restingHr: 60);
-      final tanaka =
-          Calories.dailyEnergy(hr, profile: profile, hrmax: 187, restingHr: 60);
+      final wide = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      final tanaka = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 187, restingHr: 60)!;
       expect(wide.active, 0.0);
       expect(tanaka.active, greaterThan(0.0));
     });
@@ -851,7 +851,7 @@ void main() {
       final quiet = List<double>.filled(960, 100.0);
       expect(
           Calories.dailyEnergy(quiet,
-                  profile: profile, hrmax: 187, restingHr: 60)
+                  profile: profile, hrmax: 187, restingHr: 60)!
               .active,
           0.0);
       // A real session still bills: 45 min at 145 bpm.
@@ -861,7 +861,7 @@ void main() {
       ];
       expect(
           Calories.dailyEnergy(session,
-                  profile: profile, hrmax: 187, restingHr: 60)
+                  profile: profile, hrmax: 187, restingHr: 60)!
               .active,
           closeTo(553.0, 5.0));
     });
@@ -872,7 +872,7 @@ void main() {
       const profile = WorkoutUserProfile(
           weightKg: 72, heightCm: 178, age: 34, sex: 'male');
       const hrmax = 184.2, rhr = 55.0;
-      final gate = Calories.activeGateHr(hrmax, rhr);
+      final gate = Calories.activeGateHr(hrmax, rhr)!;
       expect(gate, closeTo(106.68, 0.01));
 
       final restingKcalPerMin =
@@ -881,7 +881,7 @@ void main() {
 
       for (final (hr, active) in [(gate - 1, false), (gate + 1, true)]) {
         final day = Calories.dailyEnergy(List<double>.filled(60, hr),
-            profile: profile, hrmax: hrmax, restingHr: rhr);
+            profile: profile, hrmax: hrmax, restingHr: rhr)!;
         final bout = Calories.estimateBoutCalories(
             ts, List<double>.filled(60, hr),
             profile: profile, hrmax: hrmax, restingHr: rhr);
@@ -911,10 +911,68 @@ void main() {
         ...List<double>.filled(1380, 65.0),
         ...List<double>.filled(60, 150.0), // 1 h hard
       ];
-      final e =
-          Calories.dailyEnergy(hr, profile: profile, hrmax: 190, restingHr: 60);
+      final e = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
       expect(e.active, greaterThan(300.0));
       expect(e.total, closeTo(e.basal + e.active, 1e-6));
+    });
+
+    test('an unusable anchor is NO gate, not a loose one', () {
+      // `restingHr + 0.40·(hrmax − restingHr)` is NaN if either anchor is, and
+      // `hr < NaN` is false for EVERY hr — so the day used to bill every single
+      // minute at the Keytel active rate and publish a silently enormous kcal
+      // figure instead of failing visibly.
+      const profile = WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      final hr = List<double>.filled(1440, 70.0);
+      final ts = List<int>.generate(60, (i) => i);
+
+      for (final (hrmax, rhr) in [
+        (190.0, double.nan),
+        (double.nan, 60.0),
+        (double.infinity, 60.0),
+        (190.0, double.infinity),
+        (190.0, 0.0), // a rest of zero is not a reserve anchor
+        (190.0, -5.0),
+        (190.0, 190.0), // no reserve at all
+        (60.0, 190.0), // rest above the ceiling
+      ]) {
+        expect(Calories.activeGateHr(hrmax, rhr), isNull,
+            reason: 'gate for hrmax=$hrmax rhr=$rhr');
+        expect(
+            Calories.dailyEnergy(hr,
+                profile: profile, hrmax: hrmax, restingHr: rhr),
+            isNull,
+            reason: 'day for hrmax=$hrmax rhr=$rhr');
+        // The bout keeps its documented 220/60 fallback — an unusable anchor is
+        // an ABSENT anchor — and is flagged, which is what edge reads to decide
+        // whether the kcal figure may be persisted at all.
+        final bout = Calories.estimateBoutCalories(
+            ts, List<double>.filled(60, 130.0),
+            profile: profile, hrmax: hrmax, restingHr: rhr);
+        expect(bout.usedDefaultAnchors, isTrue,
+            reason: 'bout for hrmax=$hrmax rhr=$rhr');
+        expect(bout.kcal.isFinite, isTrue,
+            reason: 'bout for hrmax=$hrmax rhr=$rhr');
+      }
+    });
+
+    test('a non-finite HR sample is dropped, not billed', () {
+      const profile = WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      final clean = List<double>.filled(60, 150.0);
+      final dirty = [...clean, double.nan, double.infinity];
+      final a = Calories.dailyEnergy(clean,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      final b = Calories.dailyEnergy(dirty,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      expect(b.active, closeTo(a.active, 1e-9));
+
+      final bout = Calories.estimateBoutCalories(
+          List<int>.generate(dirty.length, (i) => i), dirty,
+          profile: profile, hrmax: 190, restingHr: 60);
+      expect(bout.kcal.isFinite, isTrue);
+      expect(bout.usedDefaultAnchors, isFalse);
     });
   });
 

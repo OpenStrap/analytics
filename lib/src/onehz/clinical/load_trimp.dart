@@ -46,20 +46,26 @@ Metric<double> banisterTrimp(
   required Sex sex,
 }) {
   const inputs = ['hr_per_min', 'resting_hr', 'max_hr'];
+  // `maxHr <= restingHr` is FALSE when either is NaN, so the finiteness checks
+  // are load-bearing: a NaN anchor otherwise makes a NaN reserve, and every
+  // clamp below (`hrr < 0`, `hrr > 1`) is false for NaN too, so the sum comes
+  // out NaN inside a PRESENT metric.
   if (restingHr == null ||
       maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
       maxHr <= restingHr ||
       hrPerMin.isEmpty) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'Banister TRIMP needs measured RHR and HRmax (HRmax>RHR)',
+      note: 'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)',
     );
   }
   final reserve = maxHr - restingHr;
   var trimp = 0.0;
   for (final hr in hrPerMin) {
-    if (hr <= 0) continue; // off-skin guard
+    if (!hr.isFinite || hr <= 0) continue; // off-skin + non-finite guard
     var hrr = (hr - restingHr) / reserve;
     if (hrr < 0) hrr = 0;
     if (hrr > 1) hrr = 1;
@@ -117,20 +123,33 @@ const double maxQuietHrr = 0.40;
 /// rolling personal median and score against that; the guard below only refuses
 /// the most obvious offenders, it does not make a single day robust.
 ///
-/// Returns null — never a stand-in — when the anchors are missing or
-/// degenerate, when there are fewer than [minMinutes] measured waking minutes,
-/// or when the median clears [maxQuietHrr].
+/// Returns null — never a stand-in — when the anchors are missing, non-finite
+/// or degenerate, when there are fewer than [minMinutes] measured waking
+/// minutes, or when the median clears [maxQuietHrr].
 double? dailyQuietWakingHrr(
   List<double> hrPerMin, {
   required double? restingHr,
   required double? maxHr,
   int minMinutes = 60,
 }) {
-  if (restingHr == null || maxHr == null || maxHr <= restingHr) return null;
+  // Finiteness first: `maxHr <= restingHr` is false when either is NaN, and a
+  // NaN reserve survives BOTH clamps below (min/max propagate NaN) and both
+  // range checks at the bottom, so the function would hand back NaN as if it
+  // had measured something.
+  if (restingHr == null ||
+      maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
+      maxHr <= restingHr) {
+    return null;
+  }
   final reserve = maxHr - restingHr;
   final hrr = <double>[
+    // `hr > 0` already drops NaN, but not +infinity — which would clamp to 1.0
+    // and count a garbage sample as a maximal-effort minute.
     for (final hr in hrPerMin)
-      if (hr > 0) math.min(1.0, math.max(0.0, (hr - restingHr) / reserve)),
+      if (hr.isFinite && hr > 0)
+        math.min(1.0, math.max(0.0, (hr - restingHr) / reserve)),
   ];
   if (hrr.length < minMinutes) return null;
   final q = median(hrr);
@@ -242,7 +261,8 @@ double strainScore(
 ///
 /// [trimp] the raw Banister TRIMP for the day/session, [wakeMinutes] the wake
 /// window it was accumulated over, [quietHrr] this user's quiet-waking level
-/// ([dailyQuietWakingHrr]). Absent when any is missing: the baseline
+/// ([dailyQuietWakingHrr]). Absent — with the reason in the note — when any is
+/// missing, non-finite, or out of range: the baseline
 /// subtraction is meaningless without a wake window, guessing one silently
 /// mis-scores every partial-wear day, and a stand-in quiet level is what scored
 /// a day with no activity in it at 12/21 (MOT-03).
@@ -253,19 +273,45 @@ Metric<double> strainScoreMetric(
   bool female = false,
 }) {
   const inputs = ['trimp', 'wake_minutes', 'quiet_waking_hrr'];
-  if (trimp == null || trimp < 0 || wakeMinutes == null || wakeMinutes <= 0) {
+  // EVERY RANGE CHECK IN THIS FUNCTION IS FALSE FOR NaN, so each one needs its
+  // finiteness partner. Without them a NaN input produces a PRESENT metric
+  // carrying a NaN value, which is worse than an absent one: everything
+  // downstream treats a present metric as measured.
+  if (trimp == null || !trimp.isFinite || trimp < 0) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'strain needs a TRIMP and the wake window it was measured over',
+      note: 'strain needs a finite TRIMP >= 0',
     );
   }
-  if (quietHrr == null || quietHrr <= 0) {
+  if (wakeMinutes == null || !wakeMinutes.isFinite || wakeMinutes <= 0) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'strain needs this user\'s own quiet-waking HRR to subtract; '
-          'without it the cost of simply being awake reads as training load',
+      note: 'strain needs a finite wake window (minutes > 0) — it is what the '
+          'quiet-waking baseline is subtracted over',
+    );
+  }
+  if (quietHrr == null || !quietHrr.isFinite || quietHrr <= 0) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'strain needs this user\'s own quiet-waking HRR to subtract, '
+          'finite and > 0; without it the cost of simply being awake reads '
+          'as training load',
+    );
+  }
+  // NOT clamped through to [baselineTrimp]. It clamps to maxQuietHrr as a last
+  // resort, which would quietly score the day against a level nobody measured;
+  // a quiet level above the moderate-intensity floor is a broken measurement,
+  // and [dailyQuietWakingHrr] never emits one.
+  if (quietHrr > maxQuietHrr) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'quiet-waking HRR above $maxQuietHrr is not quiet waking — that '
+          'is ACSM\'s moderate-intensity floor, so the level would subtract '
+          'the day\'s own training away',
     );
   }
   return Metric<double>(

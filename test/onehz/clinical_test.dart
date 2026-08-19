@@ -832,6 +832,76 @@ void main() {
       expect(strainScoreMetric(335, wakeMinutes: 960, quietHrr: null).present,
           isFalse);
     });
+
+    test('a non-finite input never produces a PRESENT strain', () {
+      // EVERY range check in strainScoreMetric is false for NaN (`NaN < 0`,
+      // `NaN <= 0`, `NaN > 0.40` — all false), so a NaN used to walk straight
+      // through into a present metric carrying a NaN value. That is worse than
+      // an absent one: everything downstream treats present as measured.
+      for (final m in [
+        strainScoreMetric(double.nan,
+            wakeMinutes: 960, quietHrr: quietWakingHrr),
+        strainScoreMetric(double.infinity,
+            wakeMinutes: 960, quietHrr: quietWakingHrr),
+        strainScoreMetric(392.9,
+            wakeMinutes: double.nan, quietHrr: quietWakingHrr),
+        strainScoreMetric(392.9,
+            wakeMinutes: double.infinity, quietHrr: quietWakingHrr),
+        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.nan),
+        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.infinity),
+      ]) {
+        expect(m.present, isFalse);
+        expect(m.value, isNull);
+        expect(m.note, isNotEmpty, reason: 'absent needs a debuggable reason');
+      }
+
+      // REFUSED, not clamped. A quiet level above ACSM's moderate floor is a
+      // broken measurement; baselineTrimp would silently pull it back to
+      // maxQuietHrr and score the day against a level nobody measured.
+      expect(
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: maxQuietHrr)
+              .present,
+          isTrue);
+      expect(
+          strainScoreMetric(392.9,
+                  wakeMinutes: 960, quietHrr: maxQuietHrr + 0.01)
+              .present,
+          isFalse);
+    });
+
+    test('non-finite anchors and samples never reach a number', () {
+      final hr = List<double>.filled(120, 90.0);
+      // `maxHr <= restingHr` is false when either is NaN, so the finiteness
+      // check is the only thing standing between a NaN anchor and a NaN result.
+      for (final (rhr, hrMax) in [
+        (double.nan, 187.0),
+        (55.0, double.nan),
+        (55.0, double.infinity),
+        (double.infinity, 187.0),
+      ]) {
+        expect(dailyQuietWakingHrr(hr, restingHr: rhr, maxHr: hrMax), isNull,
+            reason: 'quiet level for rhr=$rhr hrmax=$hrMax');
+        expect(
+            banisterTrimp(hr, restingHr: rhr, maxHr: hrMax, sex: Sex.male)
+                .present,
+            isFalse,
+            reason: 'TRIMP for rhr=$rhr hrmax=$hrMax');
+      }
+
+      // +infinity passes `hr > 0` and clamps to 1.0 — a garbage sample read as
+      // a maximal-effort minute. Dropped now, so it moves neither the median
+      // nor the TRIMP sum.
+      final dirty = [...hr, ...List<double>.filled(200, double.infinity)];
+      expect(dailyQuietWakingHrr(dirty, restingHr: 55, maxHr: 187),
+          dailyQuietWakingHrr(hr, restingHr: 55, maxHr: 187));
+      expect(banisterTrimp(dirty, restingHr: 55, maxHr: 187, sex: Sex.male).value,
+          banisterTrimp(hr, restingHr: 55, maxHr: 187, sex: Sex.male).value);
+      // Nothing measurable left once they are dropped.
+      expect(
+          dailyQuietWakingHrr(List<double>.filled(120, double.infinity),
+              restingHr: 55, maxHr: 187),
+          isNull);
+    });
   });
 
   group('StrainScorer (Banister TRIMP → 0–100)', () {

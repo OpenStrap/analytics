@@ -152,8 +152,21 @@ class Calories {
   /// THE one definition. Both entry points call it, and so does the edge's live
   /// sample-by-sample billing — a second copy of this arithmetic is how the day
   /// and the bout came to disagree in the first place.
-  static double activeGateHr(double hrmax, double restingHr) =>
-      restingHr + activeHRRFraction * (hrmax - restingHr);
+  ///
+  /// NULL WHEN THE ANCHORS CANNOT DEFINE A GATE: either one non-finite, or not
+  /// `0 < restingHr < hrmax`. A NaN gate is not a loose gate, it is NO gate —
+  /// every `hr < gate` comparison against NaN is false, so EVERY sample bills
+  /// at the Keytel active rate and a silently enormous kcal figure comes out
+  /// the far end instead of an obvious failure. Validation lives here rather
+  /// than in each entry point because this is the one place both of them (and
+  /// the edge's live billing) route through.
+  static double? activeGateHr(double hrmax, double restingHr) =>
+      (hrmax.isFinite &&
+              restingHr.isFinite &&
+              restingHr > 0 &&
+              restingHr < hrmax)
+          ? restingHr + activeHRRFraction * (hrmax - restingHr)
+          : null;
 
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
@@ -262,7 +275,13 @@ class Calories {
   /// gate. A caller without a measured resting HR has no honest day-energy
   /// figure and abstains rather than have one computed against somebody else's
   /// rest.
-  static ({double total, double active, double basal}) dailyEnergy(
+  ///
+  /// RETURNS NULL when the anchors are present but unusable — non-finite, or
+  /// not `0 < restingHr < hrmax`, see [activeGateHr]. Same rule as the absent
+  /// case and for the same reason: no gate, no honest energy figure. It is
+  /// never the zeros, because a zero here reads downstream as a measured day
+  /// with nothing in it.
+  static ({double total, double active, double basal})? dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     required double hrmax,
@@ -279,13 +298,16 @@ class Calories {
     final age = profile.age > 0 ? profile.age : 30.0;
     final coeffs = resolveCoeffs(profile.sex);
     final flexHr = activeGateHr(hrmax, restingHr);
+    if (flexHr == null) return null;
 
     final bmrDay = mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex);
     final basalPerMin = bmrDay / 1440.0;
 
     var active = 0.0;
     for (final hr in hrPerMin) {
-      if (hr < flexHr) continue; // below flex point → basal only
+      // `hr < flexHr` is false for NaN, so an unfiltered non-finite minute
+      // would bill active and carry its NaN into the day total.
+      if (!hr.isFinite || hr < flexHr) continue; // below flex → basal only
       final activePerMin =
           activeKcalPerS(coeffs, hr, hrmax, weightKg, age) * 60.0;
       final surplus = activePerMin - basalPerMin;
@@ -301,7 +323,8 @@ class Calories {
   /// seconds.
   ///
   /// [hrTsSec]/[hrBpm] are the bout's HR samples (timestamps in SECONDS, same
-  /// length). [hrmax]/[restingHr] anchors (null → 220 / 60 fallback, flagged
+  /// length). [hrmax]/[restingHr] anchors (null OR unusable, see [activeGateHr]
+  /// → 220 / 60 fallback, flagged
   /// via [usedDefaultAnchors] on the result so a fabricated-anchor calorie
   /// number can be caveated instead of shown as if it were real).
   static ({double kcal, double kj, bool usedDefaultAnchors})
@@ -322,10 +345,18 @@ class Calories {
     // hrmax/restingHr, not weight/height/age (WorkoutUserProfile bakes
     // 70/170/30 in at construction, so there's nothing left here to tell
     // "given" from "defaulted" on those three).
-    final usedDefaultAnchors = hrmax == null || restingHr == null;
-    final effHRmax = hrmax ?? 220.0;
-    final effResting = restingHr ?? 60.0;
-    final activeThreshold = activeGateHr(effHRmax, effResting);
+    //
+    // AN UNUSABLE ANCHOR IS AN ABSENT ANCHOR: non-finite, or a rest that isn't
+    // below the ceiling, cannot define a gate ([activeGateHr] returns null), so
+    // it takes the SAME documented 220/60 fallback and is flagged like any
+    // other missing anchor. Anything else here means a NaN gate, and a NaN gate
+    // bills every sample of the bout at the active rate.
+    final usedDefaultAnchors = hrmax == null ||
+        restingHr == null ||
+        activeGateHr(hrmax, restingHr) == null;
+    final effHRmax = usedDefaultAnchors ? 220.0 : hrmax;
+    final effResting = usedDefaultAnchors ? 60.0 : restingHr;
+    final activeThreshold = activeGateHr(effHRmax, effResting)!;
 
     final restingRate = restingKcalPerS(coeffs, weightKg, heightCm, age);
 
@@ -338,6 +369,7 @@ class Calories {
     var totalKcal = 0.0;
     for (var i = 0; i < ts.length; i++) {
       final b = bpm[i];
+      if (!b.isFinite) continue; // `b < threshold` is false for NaN
       final double dur;
       if (i < ts.length - 1) {
         final gap = (ts[i + 1] - ts[i]).toDouble();
