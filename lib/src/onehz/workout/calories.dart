@@ -8,9 +8,10 @@
 // medical advice.
 //
 // Faithfulness note: the coefficients, the 86_400 BMR/s divisor, the 251.04
-// workout divisor (60 s/min × 4.184 kJ/kcal), the 0.30 active-HRR bout gate, and
-// the elapsed-time-per-sample weighting (capped at mergeGapS = 150 s) are copied
-// verbatim from WorkoutDetector.swift. Pure, dart:math only.
+// workout divisor (60 s/min × 4.184 kJ/kcal) and the elapsed-time-per-sample
+// weighting (capped at mergeGapS = 150 s) are copied verbatim from
+// WorkoutDetector.swift. The active gate is NOT — that file's 0.30 HRR is
+// superseded, see [Calories.activeHRRFraction]. Pure, dart:math only.
 
 import 'dart:math' as math;
 
@@ -97,38 +98,62 @@ class Calories {
     workoutAlpha: -37.74955,
   );
 
-  /// Bout active gate: a sample burns the Keytel active rate above
-  /// resting + this fraction of HRR, else the resting BMR rate.
-  static const double activeHRRFraction = 0.30;
-
-  /// THE HR-FLEX POINT for [dailyEnergy], as a fraction of HRmax.
+  /// THE HR-FLEX POINT, as a fraction of heart-rate RESERVE, for BOTH the day
+  /// ([dailyEnergy]) and the bout ([estimateBoutCalories]). One definition —
+  /// see [activeGateHr], which is the only place it is turned into a bpm.
   ///
-  /// RAISED 0.50 → 0.65 on 2026-08-17 (audit MOT-02). This number decides which
-  /// waking minutes get billed the Keytel rate at all, and 0.50 put it at
-  /// 0.50 × 187 = 93.5 bpm for a 30 y/o — a heart rate a person reaches by
-  /// standing up. Keytel's regression is fitted on STEADY-STATE SUBMAXIMAL
-  /// EXERCISE with chest/ECG HR; below the exercise domain there is no HR↔EE
-  /// slope to extrapolate along (that absence is the entire premise of the
-  /// HR-FLEX method this function cites — Spurr 1988 / Ceesay 1989 assign
-  /// resting EE below flex and an INDIVIDUALLY CALIBRATED line above it). Ours
-  /// is a population line, so the gate has to sit where that line is at least
-  /// approximately true. 0.65 × HRmax is the ACSM moderate-intensity floor
-  /// (64 % HRmax ≈ 40 % HRR) — the published boundary below which movement is
-  /// not counted as exercise at all, and the region Keytel's submaximal
-  /// exercise protocol does not sample. It is a choice, not a number Keytel
-  /// prints; what Keytel prints is a regression with no resting arm.
+  /// It decides which minutes get billed the Keytel rate at all. Keytel's
+  /// regression is fitted on STEADY-STATE SUBMAXIMAL EXERCISE with chest/ECG
+  /// HR; below the exercise domain there is no HR↔EE slope to extrapolate along
+  /// (that absence is the entire premise of the HR-FLEX method this file cites
+  /// — Spurr 1988 / Ceesay 1989 assign resting EE below flex and an
+  /// INDIVIDUALLY CALIBRATED line above it). Ours is a population line, so the
+  /// gate has to sit where that line is at least approximately true.
   ///
-  /// MEASURED CONSEQUENCE, whoop-4.db, 9 days, 70 kg/170 cm/30 y male stand-in,
-  /// Tanaka HRmax 187: billed minutes 39.4 % → 4.9 % of the wake window; daily
-  /// ACTIVE energy min/median/max 769/1,955/4,062 → 9/48/1,917 kcal; daily
-  /// TOTAL 1,544–5,582 → 793–3,437 kcal. Quiet days lose essentially all their
-  /// "active" energy, which is the correction: they never earned it. Real
-  /// sessions keep most of theirs (a 103-min-above-50 %-HRR day: 3,462 → 1,202).
+  /// WHY HRR AND NOT A FRACTION OF HRmax (issue #43). The two entry points used
+  /// to disagree: the day gated at 0.65 × HRmax, the bout at RHR + 0.30 × HRR,
+  /// so the same minute of the same stream was billed active by one and resting
+  /// by the other, by 8–35 bpm depending on the profile. A fraction of HRmax
+  /// alone is also the wrong shape: 0.65 × Tanaka is 135.2 − 0.455 · age, which
+  /// falls with age while resting HR does not, so it drifts toward rest for the
+  /// old and away from it for the young and fit.
+  ///
+  ///   profile          HRmax   old day   old bout   NOW (0.40 HRR)
+  ///   70 y, RHR 68     159.0     103.4       95.3        104.4
+  ///   34 y, RHR 55     184.2     119.7       93.8        106.7
+  ///   25 y, RHR 45     190.5     123.8       88.7        103.2
+  ///
+  /// 0.40 IS THE SAME BOUNDARY THE 0.65 CHOICE WAS REACHING FOR (audit MOT-02,
+  /// 2026-08-17, which raised the day gate 0.50 → 0.65 × HRmax): ACSM puts
+  /// moderate intensity at 40–59 % HRR ≡ 64–76 % HRmax, so 0.40 HRR is 0.65
+  /// HRmax expressed against the individual's own rest instead of against a
+  /// population ceiling. Below it, movement is not counted as exercise at all,
+  /// and it is the region Keytel's protocol does not sample. It is a choice,
+  /// not a number Keytel prints; what Keytel prints is a regression with no
+  /// resting arm. The 0.30 that came over from WorkoutDetector.swift sat below
+  /// that boundary, right where Keytel over-reads worst (a 34 y/o at 92 bpm
+  /// bills ≈4.6 METs for what is ≈3).
+  ///
+  /// MEASURED CONSEQUENCE of MOT-02 (whoop-4.db, 9 days, 70 kg/170 cm/30 y male
+  /// stand-in, Tanaka HRmax 187): billed minutes 39.4 % → 4.9 % of the wake
+  /// window; daily ACTIVE energy min/median/max 769/1,955/4,062 → 9/48/1,917
+  /// kcal. On that stand-in RHR is unknown, so the HRR restatement cannot be
+  /// replayed against it; on the profiles above it moves the day gate by
+  /// +1.0 / −13.0 / −20.6 bpm and the bout gate by +9.1 / +12.9 / +14.5.
   ///
   /// This is still a point estimate with no error band, deliberately: Keytel
   /// publishes a POPULATION MAPE, which is not this user's error distribution,
   /// and drawing bounds around the number would claim we computed them.
-  static const double defaultActiveFraction = 0.65;
+  static const double activeHRRFraction = 0.40;
+
+  /// The HR at or above which a sample is billed the Keytel active rate:
+  /// `restingHr + [activeHRRFraction] · (hrmax − restingHr)`.
+  ///
+  /// THE one definition. Both entry points call it, and so does the edge's live
+  /// sample-by-sample billing — a second copy of this arithmetic is how the day
+  /// and the bout came to disagree in the first place.
+  static double activeGateHr(double hrmax, double restingHr) =>
+      restingHr + activeHRRFraction * (hrmax - restingHr);
 
   /// 60 s/min × 4.184 kJ/kcal.
   static const double workoutDivisor = 251.04;
@@ -213,10 +238,9 @@ class Calories {
   ///              filling any minute that has no HR sample.
   ///
   /// [hrPerMin] is per-minute mean HR (bpm); 0/absent minutes fall back to BMR.
-  /// [activeFraction] is the HR-flex point as a fraction of HRmax
-  /// ([defaultActiveFraction] = 0.65 — read its doc before moving it, it is the
-  /// single number that decides what "active" means): minutes below it burn BMR
-  /// only, so a quiet day reads ≈ basal and Keytel's low-HR extrapolation can't
+  /// The flex point is [activeGateHr] — the SAME gate [estimateBoutCalories]
+  /// uses, read its constant before moving it: minutes below it burn BMR only,
+  /// so a quiet day reads ≈ basal and Keytel's low-HR extrapolation can't
   /// inflate "active".
   /// [dayMinutes] lets a partial day pro-rate basal (default 1440 = full day).
   ///
@@ -232,11 +256,17 @@ class Calories {
   /// ceiling has no energy figure: it abstains rather than call this. That is
   /// why the old `usedDefaultHrmax` flag is gone — the case it flagged can no
   /// longer reach this function.
+  ///
+  /// [restingHr] IS REQUIRED FOR THE SAME REASON and likewise has no fallback:
+  /// the gate is HRR-relative now (issue #43), so an unknown rest is an unknown
+  /// gate. A caller without a measured resting HR has no honest day-energy
+  /// figure and abstains rather than have one computed against somebody else's
+  /// rest.
   static ({double total, double active, double basal}) dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     required double hrmax,
-    double activeFraction = defaultActiveFraction,
+    required double restingHr,
     int dayMinutes = 1440,
   }) {
     // (weight/height/age still can't be told apart from their defaults here:
@@ -248,7 +278,7 @@ class Calories {
     final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
     final age = profile.age > 0 ? profile.age : 30.0;
     final coeffs = resolveCoeffs(profile.sex);
-    final flexHr = activeFraction * hrmax;
+    final flexHr = activeGateHr(hrmax, restingHr);
 
     final bmrDay = mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex);
     final basalPerMin = bmrDay / 1440.0;
@@ -295,8 +325,7 @@ class Calories {
     final usedDefaultAnchors = hrmax == null || restingHr == null;
     final effHRmax = hrmax ?? 220.0;
     final effResting = restingHr ?? 60.0;
-    final activeThreshold =
-        effResting + activeHRRFraction * (effHRmax - effResting);
+    final activeThreshold = activeGateHr(effHRmax, effResting);
 
     final restingRate = restingKcalPerS(coeffs, weightKg, heightCm, age);
 
