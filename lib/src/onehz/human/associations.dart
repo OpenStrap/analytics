@@ -23,19 +23,23 @@
 //     independent AR(1) walks produce large sample correlations routinely, and
 //     a test that shuffles days one at a time destroys exactly the structure
 //     that caused them, so it calls them significant. The null here is built by
-//     MOVING-BLOCK PERMUTATION: the outcome series is cut into week-long blocks
-//     and the BLOCKS are reordered, which keeps each series' own persistence
-//     intact while destroying its alignment to the other. `blockLen` is 7 days
-//     by default — the natural block for human daily data, and it preserves the
-//     weekly cycle inside each block as a side effect. The false-positive test
-//     in the test-suite fails outright with day-wise shuffling and passes with
-//     this, which is the whole justification.
+//     MOVING-BLOCK PERMUTATION: the outcome series is cut into fortnight-long
+//     blocks and the BLOCKS are reordered, which keeps each series' own
+//     persistence intact while destroying its alignment to the other.
+//     `blockLen` is 14 days by default, which is a MEASURED choice and not a
+//     natural-looking one — the false-positive rates behind it are tabulated on
+//     [associationMinPairedDays], where 7 is shown failing at the persistence
+//     real training and illness data actually has. The false-positive test in
+//     the test-suite fails outright with day-wise shuffling and passes with
+//     this, which is the rest of the justification.
 //
 //  3. LAG IS DIRECTIONAL AND IT IS THE POINT. Last night's sleep can move today
 //     — today cannot move last night. Every variable declares WHEN IN THE DAY
 //     it happened ([VarTiming]) and the lag falls out of the pair, per pair,
-//     never as a global column shift. A pair whose only alignment would run
-//     backwards in time is refused rather than flipped. There is deliberately
+//     never as a global column shift. Every pair has exactly one alignment that
+//     runs forwards, so no pair is ever flipped and none is ever refused for
+//     direction; the same-timing pairs take +1 rather than the simultaneous 0,
+//     which is where that is paid for ([associationLag]). There is deliberately
 //     NO LAG SCAN: trying {0,+1,+2} triples the grid and re-creates precisely
 //     the multiplicity problem the BH correction just paid for. One derived
 //     lag, disclosed on the finding.
@@ -318,9 +322,33 @@ class AssociationRefusal {
   /// `<input>-><outcome>` for a pair, or the bare key for a whole variable.
   final String subject;
 
-  /// Machine-readable: `tautology`, `backwards_in_time`, `simultaneous`,
-  /// `sparse`, `constant`, `need_pairs:have=N,need=M`, `no_contrast`,
-  /// `not_an_input`, `misaligned_series`.
+  /// Machine-readable, and this list is EXHAUSTIVE — callers switch on it, so
+  /// a reason that is documented but never emitted is a lie and one that is
+  /// emitted but never documented is a crash. Exactly these, and nothing else:
+  ///
+  ///   variable-level (subject is the bare key)
+  ///     `sparse:coverage=C,need=M`        recorded on too little of the window
+  ///     `need_pairs:have=N,need=M`        too few recorded days, full stop
+  ///     `constant`                        one distinct value; nothing to rank
+  ///
+  ///   pair-level (subject is `<input>-><outcome>`)
+  ///     `tautology`                       one side is computed from the other
+  ///     `need_pairs:have=N,need=M`        too few days where BOTH are present
+  ///     `constant`                        no variance left once lagged
+  ///     `no_contrast`                     fewer than 5 days on a side of the
+  ///                                       split, so there is no feelable
+  ///                                       number to state
+  ///
+  ///   scan-level (subject is `scan`)
+  ///     `unreachable:tests=T,max=M,p_floor=P`
+  ///                                       the family is wider than this much
+  ///                                       history could ever have answered
+  ///
+  /// Not here, deliberately: there is no `backwards_in_time` or `simultaneous`,
+  /// because [associationLag] resolves both in the alignment and never hands
+  /// this file an unusable pair; and `misaligned_series` is a note on an ABSENT
+  /// [Metric], not a refusal — a caller bug abstains the whole scan rather than
+  /// producing a partial one.
   final String reason;
   const AssociationRefusal(this.subject, this.reason);
 
@@ -403,6 +431,12 @@ const int associationMinPairedDays = 84;
 ///
 /// The rule the brief asks for: a column existing is not a reason to test it. A
 /// mood field filled in four times is not a candidate cause, it is four days.
+///
+/// This is a RATE gate and [associationMinPairedDays] is a COUNT gate, and they
+/// answer different questions — "you fill this in too rarely for it to be a
+/// candidate" versus "you have not been wearing this long enough yet". The rate
+/// is checked first so the sparse column gets the message that is actually
+/// actionable; see the ordering note at the variable-level gates.
 const double associationMinCoverage = 0.5;
 
 /// Reporting floor on the effect size, in units of the outcome's own spread.
@@ -416,8 +450,10 @@ const double associationMinContrastIqr = 0.25;
 /// construct measured twice, and only the stronger finding is published.
 const double associationRedundancyRho = 0.7;
 
-/// The lag, in days, from [input]'s label to [outcome]'s label — or null when
-/// the pair cannot be aligned in a direction that runs forwards in time.
+/// The lag, in days, from [input]'s label to [outcome]'s label. ALWAYS >= 0:
+/// every combination of the two timings has exactly one alignment that runs
+/// forwards, so there is no such thing as an unalignable pair here and nothing
+/// downstream needs a backwards-in-time refusal.
 ///
 /// A `night` label D is the night that ended on the morning of D; a `day` label
 /// D is the waking day of D, which FOLLOWS it. So:
@@ -428,12 +464,15 @@ const double associationRedundancyRho = 0.7;
 ///   night -> night  lag +1  last night against the NEXT night
 ///   day   -> day    lag +1  today's training against tomorrow's mood
 ///
-/// The two same-timing pairs are given +1 rather than 0 deliberately. At lag 0
-/// they are SIMULTANEOUS — a bad night both shortens sleep and raises heart
-/// rate, and nothing in the alignment says which way it ran. That is not a
-/// finding about what affects what, so it is refused rather than published with
-/// a direction it has not earned.
-int? associationLag(VarTiming input, VarTiming outcome) {
+/// The two same-timing pairs are given +1 rather than 0 deliberately, and THIS
+/// IS THE REFUSAL — it is expressed in the alignment rather than as a reason
+/// string. At lag 0 those pairs are SIMULTANEOUS: a bad night both shortens
+/// sleep and raises heart rate, and nothing in the alignment says which way it
+/// ran. So the simultaneous question is never the one asked. The pair is not
+/// dropped, because "last night against the NEXT night" is a real directional
+/// question — it is the same-day version of it that is unearned, and the +1 is
+/// what makes sure it is never the version tested.
+int associationLag(VarTiming input, VarTiming outcome) {
   if (input == VarTiming.night && outcome == VarTiming.day) return 0;
   return 1;
 }
@@ -447,7 +486,10 @@ int? associationLag(VarTiming input, VarTiming outcome) {
 /// positionally aligned to them. Dates need not be contiguous or sorted: the
 /// scan builds its own contiguous calendar grid, because a block permutation
 /// over "rows that happen to exist" would silently treat a two-week gap as one
-/// day and destroy the very autocorrelation it is there to preserve.
+/// day and destroy the very autocorrelation it is there to preserve. They must
+/// be UNIQUE, and every [DailyVariable.key] must be unique: both index into the
+/// grid, so a repeat overwrites rather than erroring, and the scan abstains
+/// (`duplicate_date:` / `duplicate_key:`) rather than publishing the survivor.
 ///
 /// [measured] is positionally aligned to [dates] and marks days whose values
 /// were MEASURED BY THE BAND. Days marked false are erased from every variable
@@ -487,12 +529,25 @@ Metric<AssociationScan> scanAssociations({
   // taste. Six blocks or twelve weeks, whichever is more.
   minPairedDays = math.max(minPairedDays, minBlocks * blockLen);
 
+  // Caller bugs ABSTAIN THE WHOLE SCAN rather than being absorbed. Everything
+  // below is keyed by `v.key` and by calendar slot, so a repeat of either does
+  // not fail — it silently overwrites, and the survivor is published under the
+  // loser's label and unit. Publishing one variable's series against another
+  // one's name is the worst failure this file has, and it is invisible.
+  final seenKey = <String>{};
   for (final v in variables) {
     if (v.values.length != dates.length) {
       return Metric<AssociationScan>.absent(
         tier: Tier.estimate,
         inputs_used: inputs,
         note: 'misaligned_series:${v.key}',
+      );
+    }
+    if (!seenKey.add(v.key)) {
+      return Metric<AssociationScan>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'duplicate_key:${v.key}',
       );
     }
   }
@@ -518,6 +573,19 @@ Metric<AssociationScan> scanAssociations({
       inputs_used: inputs,
       note: needBaselineNote(have: 0, need: minPairedDays),
     );
+  }
+  // Two rows landing on one calendar day collapse into one grid slot, and the
+  // later row wins for every variable at once — same failure mode as a repeated
+  // key, same answer.
+  final seenDay = <int>{};
+  for (final i in present) {
+    if (!seenDay.add(cal[i])) {
+      return Metric<AssociationScan>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'duplicate_date:${dates[i]}',
+      );
+    }
   }
   var minDay = cal[present.first], maxDay = cal[present.first];
   for (final i in present) {
@@ -557,14 +625,22 @@ Metric<AssociationScan> scanAssociations({
     final nPresent = g.where((e) => e != null).length;
     final cov = nPresent / span;
     coverage[v.key] = cov;
-    if (nPresent < minPairedDays) {
-      refusals.add(AssociationRefusal(
-          v.key, 'need_pairs:have=$nPresent,need=$minPairedDays'));
-      continue;
-    }
+    // COVERAGE IS TESTED FIRST, and the order is the whole point. Both gates
+    // are usually true of an under-populated column, and the reason string is
+    // user-facing copy: "you need 54 more nights" tells someone to wait, and
+    // waiting does not fix a field they fill in one day in three. "You log this
+    // too rarely" is the actionable one, so the rate is asked about before the
+    // count. Count-first would also make this gate unreachable in practice — it
+    // would need nPresent >= minPairedDays AND cov < minCoverage at once, which
+    // at the defaults takes a window over 168 days long.
     if (cov < minCoverage) {
       refusals.add(AssociationRefusal(
           v.key, 'sparse:coverage=${round6(cov)},need=${round6(minCoverage)}'));
+      continue;
+    }
+    if (nPresent < minPairedDays) {
+      refusals.add(AssociationRefusal(
+          v.key, 'need_pairs:have=$nPresent,need=$minPairedDays'));
       continue;
     }
     final vals = <double>[for (final e in g) if (e != null) e];
@@ -604,11 +680,10 @@ Metric<AssociationScan> scanAssociations({
         refusals.add(AssociationRefusal(subject, 'tautology'));
         continue;
       }
+      // Always >= 0 by construction, and same-timing pairs are already shifted
+      // off the simultaneous alignment — see [associationLag]. There is no
+      // backwards-in-time case to refuse.
       final lag = associationLag(inp.timing, out.timing);
-      if (lag == null || lag < 0) {
-        refusals.add(AssociationRefusal(subject, 'backwards_in_time'));
-        continue;
-      }
 
       final rx = rankAdj[inp.key]!;
       final ryFull = rankAdj[out.key]!;
@@ -650,7 +725,13 @@ Metric<AssociationScan> scanAssociations({
       if (coverage[inp.key]! < 0.8) caveats.add('sparse_input');
       if (selfReported.contains(inp.key)) caveats.add('self_reported_input');
       if (contrast.split == ContrastSplit.binary) caveats.add('binary_contrast');
-      if (span < 84) caveats.add('short_history');
+      // The SHIPPED twelve weeks, not the effective `minPairedDays`. Every row
+      // here already cleared `n >= minPairedDays` and n can never exceed span,
+      // so `span < minPairedDays` is unreachable by construction — writing it
+      // that way would be a caveat that can never fire. What this actually
+      // means is "this scan ran on a window shorter than the engine is designed
+      // for", which is only possible when a caller lowered the floor itself.
+      if (span < associationMinPairedDays) caveats.add('short_history');
 
       rows.add(Association(
         inputKey: inp.key,

@@ -410,6 +410,30 @@ void main() {
       expect(suppressed, isNotEmpty,
           reason: 'the collapsed ones stay auditable with a pointer');
       expect(suppressed.first.redundantWith, onStrain.first.inputKey);
+
+      // AND IN THE JSON, which is the shape a UI actually reads — the field
+      // being right on the object is worth nothing if it never serialises.
+      // `redundant_with` is conditional, so it is exactly the key that can go
+      // missing without a single object-level assertion noticing.
+      expect(suppressed.first.toJson()['redundant_with'],
+          onStrain.first.inputKey);
+      expect(onStrain.first.toJson().containsKey('redundant_with'), isFalse,
+          reason: 'a finding that stands alone must not carry the key at all');
+
+      final json = m.value!.toJson();
+      final testedJson = (json['tested'] as List).cast<Map<String, dynamic>>();
+      expect(
+        testedJson.where((t) => t['redundant_with'] != null).map(
+            (t) => '${t['input']}->${t['outcome']}=${t['redundant_with']}'),
+        isNotEmpty,
+        reason: 'the pointer has to survive the whole-scan serialisation too',
+      );
+      for (final t in testedJson) {
+        if (t['redundant_with'] != null) {
+          expect(t['meaningful'], isFalse,
+              reason: 'a suppressed restatement is never also published');
+        }
+      }
     });
 
     test('too little history is an absent metric that says how much it needs',
@@ -452,7 +476,76 @@ void main() {
       final why = m.value!.refusals
           .firstWhere((r) => r.subject == 'alcohol_units')
           .reason;
-      expect(why, anyOf(startsWith('need_pairs'), startsWith('sparse')));
+      // SPARSE, not need_pairs. Both are true of this column — 10 entries is
+      // under the count floor AND under the rate floor — and the two sentences
+      // send the user somewhere different. "You need 74 more nights" tells them
+      // to wait, and waiting fixes nothing for a field logged one day in
+      // twelve. The rate gate is asked first so the copy is the actionable one.
+      expect(why, startsWith('sparse:'),
+          reason: 'a rarely-logged field is sparse, not merely young');
+      expect(why, contains('need=0.5'));
+    });
+
+    test('a column with one value in it is refused, not correlated', () {
+      // Water logged as the same number every day has no variance to explain
+      // anything with. Ranking it invents an ordering nobody reported, and the
+      // rank correlation against it is 0/0.
+      const days = 120;
+      final r = math.Random(41);
+      final m = scanAssociations(
+        dates: _dates(days),
+        variables: [
+          _v('rmssd', _ar1(days, r, mean: 55, sd: 12)),
+          _v('strain', _ar1(days, r, mean: 10, sd: 3)),
+          _v('water_ml', [for (var i = 0; i < days; i++) 2000.0]),
+        ],
+        seed: 12,
+      );
+      expect(m.present, isTrue);
+      // It passed BOTH data gates — full coverage, 120 days — so `constant` is
+      // the only thing that can have caught it.
+      expect(
+          m.value!.refusals
+              .firstWhere((x) => x.subject == 'water_ml')
+              .reason,
+          'constant');
+      for (final t in m.value!.tested) {
+        expect(t.inputKey, isNot('water_ml'));
+        expect(t.outcomeKey, isNot('water_ml'));
+      }
+    });
+
+    test('an effect with nobody on one side of it is refused, not described',
+        () {
+      // Alcohol logged on exactly 2 of 120 days. There is plenty of DATA here —
+      // it clears coverage, the count floor and the rank correlation — but the
+      // feelable number would be "the median of two nights", and a contrast
+      // stated from two days reads exactly like one stated from sixty.
+      const days = 120;
+      final r = math.Random(23);
+      final m = scanAssociations(
+        dates: _dates(days),
+        variables: [
+          _v('rmssd', _ar1(days, r, mean: 55, sd: 12)),
+          _v('strain', _ar1(days, r, mean: 10, sd: 3)),
+          _v('alcohol_units',
+              [for (var i = 0; i < days; i++) (i == 40 || i == 90) ? 1.0 : 0.0]),
+        ],
+        seed: 14,
+      );
+      expect(m.present, isTrue, reason: 'the other pairs still ran');
+      final why = m.value!.refusals
+          .where((x) => x.subject.startsWith('alcohol_units->'))
+          .toList();
+      expect(why, isNotEmpty);
+      for (final x in why) {
+        expect(x.reason, 'no_contrast');
+      }
+      for (final t in m.value!.tested) {
+        expect(t.inputKey, isNot('alcohol_units'),
+            reason: 'refused pairs must not enter the family the FDR '
+                'correction is computed over');
+      }
     });
 
     test('imported days are erased, not blended', () {
@@ -536,6 +629,37 @@ void main() {
       );
       expect(m.present, isFalse);
       expect(m.note, contains('misaligned_series'));
+    });
+
+    test('a repeated key or date abstains instead of overwriting', () {
+      // Both index into the grid, so a repeat does not throw — it silently
+      // wins, and the survivor gets published under the loser's label and unit.
+      // "Your sleep duration moves your recovery" printed off the steps series
+      // is the worst thing this file can emit and there is nothing to see.
+      const days = 120;
+      final r = math.Random(1);
+      final dup = scanAssociations(
+        dates: _dates(days),
+        variables: [
+          _v('rmssd', _ar1(days, r, mean: 55, sd: 12)),
+          // Same key, a completely different series behind it.
+          _v('rmssd', _ar1(days, r, mean: 8000, sd: 2500)),
+        ],
+      );
+      expect(dup.present, isFalse);
+      expect(dup.note, contains('duplicate_key:rmssd'));
+
+      final dates = _dates(days);
+      final sameDay = [...dates]..[7] = dates[6];
+      final dupDate = scanAssociations(
+        dates: sameDay,
+        variables: [
+          _v('rmssd', _ar1(days, r, mean: 55, sd: 12)),
+          _v('strain', _ar1(days, r, mean: 10, sd: 3)),
+        ],
+      );
+      expect(dupDate.present, isFalse);
+      expect(dupDate.note, contains('duplicate_date:${dates[6]}'));
     });
 
     test('lags are derived from timing and never negative', () {
