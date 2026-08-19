@@ -788,29 +788,49 @@ void main() {
   group('strain score (0-21 map of TRIMP above the waking baseline)', () {
     test('subtracts the quiet-waking baseline for the observed wake window',
         () {
-      // 960 waking minutes accrue ~180 TRIMP just by being awake. Charging that
-      // as effort is what put an inactive day at 12.8/21.
-      expect(baselineTrimp(960), closeTo(180.4, 0.5));
-      expect(strainScore(180.0, wakeMinutes: 960), 0.0);
+      // 960 waking minutes accrue ~180 TRIMP just by being awake at 0.20 HRR.
+      // Charging that as effort is what put an inactive day at 12.8/21.
+      expect(baselineTrimp(960, quietHrr: quietWakingHrr), closeTo(180.4, 0.5));
+      expect(strainScore(180.0, wakeMinutes: 960, quietHrr: quietWakingHrr),
+          0.0);
       // Half the wear window, half the allowance.
-      expect(baselineTrimp(480), closeTo(baselineTrimp(960) / 2, 1e-9));
+      expect(baselineTrimp(480, quietHrr: quietWakingHrr),
+          closeTo(baselineTrimp(960, quietHrr: quietWakingHrr) / 2, 1e-9));
+      // A higher personal quiet level costs more allowance, always.
+      expect(baselineTrimp(960, quietHrr: 0.274),
+          greaterThan(baselineTrimp(960, quietHrr: 0.20)));
+      // And no caller can hand over one that eats a day's training whole.
+      expect(baselineTrimp(960, quietHrr: 0.9),
+          closeTo(baselineTrimp(960, quietHrr: maxQuietHrr), 1e-9));
     });
 
     test('is monotone, floored at 0 and capped at 21', () {
-      expect(strainScore(0, wakeMinutes: 960), closeTo(0.0, 1e-9));
-      expect(strainScore(1e9, wakeMinutes: 960), closeTo(21.0, 1e-9));
+      expect(strainScore(0, wakeMinutes: 960, quietHrr: quietWakingHrr),
+          closeTo(0.0, 1e-9));
+      expect(strainScore(1e9, wakeMinutes: 960, quietHrr: quietWakingHrr),
+          closeTo(21.0, 1e-9));
       expect(
-        strainScore(300, wakeMinutes: 960) < strainScore(400, wakeMinutes: 960),
+        strainScore(300, wakeMinutes: 960, quietHrr: quietWakingHrr) <
+            strainScore(400, wakeMinutes: 960, quietHrr: quietWakingHrr),
         isTrue,
       );
     });
 
-    test('strainScoreMetric is EST tier and absent without either input', () {
-      final m = strainScoreMetric(392.9, wakeMinutes: 960);
+    test('strainScoreMetric is EST tier and absent without any input', () {
+      final m =
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr);
       expect(m.present, isTrue);
       expect(m.tier, 'ESTIMATE');
-      expect(strainScoreMetric(null, wakeMinutes: 960).present, isFalse);
-      expect(strainScoreMetric(335, wakeMinutes: null).present, isFalse);
+      expect(
+          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr)
+              .present,
+          isFalse);
+      expect(
+          strainScoreMetric(335, wakeMinutes: null, quietHrr: quietWakingHrr)
+              .present,
+          isFalse);
+      expect(strainScoreMetric(335, wakeMinutes: 960, quietHrr: null).present,
+          isFalse);
     });
   });
 
