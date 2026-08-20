@@ -950,30 +950,7 @@ CardioStagerResult _abstain(int epochSec) => CardioStagerResult(
 /// window centred on epoch [s,t). Returns NaN when too few clean beats.
 double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
     List<AccelSample> accel, int s, int t, int epochSec) {
-  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return double.nan;
-  final mid = (s + t) ~/ 2;
-  if (mid >= accel.length) return double.nan;
-  final centreMs = accel[mid].tsMs;
-  const halfWinMs = 150 * 1000; // ±2.5 min for a stable RMSSD on sparse RR
-  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
-  // Gather clean beats in window (300–2000 ms, drop big successive jumps).
-  final beats = <double>[];
-  double? prev;
-  for (var i = 0; i < rrMs.length; i++) {
-    final ts = rrTsMs[i];
-    if (ts < lo || ts > hi) continue;
-    final v = rrMs[i];
-    if (v < _rrMin || v > _rrMax) {
-      prev = null;
-      continue;
-    }
-    if (prev != null && (v - prev).abs() > _rrMaxStep) {
-      prev = v;
-      continue;
-    }
-    beats.add(v);
-    prev = v;
-  }
+  final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t).beats;
   if (beats.length < 5) return double.nan;
   var ss = 0.0;
   for (var i = 1; i < beats.length; i++) {
@@ -995,7 +972,7 @@ double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
 /// flat RMSSD of 67.3 / 70.7 / 79.7.
 double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
     List<AccelSample> accel, int s, int t, int epochSec) {
-  final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t);
+  final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t).beats;
   if (beats.length < 5) return double.nan;
   final m = mean(beats)!;
   var ss = 0.0;
@@ -1005,18 +982,33 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   return math.sqrt(ss / (beats.length - 1));
 }
 
-/// Clean RR beats (ms) inside the ±2.5-min window centred on epoch [s,t).
-/// Shared by [_windowRmssd] and [_windowSdnn] so both see exactly the same
-/// beats — a divergence there would make their z-scores incomparable.
-List<double> _cleanBeatsInWindow(List<double> rrMs, List<double> rrTsMs,
-    List<AccelSample> accel, int s, int t) {
-  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return const <double>[];
+/// Clean RR beats (ms) inside a ±[halfWinMs] window centred on epoch [s,t),
+/// with each beat's time rebased to the window start (seconds).
+///
+/// The physiologic gate (300–2000 ms, drop big successive jumps) lives here and
+/// only here, so every window feature sees exactly the same beats for a given
+/// window — [_windowRmssd] and [_windowSdnn] are computed over one window and
+/// must agree on its contents.
+///
+/// [_windowRemFeatures] passes a DIFFERENT [halfWinMs] on purpose (±90 s, not
+/// ±2.5 min): its LF/HF grid and its `beats.length` abstain gate are specified
+/// against that shorter window. Do not hand it the default list.
+({List<double> beats, List<double> tsSec}) _cleanBeatsInWindow(
+  List<double> rrMs,
+  List<double> rrTsMs,
+  List<AccelSample> accel,
+  int s,
+  int t, {
+  int halfWinMs = 150 * 1000,
+}) {
+  const empty = (beats: <double>[], tsSec: <double>[]);
+  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
   final mid = (s + t) ~/ 2;
-  if (mid >= accel.length) return const <double>[];
+  if (mid >= accel.length) return empty;
   final centreMs = accel[mid].tsMs;
-  const halfWinMs = 150 * 1000;
   final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
   final beats = <double>[];
+  final tsSec = <double>[];
   double? prev;
   for (var i = 0; i < rrMs.length; i++) {
     final ts = rrTsMs[i];
@@ -1031,9 +1023,18 @@ List<double> _cleanBeatsInWindow(List<double> rrMs, List<double> rrTsMs,
       continue;
     }
     beats.add(v);
+    // Rebase to the window start (lo), NOT absolute epoch ms. Lomb–Scargle is
+    // time-shift invariant (the τ phase reference cancels any offset), so the
+    // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
+    // instead of ~1.75e9 s. Absolute epoch seconds force every sin/cos in the
+    // periodogram onto libm's __kernel_rem_pio2 multi-precision slow path
+    // (args ~9e9 rad), which — run per 30-s epoch over a full night on the
+    // main isolate — caused main-thread ANRs on Android (Crashlytics: libm.so
+    // __kernel_rem_pio2 / sin / cos, 0.9.13).
+    tsSec.add((ts - lo) / 1000.0);
     prev = v;
   }
-  return beats;
+  return (beats: beats, tsSec: tsSec);
 }
 
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
@@ -1135,41 +1136,12 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
 /// nulls when too few clean beats for a stable estimate.
 ({double? lfhf, double? rk}) _windowRemFeatures(List<double> rrMs,
     List<double> rrTsMs, List<AccelSample> accel, int s, int t, int epochSec) {
-  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) {
-    return (lfhf: null, rk: null);
-  }
-  final mid = (s + t) ~/ 2;
-  if (mid >= accel.length) return (lfhf: null, rk: null);
-  final centreMs = accel[mid].tsMs;
-  const halfWinMs = 90 * 1000; // ±90 s per the REM feature spec
-  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
-  final beats = <double>[]; // clean RR (ms)
-  final beatTsSec = <double>[]; // matching beat times (s)
-  double? prev;
-  for (var i = 0; i < rrMs.length; i++) {
-    final ts = rrTsMs[i];
-    if (ts < lo || ts > hi) continue;
-    final v = rrMs[i];
-    if (v < _rrMin || v > _rrMax) {
-      prev = null;
-      continue;
-    }
-    if (prev != null && (v - prev).abs() > _rrMaxStep) {
-      prev = v;
-      continue;
-    }
-    beats.add(v);
-    // Rebase to the window start (lo), NOT absolute epoch ms. Lomb–Scargle is
-    // time-shift invariant (the τ phase reference cancels any offset), so the
-    // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
-    // instead of ~1.75e9 s. Absolute epoch seconds force every sin/cos in the
-    // periodogram onto libm's __kernel_rem_pio2 multi-precision slow path
-    // (args ~9e9 rad), which — run per 30-s epoch over a full night on the
-    // main isolate — caused main-thread ANRs on Android (Crashlytics: libm.so
-    // __kernel_rem_pio2 / sin / cos, 0.9.13).
-    beatTsSec.add((ts - lo) / 1000.0);
-    prev = v;
-  }
+  // ±90 s per the REM feature spec — a DIFFERENT window from the RMSSD/SDNN
+  // one; see [_cleanBeatsInWindow].
+  final win = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t,
+      halfWinMs: 90 * 1000);
+  final beats = win.beats; // clean RR (ms)
+  final beatTsSec = win.tsSec; // matching beat times (s), rebased to window
   if (beats.length < 16)
     return (lfhf: null, rk: null); // spectral stability gate
   // R(k): mean absolute successive difference of instantaneous HR (bpm).
