@@ -382,6 +382,19 @@ CardioStagerResult cardioStager(
   // Explicit arg wins (unit tests); else the ambient profile the edge set for
   // this staging pass; else null ⇒ pure per-night-local (cold-start behavior).
   final profile = userProfile ?? cardioUserProfile;
+  // `_cleanBeatsInWindow` binary-searches this, so it has to be non-decreasing.
+  // The producer guarantees it — beats inherit their record's second and the
+  // records are sorted, and the one path that folds in loose live beats
+  // re-sorts the pair explicitly. An `assert` rather than a linear fallback:
+  // a fallback would pay the scan back on every window to insure against a
+  // state the caller cannot reach, whereas this is free in release and loud in
+  // every test the moment somebody builds an unsorted series.
+  assert(() {
+    for (var i = 1; i < rrTsMs.length; i++) {
+      if (rrTsMs[i] < rrTsMs[i - 1]) return false;
+    }
+    return true;
+  }(), 'rrTsMs must be non-decreasing — the beat window is binary-searched');
   final n = math.min(hr1hz.length, accel.length);
   final nEpoch = n ~/ epochSec;
   if (nEpoch < 3) return _abstain(epochSec);
