@@ -46,20 +46,26 @@ Metric<double> banisterTrimp(
   required Sex sex,
 }) {
   const inputs = ['hr_per_min', 'resting_hr', 'max_hr'];
+  // `maxHr <= restingHr` is FALSE when either is NaN, so the finiteness checks
+  // are load-bearing: a NaN anchor otherwise makes a NaN reserve, and every
+  // clamp below (`hrr < 0`, `hrr > 1`) is false for NaN too, so the sum comes
+  // out NaN inside a PRESENT metric.
   if (restingHr == null ||
       maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
       maxHr <= restingHr ||
       hrPerMin.isEmpty) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'Banister TRIMP needs measured RHR and HRmax (HRmax>RHR)',
+      note: 'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)',
     );
   }
   final reserve = maxHr - restingHr;
   var trimp = 0.0;
   for (final hr in hrPerMin) {
-    if (hr <= 0) continue; // off-skin guard
+    if (!hr.isFinite || hr <= 0) continue; // off-skin + non-finite guard
     var hrr = (hr - restingHr) / reserve;
     if (hrr < 0) hrr = 0;
     if (hrr > 1) hrr = 1;
@@ -76,15 +82,80 @@ Metric<double> banisterTrimp(
   );
 }
 
-/// Fraction of heart-rate reserve that simply BEING AWAKE costs.
+/// Fraction of heart-rate reserve that simply BEING AWAKE costs — THE REFERENCE
+/// VALUE THE ANCHOR TABLE IS GENERATED AT, and nothing else.
 ///
 /// Whole-day Banister TRIMP counts every waking minute above resting, so ~16 h
 /// of ordinary living accrues ~180 TRIMP before any exercise happens. That is
 /// the cost of being alive, not training load, and billing it as load is what
-/// put an INACTIVE full-wear day at ~13/21 on the old scale. Quiet waking
-/// (sitting, standing, moving about the house) sits ≈20 % of HRR above resting,
-/// so that much is treated as the day's overhead rather than as effort.
+/// put an INACTIVE full-wear day at ~13/21 on the scale before the baseline
+/// subtraction existed.
+///
+/// IT IS NOT A DEFAULT ANY MORE (audit MOT-03, edge#226). 0.20 was a
+/// population figure standing in for a personal one, and it sat below where
+/// this user's quiet waking actually is (p50 0.274 HRR, whoop-4.db) — which
+/// left a day with no activity at all scoring 6.93–12.14 on a 0–21 scale, the
+/// band the anchor table calls "90 min hard session". Every entry point now
+/// takes the level as an argument; [dailyQuietWakingHrr] measures it from the
+/// user's own day. Passing this constant reproduces the anchor table exactly.
 const double quietWakingHrr = 0.20;
+
+/// The most a quiet-waking level may be and still be called quiet waking.
+///
+/// ACSM's moderate-intensity floor (40 % HRR). A day whose MEDIAN waking minute
+/// sits above it was not ordinary living, so it cannot define what ordinary
+/// living costs — [dailyQuietWakingHrr] abstains rather than hand back a level
+/// that would subtract the day's own training away.
+const double maxQuietHrr = 0.40;
+
+/// THIS user's quiet-waking level, measured: the MEDIAN per-minute HRR over a
+/// day's waking minutes. Percentile of self, never a population number.
+///
+/// The median, not the mean, and not a low percentile: a session is a small
+/// minority of minutes on any real day, so the median tracks ordinary living
+/// and ignores the training — while p10 or p25 would track sitting still
+/// specifically, which is lower than living costs and leaves the same
+/// over-billing this exists to remove.
+///
+/// PREFER A TRAILING VALUE. The day's own median is the right measurement of
+/// that day, but the quantity wanted is a TRAIT, and a day spent walking for
+/// eight hours would otherwise subtract its own effort away. Feed these into a
+/// rolling personal median and score against that; the guard below only refuses
+/// the most obvious offenders, it does not make a single day robust.
+///
+/// Returns null — never a stand-in — when the anchors are missing, non-finite
+/// or degenerate, when there are fewer than [minMinutes] measured waking
+/// minutes, or when the median clears [maxQuietHrr].
+double? dailyQuietWakingHrr(
+  List<double> hrPerMin, {
+  required double? restingHr,
+  required double? maxHr,
+  int minMinutes = 60,
+}) {
+  // Finiteness first: `maxHr <= restingHr` is false when either is NaN, and a
+  // NaN reserve survives BOTH clamps below (min/max propagate NaN) and both
+  // range checks at the bottom, so the function would hand back NaN as if it
+  // had measured something.
+  if (restingHr == null ||
+      maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
+      maxHr <= restingHr) {
+    return null;
+  }
+  final reserve = maxHr - restingHr;
+  final hrr = <double>[
+    // `hr > 0` already drops NaN, but not +infinity — which would clamp to 1.0
+    // and count a garbage sample as a maximal-effort minute.
+    for (final hr in hrPerMin)
+      if (hr.isFinite && hr > 0)
+        math.min(1.0, math.max(0.0, (hr - restingHr) / reserve)),
+  ];
+  if (hrr.length < minMinutes) return null;
+  final q = median(hrr);
+  if (q == null || q <= 0 || q > maxQuietHrr) return null;
+  return q;
+}
 
 /// Net TRIMP — earned ABOVE the quiet-waking baseline — that defines a maximal
 /// day and maps to the top of the scale.
@@ -114,15 +185,17 @@ const double maximalNetTrimp = 400.0;
 /// baseline subtraction included the scale SATURATES AT ≈3.25 h at 160 bpm
 /// (195 min) and ≈4.25 h at 150 bpm, so everything above that is one number.
 ///
-/// AND THE ANCHORS ARE NOT WHAT REAL DAYS SCORE. The convention above puts
-/// quiet waking at exactly 0.20 HRR; this user's measured wake minutes sit at
-/// p50 0.274 / p75 0.332 HRR (whoop-4.db, 9 full-wear days, RHR 55 / HRmax
-/// 187). At that real quiet level a day containing only 2–6 minutes above 50 %
-/// HRR scores 6.93 / 11.17 / 11.38 / 11.97 / 12.14 — i.e. a NOTHING-DAY lands
-/// in the band this table calls "90 min hard session". That gap is
-/// [quietWakingHrr] being too low for this user, not the map: it is audit
-/// MOT-03, it is not fixed here, and every number in this table moves when it
-/// is. Regenerate the table with the constant, never separately.
+/// THE TABLE ONLY HOLDS AT THE QUIET LEVEL IT WAS GENERATED AT, which is the
+/// point of MOT-03 (edge#226, fixed 2026-08-19). Generated at 0.20 HRR; this
+/// user's measured wake minutes sit at p50 0.274 / p75 0.332 HRR (whoop-4.db,
+/// 9 full-wear days, RHR 55 / HRmax 187), and scoring that user against a 0.20
+/// baseline put a day containing only 2–6 minutes above 50 % HRR at
+/// 6.93 / 11.17 / 11.38 / 11.97 / 12.14 — a NOTHING-DAY in the band this table
+/// calls "90 min hard session". The map was never the problem: at their own
+/// 0.274 the same day scores 0.00 and the same day plus an hour's walk scores
+/// 2.15, which is this table's "60 min walk" row. The quiet level is an
+/// argument now, so regenerate the table with whatever you pass, never
+/// separately.
 const double strainCurvature = 15.0;
 
 /// The TRIMP that [wakeMinutes] of ordinary waking accrues on its own.
@@ -144,25 +217,39 @@ const double strainCurvature = 15.0;
 /// form within ~1.5 points on gen4 but still breaks MG's honest zeros: 0.00 →
 /// 4.05/4.83.) The gated form is only defensible once [quietWakingHrr] is this
 /// user's own quiet level — MOT-03 — so it is blocked on that, not on taste.
-double baselineTrimp(double wakeMinutes, {bool female = false}) =>
-    wakeMinutes *
-    quietWakingHrr *
-    StrainScorer.banisterY(quietWakingHrr, female: female);
+///
+/// [quietHrr] is that level: [dailyQuietWakingHrr] measures it, and it is
+/// clamped to (0, [maxQuietHrr]] here so no caller can hand over a baseline
+/// that either vanishes or eats a whole day's training.
+double baselineTrimp(
+  double wakeMinutes, {
+  required double quietHrr,
+  bool female = false,
+}) {
+  final q = math.min(maxQuietHrr, math.max(0.0, quietHrr));
+  return wakeMinutes * q * StrainScorer.banisterY(q, female: female);
+}
 
 /// Log-map the TRIMP EARNED ABOVE baseline into a 0–21 headline "strain" score.
 ///
-///     net    = trimp − baselineTrimp(wakeMinutes)
+///     net    = trimp − baselineTrimp(wakeMinutes, quietHrr)
 ///     u      = min(1, net / maximalNetTrimp)
 ///     strain = 21 · ln(1 + u·(C−1)) / ln(C),  C = [strainCurvature]
 ///
 /// [wakeMinutes] is the observed waking wear window that produced [trimp] — it
-/// sets the baseline, so it is required rather than assumed.
+/// sets the baseline, so it is required rather than assumed. [quietHrr] is what
+/// a minute of that window costs this user when nothing is happening
+/// ([dailyQuietWakingHrr]); it is required for the same reason, and getting it
+/// wrong by 0.07 HRR is the difference between a nothing-day scoring 0 and
+/// scoring 12.
 double strainScore(
   double trimp, {
   required double wakeMinutes,
+  required double quietHrr,
   bool female = false,
 }) {
-  final net = trimp - baselineTrimp(wakeMinutes, female: female);
+  final net =
+      trimp - baselineTrimp(wakeMinutes, quietHrr: quietHrr, female: female);
   if (net <= 0) return 0.0;
   final u = math.min(1.0, net / maximalNetTrimp);
   final s =
@@ -173,24 +260,63 @@ double strainScore(
 /// Headline 0–21 strain as a Metric, alongside the raw TRIMP (EST tier).
 ///
 /// [trimp] the raw Banister TRIMP for the day/session, [wakeMinutes] the wake
-/// window it was accumulated over. Absent when either is missing: the baseline
-/// subtraction is meaningless without a wake window, and guessing one silently
-/// mis-scores every partial-wear day.
+/// window it was accumulated over, [quietHrr] this user's quiet-waking level
+/// ([dailyQuietWakingHrr]). Absent — with the reason in the note — when any is
+/// missing, non-finite, or out of range: the baseline
+/// subtraction is meaningless without a wake window, guessing one silently
+/// mis-scores every partial-wear day, and a stand-in quiet level is what scored
+/// a day with no activity in it at 12/21 (MOT-03).
 Metric<double> strainScoreMetric(
   double? trimp, {
   required double? wakeMinutes,
+  required double? quietHrr,
   bool female = false,
 }) {
-  const inputs = ['trimp', 'wake_minutes'];
-  if (trimp == null || trimp < 0 || wakeMinutes == null || wakeMinutes <= 0) {
+  const inputs = ['trimp', 'wake_minutes', 'quiet_waking_hrr'];
+  // EVERY RANGE CHECK IN THIS FUNCTION IS FALSE FOR NaN, so each one needs its
+  // finiteness partner. Without them a NaN input produces a PRESENT metric
+  // carrying a NaN value, which is worse than an absent one: everything
+  // downstream treats a present metric as measured.
+  if (trimp == null || !trimp.isFinite || trimp < 0) {
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'strain needs a TRIMP and the wake window it was measured over',
+      note: 'strain needs a finite TRIMP >= 0',
+    );
+  }
+  if (wakeMinutes == null || !wakeMinutes.isFinite || wakeMinutes <= 0) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'strain needs a finite wake window (minutes > 0) — it is what the '
+          'quiet-waking baseline is subtracted over',
+    );
+  }
+  if (quietHrr == null || !quietHrr.isFinite || quietHrr <= 0) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'strain needs this user\'s own quiet-waking HRR to subtract, '
+          'finite and > 0; without it the cost of simply being awake reads '
+          'as training load',
+    );
+  }
+  // NOT clamped through to [baselineTrimp]. It clamps to maxQuietHrr as a last
+  // resort, which would quietly score the day against a level nobody measured;
+  // a quiet level above the moderate-intensity floor is a broken measurement,
+  // and [dailyQuietWakingHrr] never emits one.
+  if (quietHrr > maxQuietHrr) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'quiet-waking HRR above $maxQuietHrr is not quiet waking — that '
+          'is ACSM\'s moderate-intensity floor, so the level would subtract '
+          'the day\'s own training away',
     );
   }
   return Metric<double>(
-    value: strainScore(trimp, wakeMinutes: wakeMinutes, female: female),
+    value: strainScore(trimp,
+        wakeMinutes: wakeMinutes, quietHrr: quietHrr, female: female),
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,

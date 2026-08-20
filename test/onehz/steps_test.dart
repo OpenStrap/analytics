@@ -809,7 +809,8 @@ void main() {
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       // 1440 minutes at a low HR (40% HRmax → below active surplus)
       final hr = List<double>.filled(1440, 70.0);
-      final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
+      final e = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
       expect(e.basal, closeTo(1780.0, 1.0));
       expect(e.active, closeTo(0.0, 60.0)); // tiny if any
       expect(e.total, greaterThanOrEqualTo(e.basal));
@@ -818,50 +819,89 @@ void main() {
     test('the flex gate moves with the CALLER-SUPPLIED ceiling, not 220−age',
         () {
       // TS-03a: there is no `220 − age` fallback left in here — `hrmax` is
-      // required, and it is the only thing that sets the flex gate. Two
-      // ceilings for the same 30 y/o (220−30 = 190 vs Tanaka 208−0.7·30 = 187)
-      // put the gate at 123.5 vs 121.55 bpm, so a day spent at 122 bpm is
-      // entirely basal on one and entirely active on the other. That divergence
-      // is the bug the single dispatched definition exists to remove; this pins
-      // that the number in front of it is what decides.
+      // required, and it is what sets the flex gate. Two ceilings for the same
+      // 30 y/o (220−30 = 190 vs Tanaka 208−0.7·30 = 187) put the gate at 112.0
+      // vs 110.8 bpm at RHR 60, so a day spent at 111 bpm is entirely basal on
+      // one and entirely active on the other. That divergence is the bug the
+      // single dispatched definition exists to remove; this pins that the
+      // number in front of it is what decides.
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
-      final hr = List<double>.filled(1440, 122.0);
-      final wide = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
-      final tanaka = Calories.dailyEnergy(hr, profile: profile, hrmax: 187);
+      final hr = List<double>.filled(1440, 111.0);
+      final wide = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      final tanaka = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 187, restingHr: 60)!;
       expect(wide.active, 0.0);
       expect(tanaka.active, greaterThan(0.0));
     });
 
-    test('MOT-02: the flex point is 0.65·HRmax, not 0.50 — a 100 bpm day is '
-        'not "active"', () {
-      // 0.50 put the gate at 93.5 bpm for a 30 y/o, inside the region where
+    test('MOT-02: a 100 bpm day is not "active"', () {
+      // The gate sits at the ACSM moderate floor, well above the region where
       // Keytel is extrapolating off the end of its own fitted exercise data.
       // MEASURED on whoop-4.db (9 days, 70 kg/170 cm/30 y male stand-in, Tanaka
-      // 187): billed wake minutes 39.4 % → 4.9 %, daily ACTIVE energy
-      // min/median/max 769/1955/4062 → 9/48/1917 kcal, daily TOTAL
-      // 1544–5582 → 793–3437 kcal. Everyone's active energy drops; the quiet
-      // days lose nearly all of it, which is the point.
-      expect(Calories.defaultActiveFraction, 0.65);
+      // 187) when the gate first moved: billed wake minutes 39.4 % → 4.9 %,
+      // daily ACTIVE energy min/median/max 769/1955/4062 → 9/48/1917 kcal.
+      // Everyone's active energy drops; the quiet days lose nearly all of it,
+      // which is the point.
       final profile = const WorkoutUserProfile(
           weightKg: 70, heightCm: 170, age: 30, sex: 'male');
-      // 16 h of ordinary waking at 100 bpm — clears the old gate, not the new.
+      // 16 h of ordinary waking at 100 bpm — under the gate (60 + 0.4·127 =
+      // 110.8), so none of it is billed as exercise.
       final quiet = List<double>.filled(960, 100.0);
-      expect(Calories.dailyEnergy(quiet, profile: profile, hrmax: 187).active,
-          0.0);
       expect(
           Calories.dailyEnergy(quiet,
-                  profile: profile, hrmax: 187, activeFraction: 0.50)
+                  profile: profile, hrmax: 187, restingHr: 60)!
               .active,
-          greaterThan(4000.0),
-          reason: 'the number the old gate published for sitting around');
+          0.0);
       // A real session still bills: 45 min at 145 bpm.
       final session = <double>[
         ...List<double>.filled(915, 100.0),
         ...List<double>.filled(45, 145.0),
       ];
-      expect(Calories.dailyEnergy(session, profile: profile, hrmax: 187).active,
+      expect(
+          Calories.dailyEnergy(session,
+                  profile: profile, hrmax: 187, restingHr: 60)!
+              .active,
           closeTo(553.0, 5.0));
+    });
+
+    test('#43: the day and the bout bill the same minute the same way', () {
+      // They used to disagree by 8–35 bpm: the day gated at 0.65·HRmax, the
+      // bout at rest + 0.30·HRR. Same stream, same minute, two answers.
+      const profile = WorkoutUserProfile(
+          weightKg: 72, heightCm: 178, age: 34, sex: 'male');
+      const hrmax = 184.2, rhr = 55.0;
+      final gate = Calories.activeGateHr(hrmax, rhr)!;
+      expect(gate, closeTo(106.68, 0.01));
+
+      final restingKcalPerMin =
+          Calories.restingKcalPerS(Calories.male, 72, 178, 34) * 60;
+      final ts = List<int>.generate(60, (i) => i);
+
+      for (final (hr, active) in [(gate - 1, false), (gate + 1, true)]) {
+        final day = Calories.dailyEnergy(List<double>.filled(60, hr),
+            profile: profile, hrmax: hrmax, restingHr: rhr)!;
+        final bout = Calories.estimateBoutCalories(
+            ts, List<double>.filled(60, hr),
+            profile: profile, hrmax: hrmax, restingHr: rhr);
+        expect(day.active > 0, active, reason: 'day at $hr bpm');
+        expect(bout.kcal > restingKcalPerMin + 1e-9, active,
+            reason: 'bout at $hr bpm');
+      }
+    });
+
+    test('#43: the gate scales with the individual, not just with age', () {
+      // 0.65·Tanaka is 135.2 − 0.455·age: it falls with age while resting HR
+      // does not, so it drifted toward rest for the old (gate 11.5 bpm over
+      // rest for a 70 y/o at RHR 68) and away from it for the young and fit
+      // (50.2 bpm over rest at RHR 45). Against reserve, all three sit at the
+      // same effort.
+      expect(Calories.activeGateHr(159.0, 68.0), closeTo(104.4, 0.05));
+      expect(Calories.activeGateHr(184.2, 55.0), closeTo(106.7, 0.05));
+      expect(Calories.activeGateHr(190.5, 45.0), closeTo(103.2, 0.05));
+      expect(Calories.activeHRRFraction, 0.40,
+          reason: 'ACSM moderate floor: 40 % HRR ≡ 64 % HRmax');
     });
 
     test('an exercise block adds active calories on top of basal', () {
@@ -871,9 +911,68 @@ void main() {
         ...List<double>.filled(1380, 65.0),
         ...List<double>.filled(60, 150.0), // 1 h hard
       ];
-      final e = Calories.dailyEnergy(hr, profile: profile, hrmax: 190);
+      final e = Calories.dailyEnergy(hr,
+          profile: profile, hrmax: 190, restingHr: 60)!;
       expect(e.active, greaterThan(300.0));
       expect(e.total, closeTo(e.basal + e.active, 1e-6));
+    });
+
+    test('an unusable anchor is NO gate, not a loose one', () {
+      // `restingHr + 0.40·(hrmax − restingHr)` is NaN if either anchor is, and
+      // `hr < NaN` is false for EVERY hr — so the day used to bill every single
+      // minute at the Keytel active rate and publish a silently enormous kcal
+      // figure instead of failing visibly.
+      const profile = WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      final hr = List<double>.filled(1440, 70.0);
+      final ts = List<int>.generate(60, (i) => i);
+
+      for (final (hrmax, rhr) in [
+        (190.0, double.nan),
+        (double.nan, 60.0),
+        (double.infinity, 60.0),
+        (190.0, double.infinity),
+        (190.0, 0.0), // a rest of zero is not a reserve anchor
+        (190.0, -5.0),
+        (190.0, 190.0), // no reserve at all
+        (60.0, 190.0), // rest above the ceiling
+      ]) {
+        expect(Calories.activeGateHr(hrmax, rhr), isNull,
+            reason: 'gate for hrmax=$hrmax rhr=$rhr');
+        expect(
+            Calories.dailyEnergy(hr,
+                profile: profile, hrmax: hrmax, restingHr: rhr),
+            isNull,
+            reason: 'day for hrmax=$hrmax rhr=$rhr');
+        // The bout keeps its documented 220/60 fallback — an unusable anchor is
+        // an ABSENT anchor — and is flagged, which is what edge reads to decide
+        // whether the kcal figure may be persisted at all.
+        final bout = Calories.estimateBoutCalories(
+            ts, List<double>.filled(60, 130.0),
+            profile: profile, hrmax: hrmax, restingHr: rhr);
+        expect(bout.usedDefaultAnchors, isTrue,
+            reason: 'bout for hrmax=$hrmax rhr=$rhr');
+        expect(bout.kcal.isFinite, isTrue,
+            reason: 'bout for hrmax=$hrmax rhr=$rhr');
+      }
+    });
+
+    test('a non-finite HR sample is dropped, not billed', () {
+      const profile = WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      final clean = List<double>.filled(60, 150.0);
+      final dirty = [...clean, double.nan, double.infinity];
+      final a = Calories.dailyEnergy(clean,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      final b = Calories.dailyEnergy(dirty,
+          profile: profile, hrmax: 190, restingHr: 60)!;
+      expect(b.active, closeTo(a.active, 1e-9));
+
+      final bout = Calories.estimateBoutCalories(
+          List<int>.generate(dirty.length, (i) => i), dirty,
+          profile: profile, hrmax: 190, restingHr: 60);
+      expect(bout.kcal.isFinite, isTrue);
+      expect(bout.usedDefaultAnchors, isFalse);
     });
   });
 

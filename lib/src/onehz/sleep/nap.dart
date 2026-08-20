@@ -69,12 +69,31 @@ class NapWindow {
   /// wrist-on telemetry corroborated it. NOT sleep efficiency.
   final double confidence;
 
+  /// The bout was ALREADY IN PROGRESS at the first sample of the record, so
+  /// [startSec] is where the RECORD opens, not where the sleep began.
+  ///
+  /// The mirror of the trailing-edge deferral. A bout running past the last
+  /// sample has no knowable end and is never emitted; a bout running before the
+  /// first sample has no knowable start, but it DOES have a knowable end, so
+  /// dropping it would lose a real nap. It is emitted with this flag instead,
+  /// and the caller decides — a caller slicing days at local midnight can defer
+  /// on this evidence rather than infer the same thing from a timestamp
+  /// tolerance and lose the nap whenever the band only started recording there.
+  ///
+  /// Propagated FORWARD through [napChainGapSec] exactly as `unfinished` is
+  /// propagated backward: a five-minute arousal splits one episode into two
+  /// bouts, and the fragment after it is just as edge-anchored as the first.
+  ///
+  /// [tibSec]/[tstSec] are what the record shows, not what the episode was.
+  final bool startsAtRecordEdge;
+
   const NapWindow({
     required this.startSec,
     required this.endSec,
     required this.tibSec,
     required this.tstSec,
     required this.confidence,
+    this.startsAtRecordEdge = false,
   });
 
   /// Fraction of the bout actually spent asleep, in [0, 1].
@@ -87,6 +106,7 @@ class NapWindow {
         'tst_sec': tstSec,
         'efficiency': round6(efficiency),
         'confidence': round6(confidence),
+        'starts_at_record_edge': startsAtRecordEdge,
       };
 }
 
@@ -198,6 +218,12 @@ Metric<List<NapWindow>> detectNaps(
   // the still test outright instead of contributing the constant 0.0° of an
   // exact (0,0,0) sample — which is what emitted a 50-minute decode gap as a
   // nap at the 0.85 confidence cap.
+  //
+  // At k == 0 there is no predecessor to test, so the discontinuity check is
+  // skipped and the second is taken at face value. That is not a decision that
+  // can be made better here — the record simply does not say what happened
+  // before it — so it is REPORTED instead, via [NapWindow.startsAtRecordEdge]
+  // below.
   bool stillAt(int k) =>
       mask.deltaDeg[k] < thr && (k == 0 || absAt(k) - absAt(k - 1) == 1);
 
@@ -250,6 +276,27 @@ Metric<List<NapWindow>> detectNaps(
         absAt(bouts[b + 1][0]) - (absAt(bouts[b][1] - 1) + 1) <
             napChainGapSec) {
       unfinished[b] = true;
+    }
+  }
+
+  // Which bouts sit against the START of the record, walking FORWARD — the
+  // mirror of `unfinished`. Only the FIRST bout can touch index 0, and any bout
+  // chained to it within `napChainGapSec` is a fragment of the same episode, so
+  // it is edge-anchored too.
+  //
+  // Unlike `unfinished` this does NOT suppress the bout: a leading-edge bout
+  // has a knowable END, so it is a real, measurable episode with an unknown
+  // start rather than an unknowable one. It is emitted with the flag set and
+  // the caller decides. It also stays in the awake-HR pool below, for the same
+  // reason — it is judged, not deferred.
+  final startsAtEdge = List<bool>.filled(bouts.length, false);
+  for (var b = 0; b < bouts.length; b++) {
+    if (b == 0) {
+      startsAtEdge[0] = bouts[0][0] == 0;
+    } else if (startsAtEdge[b - 1] &&
+        absAt(bouts[b][0]) - (absAt(bouts[b - 1][1] - 1) + 1) <
+            napChainGapSec) {
+      startsAtEdge[b] = true;
     }
   }
 
@@ -433,6 +480,7 @@ Metric<List<NapWindow>> detectNaps(
       tibSec: tib,
       tstSec: tst,
       confidence: conf,
+      startsAtRecordEdge: startsAtEdge[bi],
     ));
   }
 
@@ -462,7 +510,12 @@ Metric<List<NapWindow>> detectNaps(
     if (offWrist > 0) '$offWrist off-wrist/excluded',
     if (awakeStill > 0) '$awakeStill still but no HR dip',
   ];
-  final tail = skipped.isEmpty ? '' : '; skipped: ${skipped.join(', ')}';
+  final atEdge = naps.where((x) => x.startsAtRecordEdge).length;
+  final tail = (skipped.isEmpty ? '' : '; skipped: ${skipped.join(', ')}') +
+      (atEdge == 0
+          ? ''
+          : '; $atEdge already in progress at the first sample '
+              '(start_sec is the record edge, not the sleep onset)');
 
   return Metric<List<NapWindow>>(
     value: naps,

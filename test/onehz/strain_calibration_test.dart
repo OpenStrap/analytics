@@ -35,7 +35,12 @@ List<double> dayHr(
 }
 
 /// Full pipeline: per-minute HR → Banister TRIMP → headline 0–21 strain.
-double strainOfDay(List<double> hr) {
+///
+/// [quietHrr] defaults to the convention the anchor table in load_trimp.dart is
+/// generated at, so these anchors reproduce that table exactly. Real callers
+/// pass the user's own measured level ([dailyQuietWakingHrr]) — see the MOT-03
+/// group below for what that does.
+double strainOfDay(List<double> hr, {double quietHrr = quietWakingHrr}) {
   final trimp = banisterTrimp(
     hr,
     restingHr: kRhr,
@@ -43,7 +48,8 @@ double strainOfDay(List<double> hr) {
     sex: Sex.male,
   );
   expect(trimp.present, isTrue, reason: 'anchors need a real TRIMP');
-  return strainScore(trimp.value!, wakeMinutes: hr.length.toDouble());
+  return strainScore(trimp.value!,
+      wakeMinutes: hr.length.toDouble(), quietHrr: quietHrr);
 }
 
 void main() {
@@ -90,23 +96,6 @@ void main() {
       expect(strainOfDay(dayHr(960, 85, [(195, 160)])), closeTo(21.0, 1e-9));
     });
 
-    test('MOT-04/MOT-03: at this user MEASURED quiet level a nothing-day still '
-        'scores ~12 — the known defect, pinned', () {
-      // The anchors above put quiet waking at exactly `quietWakingHrr` = 0.20.
-      // whoop-4.db says this user's real wake minutes sit at p50 0.274 HRR
-      // (RHR 55 / HRmax 187), and at that level a full-wear day with no
-      // exercise at all scores in the band the table calls "90 min hard".
-      // Measured on the real corpus: 6.93 / 11.17 / 11.38 / 11.97 / 12.14 over
-      // the five quiet days. THIS TEST IS EXPECTED TO FAIL WHEN MOT-03 LANDS —
-      // when it does, that is the fix arriving, and the anchor table in
-      // load_trimp.dart has to be regenerated in the same change.
-      const rhr = 55.0, hrMax = 187.0;
-      final quietBpm = rhr + 0.274 * (hrMax - rhr); // 91.2 bpm
-      final trimp = banisterTrimp(List<double>.filled(960, quietBpm),
-          restingHr: rhr, maxHr: hrMax, sex: Sex.male);
-      expect(strainScore(trimp.value!, wakeMinutes: 960), closeTo(11.9, 0.6));
-    });
-
     test('short wear with no activity is not scored as effort', () {
       // Real bundle 2026-07-10: band worn ~135 waking minutes, 23 steps.
       // The baseline must scale with wear, or a 2-hour inactive wear window
@@ -120,13 +109,99 @@ void main() {
       final hard = strainOfDay(dayHr(960, 85, [(120, 170)]));
       expect(easy, lessThan(mid));
       expect(mid, lessThan(hard));
-      expect(strainScore(1e9, wakeMinutes: 960), closeTo(21.0, 1e-9));
-      expect(strainScore(0, wakeMinutes: 960), 0.0);
+      expect(strainScore(1e9, wakeMinutes: 960, quietHrr: quietWakingHrr),
+          closeTo(21.0, 1e-9));
+      expect(strainScore(0, wakeMinutes: 960, quietHrr: quietWakingHrr), 0.0);
     });
 
     test('never returns a negative strain when load is under baseline', () {
       // Asleep-ish all day: TRIMP well below the quiet-waking allowance.
-      expect(strainScore(1.0, wakeMinutes: 960), 0.0);
+      expect(strainScore(1.0, wakeMinutes: 960, quietHrr: quietWakingHrr), 0.0);
+    });
+  });
+
+  // THE FIX for edge#226 / MOT-03. The 0.20 convention above is not this user's
+  // quiet level, and scoring them against it billed the cost of being awake as
+  // training load.
+  group('MOT-03 — the quiet-waking level is the USER\'S, not a constant', () {
+    // whoop-4.db: this user's wake minutes sit at p50 0.274 HRR, RHR 55.
+    const rhr = 55.0, hrMax = 187.0;
+    final quietBpm = rhr + 0.274 * (hrMax - rhr); // 91.2 bpm
+
+    double scored(List<double> hr, {double? quietHrr}) {
+      final trimp =
+          banisterTrimp(hr, restingHr: rhr, maxHr: hrMax, sex: Sex.male);
+      return strainScore(trimp.value!,
+          wakeMinutes: hr.length.toDouble(),
+          quietHrr: quietHrr ??
+              dailyQuietWakingHrr(hr, restingHr: rhr, maxHr: hrMax)!);
+    }
+
+    test('a nothing-day scores 0, where it used to score ~12', () {
+      final nothing = List<double>.filled(960, quietBpm);
+      expect(scored(nothing, quietHrr: 0.20), closeTo(11.93, 0.05),
+          reason: 'what the shipped constant published for doing nothing');
+      expect(scored(nothing), 0.0);
+    });
+
+    test('and a light day is NOT flattened into the same bucket', () {
+      // The defect flattened the whole bottom of the scale: doing nothing and
+      // doing an hour's walk were 11.93 vs 12.61, indistinguishable on a 0–21
+      // dial. They now sit two and a half points apart, and the rest of the
+      // scale stays graded rather than collapsing to zero with it.
+      final walk = <double>[
+        ...List<double>.filled(900, quietBpm),
+        ...List<double>.filled(60, 105.0),
+      ];
+      final run = <double>[
+        ...List<double>.filled(915, quietBpm),
+        ...List<double>.filled(45, 145.0),
+      ];
+      final hard = <double>[
+        ...List<double>.filled(870, quietBpm),
+        ...List<double>.filled(90, 165.0),
+      ];
+      expect(scored(walk, quietHrr: 0.20), closeTo(12.61, 0.05));
+      expect(scored(walk), closeTo(2.78, 0.05));
+      expect(scored(run), closeTo(8.72, 0.05));
+      expect(scored(hard), closeTo(16.49, 0.05));
+    });
+
+    test('a user whose quiet really IS 0.20 barely moves', () {
+      // The anchor profile: RHR 60, quiet waking at 85 bpm = 0.1969 HRR. The
+      // fix is not a global re-scaling — it only bites where the constant was
+      // wrong for the person.
+      final nothing = List<double>.filled(960, 85.0);
+      expect(dailyQuietWakingHrr(nothing, restingHr: 60, maxHr: hrMax),
+          closeTo(0.1969, 0.001));
+      expect(strainOfDay(nothing), 0.0);
+      expect(
+          strainOfDay(nothing,
+              quietHrr:
+                  dailyQuietWakingHrr(nothing, restingHr: 60, maxHr: hrMax)!),
+          0.0);
+    });
+
+    test('an exercise-dominated day cannot define quiet waking', () {
+      // Otherwise an all-day hike subtracts its own effort away and scores 0.
+      final hike = List<double>.filled(960, rhr + 0.45 * (hrMax - rhr));
+      expect(dailyQuietWakingHrr(hike, restingHr: rhr, maxHr: hrMax), isNull);
+      // Just under the moderate floor it is still ordinary living.
+      final busy = List<double>.filled(960, rhr + 0.35 * (hrMax - rhr));
+      expect(dailyQuietWakingHrr(busy, restingHr: rhr, maxHr: hrMax),
+          closeTo(0.35, 1e-9));
+    });
+
+    test('no anchors, or too few minutes, is null — never a stand-in', () {
+      final day = List<double>.filled(960, quietBpm);
+      expect(dailyQuietWakingHrr(day, restingHr: null, maxHr: hrMax), isNull);
+      expect(dailyQuietWakingHrr(day, restingHr: rhr, maxHr: null), isNull);
+      expect(dailyQuietWakingHrr(day.take(30).toList(), restingHr: rhr, maxHr: hrMax),
+          isNull);
+      // Off-skin zeros are not minutes.
+      expect(
+          dailyQuietWakingHrr(List<double>.filled(960, 0), restingHr: rhr, maxHr: hrMax),
+          isNull);
     });
   });
 
@@ -134,12 +209,28 @@ void main() {
     test('abstains without wake minutes rather than assuming a full day', () {
       // Wake minutes set the baseline. Guessing one fabricates the subtraction
       // and silently mis-scores every partial-wear day.
-      expect(strainScoreMetric(300, wakeMinutes: null).present, isFalse);
-      expect(strainScoreMetric(null, wakeMinutes: 960).present, isFalse);
+      expect(
+          strainScoreMetric(300, wakeMinutes: null, quietHrr: quietWakingHrr)
+              .present,
+          isFalse);
+      expect(
+          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr)
+              .present,
+          isFalse);
     });
 
-    test('present and ESTIMATE-tier with both inputs', () {
-      final m = strainScoreMetric(392.9, wakeMinutes: 960);
+    test('abstains without a quiet-waking level rather than assuming one', () {
+      // The whole of MOT-03: a stand-in level is what billed being awake as
+      // training load. No level, no score.
+      final m = strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: null);
+      expect(m.present, isFalse);
+      expect(m.note, contains('quiet-waking'));
+      expect(m.inputs_used, contains('quiet_waking_hrr'));
+    });
+
+    test('present and ESTIMATE-tier with every input', () {
+      final m =
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr);
       expect(m.present, isTrue);
       expect(m.tier, Tier.estimate);
       expect(m.value, greaterThan(14.0));

@@ -408,6 +408,52 @@ void main() {
               'neither is a nap that happened today');
       expect(m.note, contains('deferred'));
     });
+
+    test('a bout already running at the record START is FLAGGED, not dropped',
+        () {
+      // The mirror of the deferral above. This end has a knowable END, so the
+      // episode is real and measurable — only its onset is unknown. Dropping it
+      // loses a genuine nap whenever the band started recording mid-bout;
+      // emitting it silently claims it began at the record edge. Flag it and
+      // let the caller decide.
+      final d = _Day()
+        ..still(40) // record opens mid-nap
+        ..active(120);
+
+      final m = detectNaps(d.accel, d.hr);
+
+      expect(m.value, hasLength(1));
+      expect(m.value!.single.startsAtRecordEdge, isTrue);
+      expect(m.note, contains('already in progress at the first sample'));
+      expect(m.value!.single.toJson()['starts_at_record_edge'], isTrue);
+    });
+
+    test('a nap with observed sides is NOT flagged', () {
+      final d = _Day()
+        ..active(120)
+        ..still(30)
+        ..active(120);
+
+      expect(detectNaps(d.accel, d.hr).value!.single.startsAtRecordEdge,
+          isFalse);
+    });
+
+    test('the flag propagates FORWARD through a chained fragment', () {
+      // Symmetric with the backward propagation of `unfinished`: an awakening
+      // longer than the 5-minute bridge splits one edge-anchored episode into
+      // two bouts, and the second is just as much a fragment of a sleep that
+      // started before the record as the first.
+      final d = _Day()
+        ..still(40)
+        ..active(6, bpm: 70) // 6 min awakening — over the bridge, under the chain
+        ..still(40)
+        ..active(120);
+
+      final naps = detectNaps(d.accel, d.hr).value!;
+
+      expect(naps, hasLength(2));
+      expect(naps.every((n) => n.startsAtRecordEdge), isTrue);
+    });
   });
 
   group('detectNaps — the HR baseline is genuinely awake', () {
