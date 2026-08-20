@@ -17,6 +17,7 @@ export 'sleep_regularity.dart';
 export 'event_detection.dart';
 export 'coaching.dart';
 export 'weekday_effect.dart';
+export 'associations.dart';
 export 'alertness_forecast.dart';
 export 'session_cost.dart';
 export 'overreaching_conjunction.dart';
