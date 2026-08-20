@@ -674,11 +674,14 @@ CardioStagerResult classifyCardioEpochs(
       for (var k = lo; k < hi; k++)
         if (still(k) && !hr[k].isNaN) hr[k]
     ];
-    final m = median(win);
+    // One sort for both percentiles of this 361-epoch window (stddev doesn't
+    // care about order). `win` is freshly built here, so sorting it is local.
+    win.sort();
+    final m = percentileSorted(win, 50);
     if (m != null) {
       hrMedLocal[e] = m;
       hrArousalLocal[e] = m + math.max(6.0, (stddev(win) ?? 6));
-      hrP25Local[e] = percentile(win, 25) ?? m;
+      hrP25Local[e] = percentileSorted(win, 25) ?? m;
     }
   }
   // Blend the per-epoch LOCAL HR gates toward the sleeper's rolling profile.
@@ -872,13 +875,14 @@ CardioStagerResult classifyCardioEpochs(
   // Only when the edge armed recording AND the staged span is a real sleep
   // (≥60 min) — naps must not pollute the sleeper's night profile.
   if (cardioRecordObservations && nEpoch >= 120 && sleepHr.isNotEmpty) {
+    final hrSleepMed = median(sleepHr);
     _cardioObservations.add(SleepNightObservation(
       epochs: nEpoch,
       hrFloorP5: percentile(sleepHr, 5),
       hrFloorP25: percentile(sleepHr, 25),
-      hrSleepMedian: median(sleepHr),
-      hrArousal: (median(sleepHr) ?? hrMedGlobal) +
-          math.max(6.0, stddev(sleepHr) ?? 6.0),
+      hrSleepMedian: hrSleepMed,
+      hrArousal:
+          (hrSleepMed ?? hrMedGlobal) + math.max(6.0, stddev(sleepHr) ?? 6.0),
       rmssdMed: rmssdMed,
       rmssdMad: mad(sleepRmssd),
       enmoStillCut: motMed + 1.5 * motMad,

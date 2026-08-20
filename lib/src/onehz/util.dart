@@ -40,10 +40,14 @@ double? stddevPop(List<double> xs) {
   return math.sqrt(s / xs.length);
 }
 
-/// Linear-interpolated percentile (p in [0,100]); null if empty.
-double? percentile(List<double> values, double p) {
-  if (values.isEmpty) return null;
-  final sorted = [...values]..sort();
+/// Linear-interpolated percentile (p in [0,100]) of an ALREADY-ASCENDING list;
+/// null if empty. For when you hold a sorted list already, or want several
+/// percentiles of one window without re-sorting it each time.
+///
+/// Null on empty, never 0 — a 0.0 is a measurement, and an empty window is the
+/// absence of one.
+double? percentileSorted(List<double> sorted, double p) {
+  if (sorted.isEmpty) return null;
   if (sorted.length == 1) return sorted[0];
   final rank = (p / 100) * (sorted.length - 1);
   final lo = rank.floor();
@@ -52,6 +56,10 @@ double? percentile(List<double> values, double p) {
   final frac = rank - lo;
   return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
 }
+
+/// Linear-interpolated percentile (p in [0,100]); null if empty.
+double? percentile(List<double> values, double p) =>
+    percentileSorted([...values]..sort(), p);
 
 /// Median (linear-interpolated), or null if empty.
 double? median(List<double> xs) => percentile(xs, 50);
