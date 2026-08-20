@@ -675,13 +675,20 @@ CardioStagerResult classifyCardioEpochs(
       for (var k = lo; k < hi; k++)
         if (still(k) && !hr[k].isNaN) hr[k]
     ];
-    // One sort for both percentiles of this 361-epoch window (stddev doesn't
-    // care about order). `win` is freshly built here, so sorting it is local.
+    // BEFORE the sort, and that is not fussiness: `stddev` sums `(x-m)^2` in
+    // list order and mean sums in list order too, so re-ordering the window
+    // changes the last bits of both. Algebraically order-free, in float it is
+    // not, and this feeds `hrArousalLocal` — which decides wake epochs near the
+    // threshold. Computing it here keeps this refactor bit-identical, which is
+    // the whole contract of the change.
+    final sd = stddev(win);
+    // One sort for both percentiles of this 361-epoch window. `win` is freshly
+    // built here, so sorting it is local.
     win.sort();
     final m = percentileSorted(win, 50);
     if (m != null) {
       hrMedLocal[e] = m;
-      hrArousalLocal[e] = m + math.max(6.0, (stddev(win) ?? 6));
+      hrArousalLocal[e] = m + math.max(6.0, (sd ?? 6));
       hrP25Local[e] = percentileSorted(win, 25) ?? m;
     }
   }
