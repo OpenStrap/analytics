@@ -366,8 +366,9 @@ void resetCardioObservations() => _cardioObservations.clear();
 /// [hr1hz] per-second HR (bpm; 0 = off-skin) over the in-bed window.
 /// [accel] per-second gravity vectors, SAME length/time base as [hr1hz].
 /// [rrMs] / [rrTsMs] beat-to-beat RR (ms) and their ABSOLUTE times (ms), same
-///   clock as `accel[i].tsMs`. Sparse/empty is fine — REM/deep just lean more on
-///   HR and confidence drops.
+///   clock as `accel[i].tsMs`, ASCENDING in [rrTsMs] (the per-epoch window
+///   gather lower-bounds into it). Sparse/empty is fine — REM/deep just lean
+///   more on HR and confidence drops.
 CardioStagerResult cardioStager(
   List<double> hr1hz,
   List<AccelSample> accel, {
@@ -1011,12 +1012,28 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   if (mid >= accel.length) return empty;
   final centreMs = accel[mid].tsMs;
   final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
+  // [rrTsMs] is ascending, so lower-bound into it and stop at the far edge
+  // instead of walking every beat of the night once per epoch per feature.
+  //
+  // TRUE lower bound — the first index with ts >= lo, NOT the first index
+  // strictly greater than lo. `rr_ts_ms` is `rec_ts * 1000`, so beats TIE on
+  // the second boundary; dropping the tied beats at a window edge changes
+  // RMSSD / SDNN / LF-HF and with them the REM and deep epoch counts, silently.
+  var a = 0, b = rrTsMs.length;
+  while (a < b) {
+    final m = (a + b) >> 1;
+    if (rrTsMs[m] < lo) {
+      a = m + 1;
+    } else {
+      b = m;
+    }
+  }
   final beats = <double>[];
   final tsSec = <double>[];
   double? prev;
-  for (var i = 0; i < rrMs.length; i++) {
+  for (var i = a; i < rrMs.length; i++) {
     final ts = rrTsMs[i];
-    if (ts < lo || ts > hi) continue;
+    if (ts > hi) break;
     final v = rrMs[i];
     if (v < _rrMin || v > _rrMax) {
       prev = null;
@@ -1040,6 +1057,19 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   }
   return (beats: beats, tsSec: tsSec);
 }
+
+/// [_cleanBeatsInWindow]'s beats, exposed so the window-edge regression test
+/// can drive the gather directly. Not a staging entry point — call
+/// [cardioStager].
+List<double> cleanBeatsInWindowForTest(
+  List<double> rrMs,
+  List<double> rrTsMs,
+  List<AccelSample> accel,
+  int s,
+  int t, {
+  int halfWinMs = 150 * 1000,
+}) =>
+    _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: halfWinMs).beats;
 
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
 /// are re-labelled sleep (NREM). This is the published actigraphy step that
