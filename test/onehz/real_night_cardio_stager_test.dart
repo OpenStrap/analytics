@@ -45,6 +45,8 @@ import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
 void main() {
+  _windowEdgeTies();
+
   test('cardioStager on the real 2026-07 overnight capture matches Apple '
       'Watch ground truth within a wide band (regression: was wake=294min '
       'rem=41min pre-fix)', () {
@@ -133,5 +135,39 @@ void main() {
     // Sanity: the four buckets still account for the whole session.
     final tot = wakeMin + lightMin + deepMin + remMin;
     expect(tot, closeTo(stages.length * epochMin, 0.01));
+  });
+}
+
+// The per-epoch RR window is found by binary search. `rr_ts_ms` is
+// `rec_ts * 1000`, so beat timestamps TIE — several beats share one second,
+// and a second boundary can land exactly on a window edge. The search must be
+// a TRUE lower bound (first index >= lo) and the far edge must be inclusive;
+// "first index strictly greater than lo" drops the tied beats at the edge,
+// which moves RMSSD / SDNN / LF-HF and with them the REM and deep counts.
+void _windowEdgeTies() {
+  test('window gather keeps tied beats at BOTH edges', () {
+    final accel = <AccelSample>[
+      for (var i = 0; i < 30; i++) AccelSample(i * 1000.0, 0, 0, 1)
+    ];
+    // epoch [0,30) -> mid 15 -> centre 15000 ms; ±5 s -> window [10000, 20000].
+    final ts = <double>[
+      9000, // just before -> out
+      10000, 10000, 10000, // tie ON the low edge -> in
+      15000,
+      20000, 20000, 20000, // tie ON the high edge -> in
+      21000, // just after -> out
+    ];
+    final rr = <double>[for (var i = 0; i < ts.length; i++) 900.0];
+
+    final beats =
+        cleanBeatsInWindowForTest(rr, ts, accel, 0, 30, halfWinMs: 5000);
+    // 7, not 4 (low ties dropped) and not 5 (both edges exclusive).
+    expect(beats.length, 7);
+
+    // and the beats really are the in-window ones, in order.
+    final marked = <double>[900, 901, 902, 903, 904, 905, 906, 907, 908];
+    final got =
+        cleanBeatsInWindowForTest(marked, ts, accel, 0, 30, halfWinMs: 5000);
+    expect(got, [901, 902, 903, 904, 905, 906, 907]);
   });
 }

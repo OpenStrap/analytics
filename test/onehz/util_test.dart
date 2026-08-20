@@ -16,6 +16,15 @@ void main() {
       expect(stddev([5]), isNull);
     });
 
+    test('percentileSorted matches percentile and stays null on empty', () {
+      final sorted = [1.0, 2.0, 3.0, 4.0];
+      expect(percentileSorted(sorted, 50), percentile(sorted, 50));
+      expect(percentileSorted(sorted, 25), percentile(sorted, 25));
+      expect(percentileSorted([7.0], 25), 7.0);
+      // NOT 0 — an empty window is no measurement, not a 0 bpm floor.
+      expect(percentileSorted([], 25), isNull);
+    });
+
     test('MAD and robust z; MAD=0 guard on quantized data', () {
       // [1,1,1,1,1] -> median 1, MAD 0 => robustZ null (not div-by-zero).
       expect(mad([1, 1, 1, 1, 1], scaled: false), 0);
