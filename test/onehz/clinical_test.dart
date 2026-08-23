@@ -623,7 +623,7 @@ void main() {
         const HrSample(120000, 150), // z3 for 60 s
         const HrSample(180000, 170), // z4 for 60 s
         const HrSample(240000, 190), // z5 for tail median 60 s
-      ], zoneSet);
+      ], zoneSet)!;
       expect(time.secondsInZone(1), closeTo(60, 1e-9));
       expect(time.secondsInZone(2), closeTo(60, 1e-9));
       expect(time.secondsInZone(3), closeTo(60, 1e-9));
@@ -640,7 +640,7 @@ void main() {
         const HrSample(1000, 150), // z3
         const HrSample(2000, 190), // z5, next gap huge
         const HrSample(700000, 190), // huge gap capped to 1 s
-      ], zoneSet);
+      ], zoneSet)!;
       expect(time.secondsInZone(2), closeTo(1, 1e-9));
       expect(time.secondsInZone(3), closeTo(1, 1e-9));
       expect(time.secondsInZone(5), closeTo(2, 1e-9));

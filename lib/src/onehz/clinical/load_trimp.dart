@@ -460,21 +460,15 @@ class StrainScorer {
 
   // ── TRIMP accumulation ──────────────────────────────────────────────────────
 
-  /// Median inter-sample interval (seconds) of a time-ordered stream, ignoring
-  /// non-positive steps and pathological (>[maxPlausibleGapSec]) ones. Floored
-  /// at [fallbackSampleMin] minutes' worth. Mirrors the convention already used
-  /// by `HeartRateZones.timeInZone`.
-  static double medianIntervalSeconds(List<double> tsSec,
-      {double maxPlausibleGapSec = 300.0}) {
-    final gaps = <double>[];
-    for (var i = 1; i < tsSec.length; i++) {
-      final g = tsSec[i] - tsSec[i - 1];
-      if (g > 0 && g <= maxPlausibleGapSec) gaps.add(g);
-    }
-    if (gaps.isEmpty) return fallbackSampleMin * 60.0;
-    gaps.sort();
-    return math.max(gaps[gaps.length ~/ 2], fallbackSampleMin * 60.0);
-  }
+  /// Measured cadence (seconds) of a time-ordered stream, or NULL.
+  ///
+  /// Now a thin alias for [sampleCadenceSeconds], which is the single helper
+  /// for all three of the old near-duplicates. Kept because it is public API;
+  /// the old `maxPlausibleGapSec` parameter is gone — the ceiling lives on
+  /// [maxSupportedCadenceSec] and the old `fallbackSampleMin` floor was the
+  /// fabricated 1 s that made a 301 s stream look like a 1 Hz one.
+  static double? medianIntervalSeconds(List<double> tsSec) =>
+      sampleCadenceSeconds(tsSec);
 
   /// PER-SAMPLE effort durations (minutes) from the ACTUAL timestamps.
   ///
@@ -488,11 +482,16 @@ class StrainScorer {
   /// on exactly the sparse/irregular streams [minSparseReadings] admits: 21
   /// samples over 20 min with the first two 1 s apart scored strain 8.08
   /// instead of ~47, and a 1 Hz stream with a 5-min leading gap scored 104.
+  /// EMPTY when the stream's cadence cannot be measured — see
+  /// [sampleCadenceSeconds]. Every duration here is a multiple of that cadence,
+  /// so an unmeasurable cadence is an unmeasurable effort, and [strain] turns
+  /// it into an absent metric rather than a small confident one.
   static List<double> sampleDurationsMinutes(List<double> tsSec) {
     final n = tsSec.length;
     if (n == 0) return const [];
     if (n == 1) return [fallbackSampleMin];
     final capSec = medianIntervalSeconds(tsSec);
+    if (capSec == null) return const [];
     final out = List<double>.filled(n, capSec / 60.0);
     for (var i = 0; i < n - 1; i++) {
       final g = tsSec[i + 1] - tsSec[i];
@@ -573,6 +572,10 @@ class StrainScorer {
     if (!enoughData || effMax <= restingHR) return null;
 
     final durations = sampleDurationsMinutes(tsSec);
+    // No measurable cadence ⇒ no durations ⇒ no effort. Must NOT fall through:
+    // `banisterTRIMP` credits `fallbackSampleMin` per sample when handed an
+    // empty list, which is the fabricated 1 s this abstention exists to stop.
+    if (durations.isEmpty) return null;
     final trimp = banisterTRIMP(bpm, restingHR, effMax - restingHR, durations,
         female: female);
     return trimpToStrain(trimp, denominator: denominator);

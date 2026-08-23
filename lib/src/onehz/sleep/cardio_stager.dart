@@ -363,8 +363,12 @@ void resetCardioObservations() => _cardioObservations.clear();
 
 /// Transparent cardiorespiratory stager.
 ///
-/// [hr1hz] per-second HR (bpm; 0 = off-skin) over the in-bed window.
-/// [accel] per-second gravity vectors, SAME length/time base as [hr1hz].
+/// [hr1hz] HR (bpm; 0 = off-skin) over the in-bed window, one entry per accel
+///   sample. [accel] gravity vectors carrying their ABSOLUTE times, SAME
+///   length/time base as [hr1hz]. The sampling cadence is MEASURED from
+///   `accel[i].tsMs` ([sampleCadenceSeconds]) and the [epochSec] grid is laid
+///   out in real seconds on top of it; a stream with no measurable cadence, or
+///   one coarser than a single epoch, ABSTAINS (see [_abstain]).
 /// [rrMs] / [rrTsMs] beat-to-beat RR (ms) and their ABSOLUTE times (ms), same
 ///   clock as `accel[i].tsMs`, ASCENDING in [rrTsMs] (the per-epoch window
 ///   gather lower-bounds into it). Sparse/empty is fine — REM/deep just lean
@@ -396,7 +400,24 @@ CardioStagerResult cardioStager(
     return true;
   }(), 'rrTsMs must be non-decreasing — the beat window is binary-searched');
   final n = math.min(hr1hz.length, accel.length);
-  final nEpoch = n ~/ epochSec;
+  // ── REAL-TIME epoch grid ──────────────────────────────────────────────────
+  // `n ~/ epochSec` conflated ARRAY POSITIONS with SECONDS. At 1 Hz they are
+  // the same number and everything below is unchanged; off 1 Hz they are not,
+  // and the failure was not an accuracy one — a 300 s band gave
+  // `96 ~/ 30 = 3` "epochs" of 2.5 REAL HOURS each, which the 30-s-tuned rules
+  // labelled NREM end to end and published as `wakePct = 0.0`: a night this
+  // stager could not read, reported as zero wake. No new parameter is needed
+  // for the fix — `accel[i].tsMs` is already the clock `_cleanBeatsInWindow`
+  // binary-searches, so the cadence is measurable from the input we have.
+  final cadenceSec =
+      sampleCadenceSeconds([for (var i = 0; i < n; i++) accel[i].tsMs / 1000.0]);
+  // Coarser than one sample per epoch ⇒ there is no 30-s epoch to score, and
+  // the Webster/Cole-Kripke continuity rules below are specified at this epoch
+  // length. Stretching `epochSec` to fit the device would make a number appear
+  // where the evidence for it does not; abstain instead.
+  if (cadenceSec == null || cadenceSec > epochSec) return _abstain(epochSec);
+  final perEpoch = math.max(1, (epochSec / cadenceSec).round());
+  final nEpoch = n ~/ perEpoch;
   if (nEpoch < 3) return _abstain(epochSec);
 
   // ── per-second ENMO (motion) against a LOCALLY-ADAPTIVE 1 g reference ──────
@@ -424,11 +445,13 @@ CardioStagerResult cardioStager(
     mag[i] = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
   }
   const int _gRefWinSec = 300; // 5 min window, centered per epoch
+  // …in SAMPLES at the measured cadence. 300 at 1 Hz, unchanged.
+  final gRefHalf = math.max(1, (_gRefWinSec / cadenceSec).round()) ~/ 2;
   final gRefByEpoch = List<double>.filled(nEpoch, 1.0);
   for (var e = 0; e < nEpoch; e++) {
-    final es = e * epochSec;
-    final lo = math.max(0, es - _gRefWinSec ~/ 2);
-    final hi = math.min(n, es + epochSec + _gRefWinSec ~/ 2);
+    final es = e * perEpoch;
+    final lo = math.max(0, es - gRefHalf);
+    final hi = math.min(n, es + perEpoch + gRefHalf);
     gRefByEpoch[e] = median(mag.sublist(lo, hi)) ?? 1.0;
   }
 
@@ -448,7 +471,7 @@ CardioStagerResult cardioStager(
   final rk = List<double>.filled(nEpoch, double.nan);
 
   for (var e = 0; e < nEpoch; e++) {
-    final s = e * epochSec, t = math.min(s + epochSec, n);
+    final s = e * perEpoch, t = math.min(s + perEpoch, n);
     // motion = mean ENMO over the epoch, against THIS epoch's local reference.
     final gRefE = gRefByEpoch[e];
     var ms = 0.0;

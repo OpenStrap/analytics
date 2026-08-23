@@ -22,23 +22,59 @@ class NocturnalRhr {
       };
 }
 
-/// Nocturnal resting HR from a night of 1 Hz HR samples.
+/// Nocturnal resting HR from a night of HR samples.
 ///
-/// [hr] 1 Hz HR samples (bpm; 0 = off-skin, excluded). [windowSamples] rolling
-/// window length in SAMPLE POSITIONS (default 1800 = 30 min at 1 Hz).
-/// [minCoverage] fraction of a window's positions that must carry a valid
-/// on-skin sample for the window to count.
+/// [hr] HR samples (bpm; 0 = off-skin, excluded). [window] the rolling trough
+/// window as a DURATION (default 30 min). [tsSec] their sample times (seconds);
+/// null keeps the historical contract — one sample per second, so a position IS
+/// a wall-clock second, which is what every WHOOP caller feeds. [minCoverage]
+/// fraction of a window's expected samples that must carry a valid on-skin
+/// reading for the window to count.
 ///
-/// The window slides over WALL-CLOCK POSITIONS, not over the compacted valid
-/// stream: an off-skin gap must not be closed up, or the "30-min" window can
-/// silently span the whole night. A night with no window meeting [minCoverage]
-/// yields an ABSENT metric — we never relabel the whole-night mean as a
-/// lowest-30-min trough.
+/// The window slides over WALL-CLOCK TIME, not over sample positions. It used
+/// to be a fixed 1800 POSITIONS, which is 30 min only at 1 Hz: on a 15 s band
+/// the same 1800 positions span 7.5 h, so "the lowest 30-min mean" quietly
+/// became "the whole-night mean" — measured on a real night, 59.7 bpm published
+/// as 66.4. With [tsSec] the window length is derived from the stream's own
+/// measured cadence ([sampleCadenceSeconds]), which ABSTAINS rather than
+/// guessing, so an unmeasurable cadence yields an absent metric.
+///
+/// Off-skin gaps are still never compacted away: coverage is checked against
+/// the samples a full window SHOULD hold, so a window that is mostly hole stays
+/// ineligible. A night with no window meeting [minCoverage] yields an ABSENT
+/// metric — we never relabel the whole-night mean as a lowest-30-min trough.
 Metric<NocturnalRhr> nocturnalRhr(List<double> hr,
-    {int windowSamples = 1800, double minCoverage = 0.9}) {
+    {List<double>? tsSec,
+    Duration window = const Duration(minutes: 30),
+    double minCoverage = 0.9}) {
   const inputs = ['hr_1hz'];
   final valid = hr.where((h) => h > 0).toList();
-  if (windowSamples < 1 || hr.length < windowSamples) {
+  if (tsSec != null && tsSec.length != hr.length) {
+    return const Metric<NocturnalRhr>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'HR and timestamps disagree in length',
+    );
+  }
+  final ts = tsSec ?? [for (var i = 0; i < hr.length; i++) i.toDouble()];
+  // The null path is 1 Hz BY CONTRACT, not by measurement — pinning it here
+  // keeps WHOOP output bit-identical instead of routing it through a helper
+  // that can abstain on a night the app already scores today.
+  final cadence = tsSec == null ? 1.0 : sampleCadenceSeconds(ts);
+  final winSec = window.inSeconds.toDouble();
+  if (cadence == null) {
+    return const Metric<NocturnalRhr>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no measurable sampling cadence — a 30-min trough cannot be '
+          'located without knowing how much time one sample covers',
+    );
+  }
+  // Samples a fully-covered window holds at this cadence: 1800 at 1 Hz, 120 at
+  // 15 s, 30 at 60 s. This is the number the old fixed `windowSamples = 1800`
+  // got wrong for every stream that is not 1 Hz.
+  final perWindow = winSec / cadence;
+  if (perWindow < 1 || hr.length < perWindow) {
     return const Metric<NocturnalRhr>.absent(
       tier: Tier.high,
       inputs_used: inputs,
@@ -46,33 +82,31 @@ Metric<NocturnalRhr> nocturnalRhr(List<double> hr,
     );
   }
   // Lowest rolling mean over CONTIGUOUS wall-clock windows. A window is only
-  // eligible when at least [minCoverage] of its positions are on-skin; its
-  // mean is taken over the valid samples inside it.
-  final needValid = (minCoverage * windowSamples).ceil();
+  // eligible when at least [minCoverage] of the samples it should hold are
+  // on-skin; its mean is taken over the valid samples inside it.
+  final needValid = (minCoverage * perWindow).ceil();
+  // A window ending before this has not had a full [window] of stream behind
+  // it — the same rule the positional loop expressed as "start at index 1800".
+  final firstFullEnd = ts.first + winSec - cadence;
   var sum = 0.0;
   var count = 0;
-  for (var i = 0; i < windowSamples; i++) {
-    if (hr[i] > 0) {
-      sum += hr[i];
-      count++;
-    }
-  }
+  var lo = 0;
   double? best;
-  if (count >= needValid) best = sum / count;
-  for (var i = windowSamples; i < hr.length; i++) {
-    if (hr[i] > 0) {
-      sum += hr[i];
+  for (var hi = 0; hi < hr.length; hi++) {
+    if (hr[hi] > 0) {
+      sum += hr[hi];
       count++;
     }
-    final out = hr[i - windowSamples];
-    if (out > 0) {
-      sum -= out;
-      count--;
+    while (ts[hi] - ts[lo] >= winSec) {
+      if (hr[lo] > 0) {
+        sum -= hr[lo];
+        count--;
+      }
+      lo++;
     }
-    if (count >= needValid) {
-      final m = sum / count;
-      if (best == null || m < best) best = m;
-    }
+    if (ts[hi] < firstFullEnd || count < needValid) continue;
+    final m = sum / count;
+    if (best == null || m < best) best = m;
   }
   if (best == null) {
     return const Metric<NocturnalRhr>.absent(
@@ -83,13 +117,17 @@ Metric<NocturnalRhr> nocturnalRhr(List<double> hr,
     );
   }
   final p1 = percentile(valid, 1)!;
-  final conf = clamp(valid.length / 7200.0, 0.4, 0.95); // ~2 h coverage => high
+  // Confidence is COVERAGE IN SECONDS, not a sample count — 480 samples of a
+  // 60 s band is the same 8 h of night as 28,800 samples at 1 Hz.
+  final conf =
+      clamp(valid.length * cadence / 7200.0, 0.4, 0.95); // ~2 h => high
   return Metric<NocturnalRhr>(
     value: NocturnalRhr(best, p1, valid.length),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'lowest-30-min mean + 1st-percentile; HR=0 excluded as off-skin',
+    note: 'lowest-${window.inMinutes}-min mean + 1st-percentile; HR=0 excluded '
+        'as off-skin',
   );
 }
 

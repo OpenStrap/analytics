@@ -76,9 +76,14 @@ class HrCeiling {
 /// captures (see the header). The gate sits above each family's own p90 and
 /// well below its p99, so ordinary wear does not corroborate and real movement
 /// does.
-const Map<DeviceFamily, double> _motionGateG = {
-  DeviceFamily.gen4: 0.10,
-  DeviceFamily.gen5: 0.04,
+///
+/// PUBLIC because a caller that wants to explain the refusal has to ask the
+/// same question this metric asks — "is there a gate for this stamp" — and
+/// there is no longer a global list of known families to ask instead. Read it
+/// through [calibrationFor]; it is this metric's table and nothing else's.
+const Map<String, double> hrCeilingMotionGateG = {
+  'gen4': 0.10,
+  'gen5': 0.04,
 };
 
 /// Above this, a HELD heart rate is a sensor fault rather than a heart — no
@@ -107,7 +112,7 @@ Metric<HrCeiling> sessionHrCeiling(
   double maxGapSeconds = 2.0,
 }) {
   const inputs = ['hr_1hz', 'accel_1hz', 'device_family'];
-  final gate = calibrationFor(_motionGateG, deviceFamily);
+  final gate = calibrationFor(hrCeilingMotionGateG, deviceFamily);
   if (gate == null) {
     return Metric<HrCeiling>.absent(
       tier: Tier.high,

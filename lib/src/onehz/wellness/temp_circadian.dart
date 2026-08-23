@@ -92,20 +92,20 @@ class _TempCal {
   const _TempCal(this.unit, this.motionGate, this.settleBandLow);
 }
 
-const Map<DeviceFamily, _TempCal> _tempCal = {
+const Map<String, _TempCal> _tempCal = {
   // gen4's 40 counts: on the 8 real gen4 nights in whoop-4.db the seven clean
   // nights keep 94.4–100.0 % of their sleep-window samples above
   // (night median − 40), while the one night carrying a two-hour cold segment
   // keeps 78.7 %. The band is ~6× the 6.47-count between-night SD and ~1.4× the
   // 29.3-count corpus-wide circadian range, so ordinary rhythm survives it.
-  DeviceFamily.gen4: _TempCal('adc_counts', 0.10, 40.0),
+  'gen4': _TempCal('adc_counts', 0.10, 40.0),
   // gen5 has NO measured band. The exports carry 106 (W5) and 933 (MG) non-zero
   // skin-temp rows in total — not one night clears the 60-sample floor — so
   // there is nothing to calibrate against. Scaling gen4's 40 counts by a
   // counts-per-°C guess would be gen4's number wearing a gen5 badge, which is
   // exactly what device.dart's contract forbids. Fill this in from gen5 nights,
   // not from arithmetic.
-  DeviceFamily.gen5: _TempCal('centi_c', 0.04, null),
+  'gen5': _TempCal('centi_c', 0.04, null),
 };
 
 /// A nightly skin-temp mean that knows how much of the night it is made of.

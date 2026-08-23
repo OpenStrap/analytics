@@ -1,25 +1,18 @@
-// SLEEP/CIRCADIAN — 3-class autonomic sleep stager (wake / NREM / REM).
+// SLEEP/CIRCADIAN — the shared staging POST-PROCESSING (Webster rescore +
+// stage-architecture consolidation) and the [StagerResult] shape both stagers
+// return.
+//
+// The 3-class `autonomicStager` that used to live here is GONE (2026-08): it
+// was deprecated, hidden from the barrel and reachable only from its own test,
+// and it conflated epoch count with sample count (`n ~/ epochSec` assumes a
+// 1 Hz stream, so any other cadence silently rescaled every epoch). The live
+// stager is `cardioStager` (cardio_stager.dart), which reuses everything below.
 //
 // HONESTY CEILING (catalog rule 5): wrist staging is at best a 3-class
 // AUTONOMIC ESTIMATE, never a PSG 4-stage hypnogram. We NEVER emit N1/N2/N3.
 // This is tier ESTIMATE.
-//
-// Physiological basis (deterministic, no ML):
-//   - NREM (esp. deep): parasympathetic dominance → HR low & stable, HRV high,
-//     near-total immobility.
-//   - REM: autonomic activation → HR rises toward wake levels and becomes more
-//     variable (irregular), while skeletal muscle is ATONIC → still immobile.
-//     The "moving but immobile + HR up + HRV variable" pattern is REM's tell.
-//   - Wake: movement present OR HR clearly elevated with body motion.
-//
-// We classify per epoch (default 30 s) using:
-//   * immobility from the van Hees mask (motion → wake unless deep in window)
-//   * epoch mean HR relative to the night's sleep HR floor (low = NREM)
-//   * short-window HR variability (SDNN of per-epoch HR, or RR-RMSSD if given)
-// REM is gated by immobility (atonia) AND elevated/variable HR.
 
 import 'dart:math' as math;
-import '../types.dart';
 import '../util.dart';
 import 'accounting.dart' show SleepStage;
 
@@ -43,177 +36,6 @@ class StagerResult {
         'rem_pct': round6(remPct),
         'epochs': stages.length,
       };
-}
-
-/// 3-class autonomic stager.
-///
-/// DEPRECATED: superseded by [cardioStager] (transparent motion+HR+RMSSD rule
-/// stager), which `segmentSleep` now uses. This hand-rolled deterministic stager
-/// is retained only for its proven Webster-rescore + [consolidateSleepStages]
-/// post-processing (which the cardio stager reuses); it is no longer the
-/// segmentation engine. Prefer [cardioStager] for new code.
-///
-/// [hr] per-second HR (bpm; 0 = off-skin). [immobile] per-second van Hees
-/// immobility mask (same length). [epochSec] epoch granularity (default 30 s).
-/// All inputs are within the in-bed window. RR is optional — when absent we use
-/// per-epoch HR dispersion as the variability proxy (honest, coarser).
-@Deprecated('Use cardioStager (motion+HR+RMSSD rule stager); kept for back-compat.')
-Metric<StagerResult> autonomicStager(
-  List<double> hr,
-  List<bool> immobile, {
-  int epochSec = 30,
-}) {
-  const inputs = ['hr_1hz', 'immobility_mask'];
-  final n = math.min(hr.length, immobile.length);
-  if (n < epochSec * 4) {
-    return const Metric<StagerResult>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'too short for 3-class staging',
-    );
-  }
-  final nEpoch = n ~/ epochSec;
-  if (nEpoch < 3) {
-    return const Metric<StagerResult>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'too few epochs for 3-class staging',
-    );
-  }
-
-  // Per-epoch features.
-  final epHr = List<double>.filled(nEpoch, double.nan);
-  final epVar = List<double>.filled(nEpoch, 0); // HR SDNN within epoch
-  final epImmobile = List<bool>.filled(nEpoch, false);
-  for (var e = 0; e < nEpoch; e++) {
-    final lo = e * epochSec;
-    final hi = lo + epochSec;
-    final vals = <double>[];
-    var immobCount = 0;
-    for (var i = lo; i < hi; i++) {
-      if (hr[i] > 0) vals.add(hr[i]);
-      if (immobile[i]) immobCount++;
-    }
-    if (vals.isNotEmpty) epHr[e] = mean(vals)!;
-    epVar[e] = vals.length >= 2 ? (stddev(vals) ?? 0) : 0;
-    epImmobile[e] = immobCount > epochSec / 2;
-  }
-
-  // Sleep HR floor: 10th percentile of valid epoch HR (the deep-NREM bottom).
-  final validHr = [for (final h in epHr) if (!h.isNaN) h];
-  if (validHr.length < 3) {
-    return const Metric<StagerResult>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'insufficient valid HR for staging',
-    );
-  }
-  final floor = percentile(validHr, 10)!;
-  final hrMedian = median(validHr)!;
-  // Variability scale: median epoch SDNN (used as REM threshold reference).
-  final varVals = [for (final v in epVar) if (v > 0) v];
-  final varMed = varVals.isNotEmpty ? median(varVals)! : 0.0;
-
-  // --- Wake-HR threshold -----------------------------------------------------
-  // A genuine arousal/awakening shows BOTH motion AND a cardiac rise toward the
-  // waking level. The van Hees mask alone over-flags wake: its 5-min forward
-  // window smears a single reposition (a few seconds of >5° change) across the
-  // whole window, so a normal turn becomes ~5 min of "mobile". During such a
-  // reposition the heart rate stays in the sleep range, so requiring an HR rise
-  // before declaring WAKE removes that artifact while keeping true arousals.
-  //
-  // wakeHr = floor + 0.55·(median − floor): roughly mid-way between the deep
-  // sleep HR floor and the night-median, the cardiac signature of being awake.
-  final wakeHr = floor + 0.55 * (hrMedian - floor);
-
-  final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
-  for (var e = 0; e < nEpoch; e++) {
-    final h = epHr[e];
-    if (h.isNaN) {
-      stages[e] = SleepStage.wake; // off-skin → can't claim sleep
-      continue;
-    }
-    if (!epImmobile[e] && h > wakeHr) {
-      // Motion AND elevated HR → a real arousal/awakening (atonia broken with
-      // a cardiac rise). Motion WITHOUT an HR rise is treated as a reposition
-      // (or mask smear) and falls through to sleep classification below.
-      stages[e] = SleepStage.wake;
-      continue;
-    }
-    // Asleep (immobile, or moving without a cardiac arousal).
-    // Distinguish NREM vs REM by HR level + variability.
-    // NREM: HR near the floor, low variability (parasympathetic).
-    // REM: HR elevated toward median/wake + higher variability, still immobile.
-    final elevated = h > floor + 0.4 * (hrMedian - floor);
-    final variable = epVar[e] > 1.15 * varMed && varMed > 0;
-    if (elevated && variable) {
-      stages[e] = SleepStage.rem;
-    } else {
-      stages[e] = SleepStage.nrem;
-    }
-  }
-
-  // Smooth singleton epochs (median-of-3) to suppress thrash.
-  final sm = List<SleepStage>.from(stages);
-  for (var e = 1; e < nEpoch - 1; e++) {
-    if (stages[e - 1] == stages[e + 1] && stages[e] != stages[e - 1]) {
-      sm[e] = stages[e - 1];
-    }
-  }
-
-  // --- Webster / Cole-Kripke sleep-continuity rescoring -----------------------
-  // Standard actigraphy post-processing: once sleep is established, brief WAKE
-  // bouts bracketed by sustained sleep are arousals, not real WASO, and are
-  // rescored to SLEEP. Real WASO requires a SUSTAINED arousal. We apply the
-  // classic Webster rules (durations in minutes, converted to epochs):
-  //   after ≥ 4 min sleep, ≤ 1 min wake → sleep
-  //   after ≥10 min sleep, ≤ 3 min wake → sleep
-  //   after ≥15 min sleep, ≤ 5 min wake → sleep  (Webster says 4; the extra
-  //   minute is deliberate here — see the rules table for why)
-  // (Symmetric in both directions: "surrounded by" sleep on either side.)
-  _websterRescore(sm, epochSec);
-
-  // --- Stage-architecture consolidation ---------------------------------------
-  // The raw per-epoch labels flip-flop nrem↔rem because the REM gate (elevated
-  // HR + above-median variability) is met intermittently within a single REM
-  // episode and during NREM micro-fluctuations. Real sleep architecture is a
-  // few SUSTAINED NREM/REM bouts within ~90-min cycles, not per-epoch jitter.
-  // Enforce: (a) REM only survives as EPISODES ≥ minRemMin, gap-bridged so a
-  // brief NREM intrusion inside an otherwise-REM run doesn't split it; (b) any
-  // remaining stage bout shorter than minBoutMin is merged into its neighbour.
-  // WAKE bouts are preserved (Webster already governs WASO); only the asleep
-  // NREM/REM micro-structure is consolidated.
-  _consolidateStages(sm, epochSec);
-
-  var w = 0, nr = 0, r = 0;
-  for (final s in sm) {
-    switch (s) {
-      case SleepStage.wake:
-        w++;
-        break;
-      case SleepStage.nrem:
-        nr++;
-        break;
-      case SleepStage.rem:
-        r++;
-        break;
-    }
-  }
-  final tot = sm.length.toDouble();
-  return Metric<StagerResult>(
-    value: StagerResult(
-      stages: sm,
-      epochSec: epochSec,
-      wakePct: 100 * w / tot,
-      nremPct: 100 * nr / tot,
-      remPct: 100 * r / tot,
-    ),
-    confidence: 0.5, // honesty-bounded: a 3-class estimate, not PSG
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: 'wrist 3-class autonomic ESTIMATE (wake/NREM/REM); '
-        'REM gated by atonia+HR; never N1/N2/N3, not PSG',
-  );
 }
 
 /// Test seam for [_websterRescore] — exposed (non-private) so the regression

@@ -52,6 +52,15 @@ class ReadinessInput {
   /// drops out and the weights renormalise — but the reason is named in the
   /// composite's note instead of vanishing.
   final String? refusal;
+
+  /// The input's own QUANTIZATION STEP, in the units of [value]/[baseline]
+  /// (whole-bpm RHR → 1, integer skin-temp ADC → 1). 0 = continuous, no step.
+  ///
+  /// Read only on the MAD-collapse fallback path: a baseline whose dispersion
+  /// is below one step has no resolvable dispersion at all, so an SD computed
+  /// from it is quantization noise, not physiology. See the guard in
+  /// [readinessComposite].
+  final double quantum;
   const ReadinessInput(
     this.label,
     this.value,
@@ -59,6 +68,7 @@ class ReadinessInput {
     this.goodSign,
     this.weight, {
     this.refusal,
+    this.quantum = 0,
   });
 }
 
@@ -67,7 +77,7 @@ class ReadinessInput {
 ReadinessInput hrvInput(double? v, List<double> base) =>
     ReadinessInput('HRV', v, base, 1, 0.40);
 ReadinessInput rhrInput(double? v, List<double> base) =>
-    ReadinessInput('RHR', v, base, -1, 0.30);
+    ReadinessInput('RHR', v, base, -1, 0.30, quantum: 1); // whole bpm
 ReadinessInput respInput(double? v, List<double> base) =>
     ReadinessInput('RR', v, base, -1, 0.20);
 
@@ -110,7 +120,7 @@ ReadinessInput tempInput(
         refusal: 'temp: unsettled_skin_temp:settled='
             '${round6(settledFraction)},need=${round6(minSettledFraction)}');
   }
-  return ReadinessInput('temp', v, base, -1, 0.10);
+  return ReadinessInput('temp', v, base, -1, 0.10, quantum: 1); // 1 ADC count
 }
 
 class Readiness {
@@ -128,7 +138,17 @@ class Readiness {
 /// Each present input with a usable robust baseline contributes a sign-oriented
 /// robust z. Weights are renormalized over present inputs.
 /// Required minimum baseline points (per input) before readiness can compute.
-const int readinessCompositeMinBaseline = 3;
+///
+/// 14, not 3. Three nights are not a personal baseline, they are three numbers:
+/// on the real corpus `[58, 58, 59]` bpm of RHR plus a 52 bpm night produced
+/// z = −10.97 and a published score of **99.949** at confidence 0.60 — maximal
+/// recovery manufactured out of a 6 bpm change. Two weeks is the shortest
+/// window in which a median+MAD has anything to be robust ABOUT (it is also the
+/// floor `overreaching_conjunction` and `session_cost` already use).
+///
+/// Deliberately NOT paired with an abs(z) clamp: a bounded-but-wrong score
+/// published at confidence 0.60 is harder to catch than an absurd one.
+const int readinessCompositeMinBaseline = 14;
 
 /// Minimum number of inputs, and minimum surviving weight, before a composite
 /// is a composite at all.
@@ -178,6 +198,27 @@ Metric<Readiness> readinessComposite(
     // mean/SD z so a usable input still contributes; only skip when SD is ALSO
     // zero (a truly constant baseline with no dispersion to normalize against).
     final rz = robustZ(v, base);
+    if (rz == null && inp.quantum > 0) {
+      // MAD collapsed, so more than half this baseline sits exactly on its own
+      // median. For a QUANTIZED input that is the signature of a baseline with
+      // no resolvable dispersion — and the mean/SD fallback below then divides
+      // by what is left, which is quantization noise: `[58,58,59]` has SD 0.577
+      // bpm, so a 6 bpm night scores z = −10.97 and readiness 99.949. Refuse
+      // the input by name (weights renormalise over the rest, and if too few
+      // survive the composite comes back absent) rather than scale against a
+      // dispersion the instrument cannot resolve.
+      //
+      // NOT a synthetic floor and NOT a clamp: nothing is substituted for the
+      // missing dispersion. Scoped to the fallback on purpose — MAD > 0 on a
+      // quantized series already means ≥ 1 step of spread.
+      final sd = stddev(base);
+      if (sd == null || sd < inp.quantum) {
+        refusals.add('${inp.label}: baseline_dispersion_below_quantum:'
+            'sd=${sd == null ? 'null' : round6(sd)},'
+            'quantum=${round6(inp.quantum)},n=${base.length}');
+        continue;
+      }
+    }
     final zr = rz ?? z(v, base);
     if (zr == null) continue;
     final oriented = inp.goodSign * zr; // + = good for readiness

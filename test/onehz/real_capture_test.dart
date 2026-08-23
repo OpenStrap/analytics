@@ -101,7 +101,7 @@ void main() {
     }
 
     // --- nocturnal RHR runs without crashing; if enough data, plausible ---
-    final rhr = nocturnalRhr(hr, windowSamples: 60); // 60 s window for a short read
+    final rhr = nocturnalRhr(hr, window: const Duration(seconds: 60)); // short read
     if (rhr.present) {
       // ignore: avoid_print
       print('REAL RHR(60s): low=${rhr.value!.low30Mean.toStringAsFixed(1)} '

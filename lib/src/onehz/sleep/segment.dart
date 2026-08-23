@@ -459,6 +459,11 @@ SleepSegmentation segmentSleep(
         trimmedAccel[i].x,
         trimmedAccel[i].y,
         trimmedAccel[i].z,
+        // Absence is not a measurement — an undecoded vector arrives as exact
+        // (0,0,0), which scores a 0.0 g delta and reads as PERFECTLY still.
+        // Dropping this flag here published 8 h of undecoded accel as
+        // "TST 28619 s, efficiency 100.0 %, unobserved 0 s". See [GravTs.valid].
+        valid: trimmedAccel[i].valid,
       ),
   ];
   final hr = <HrTs>[
@@ -531,7 +536,10 @@ SleepSegmentation segmentSleep(
   for (var k = onset; k < tsSec.length && tsSec[k] < chosen.end; k++) {
     final off = tsSec[k] - chosen.start;
     if (off < 0 || off >= inBed) continue;
-    sampled[off] = true;
+    // A row whose accel never decoded is a row, not a measurement — the same
+    // reason its gravity vector is refused above. HR evidence below is a
+    // SEPARATE channel and is still collected from such a row.
+    if (trimmedAccel[k].valid) sampled[off] = true;
     if (trimmedHr[k] <= 0) continue;
     final lo = math.max(0, off - _hrEvidenceHalfWinSec);
     final hi = math.min(inBed - 1, off + _hrEvidenceHalfWinSec);

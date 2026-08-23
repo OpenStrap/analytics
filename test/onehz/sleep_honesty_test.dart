@@ -106,6 +106,41 @@ void main() {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // (3b) An UNDECODED accel row is not a still one. `AccelSample.valid` was
+  // dropped when the sample became a `GravTs`, so absent gravity (exact 0,0,0)
+  // scored a 0.0 g delta and read as a wrist held perfectly still.
+  // ═══════════════════════════════════════════════════════════════════════════
+  group('honesty — undecoded accel is not stillness', () {
+    List<AccelSample> night({required bool valid}) => [
+          for (var k = 0; k < 8 * 3600; k++)
+            AccelSample((_t0 + k) * 1000.0, 0, 0, 0, valid: valid)
+        ];
+    final hr = List<double>.filled(8 * 3600, 52);
+
+    test(
+        '8 h of valid:false accel + valid HR is ABSENT '
+        '(was: inBed 28800 s, TST 28800 s, efficiency 100.0%, unobserved 0 s)',
+        () {
+      final s = segmentSleep(night(valid: false), hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+      expect(s.present, isFalse);
+      expect(s.tstSec, isNull);
+      expect(s.efficiencyPct, isNull);
+      expect(s.absenceReason, contains('observed'),
+          reason: 'not one second of gravity was measured');
+    });
+
+    test('the SAME vectors marked valid still stage — the flag is the only '
+        'difference', () {
+      // Control: proves the abstention above comes from the validity flag and
+      // not from the (0,0,0) coordinates or the window shape.
+      final s = segmentSleep(night(valid: true), hr,
+          forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 8 * 3600));
+      expect(s.present, isTrue);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // (3) An accelerometer dropout must not be carried forward into "stillness".
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — bounded accel carry-forward', () {
