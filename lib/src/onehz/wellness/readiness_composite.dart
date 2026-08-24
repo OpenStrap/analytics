@@ -198,7 +198,13 @@ Metric<Readiness> readinessComposite(
     // mean/SD z so a usable input still contributes; only skip when SD is ALSO
     // zero (a truly constant baseline with no dispersion to normalize against).
     final rz = robustZ(v, base);
-    if (rz == null && inp.quantum > 0) {
+    // Checked for EVERY quantized input, not only when robustZ came back null.
+    // `robustZ` can still return a score on a baseline whose SD sits below the
+    // quantum — a 14-night whole-bpm baseline alternating 58/59 has MAD 0.5
+    // (nonzero, so robustZ succeeds) but SD ~0.52, which is exactly the
+    // unresolvable-dispersion case this guard exists to catch. Gating it on
+    // `rz == null` let that baseline's z through unrefused.
+    if (inp.quantum > 0) {
       // MAD collapsed, so more than half this baseline sits exactly on its own
       // median. For a QUANTIZED input that is the signature of a baseline with
       // no resolvable dispersion — and the mean/SD fallback below then divides

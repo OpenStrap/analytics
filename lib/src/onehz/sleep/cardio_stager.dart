@@ -417,6 +417,16 @@ CardioStagerResult cardioStager(
   // where the evidence for it does not; abstain instead.
   if (cadenceSec == null || cadenceSec > epochSec) return _abstain(epochSec);
   final perEpoch = math.max(1, (epochSec / cadenceSec).round());
+  // `perEpoch` samples at this cadence must actually SPAN `epochSec` — a
+  // cadence that does not divide it evenly (4 s against a 30 s epoch rounds
+  // `perEpoch` to 8, an 8 * 4 = 32 s epoch) drifts the real grid against the
+  // reported one. `epochSec` is not just a label: it is what the result
+  // reports (`CardioStagerResult.epochSec`) and what `consolidateSleepStages`
+  // / `_websterRescore` / `_mergeShortDeep` derive the Webster and bout
+  // thresholds from below, and the drift accumulates over the whole night.
+  // Abstain rather than publish a grid whose real spacing does not match its
+  // own label.
+  if ((perEpoch * cadenceSec - epochSec).abs() > 1e-6) return _abstain(epochSec);
   final nEpoch = n ~/ perEpoch;
   if (nEpoch < 3) return _abstain(epochSec);
 

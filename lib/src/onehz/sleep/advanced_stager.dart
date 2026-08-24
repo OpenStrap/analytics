@@ -907,20 +907,26 @@ class AdvancedSleepStager {
     // to avoid, so it is spelled out rather than left to the arithmetic.
     final ckFlags = !cadenceOk
         ? List<bool>.filled(nEpochs, false)
-        : _coleKripke(_rescaleCounts(counts, cadence));
+        : _coleKripke(_rescaleCounts(counts));
     return _EpochGrid(edges, nEpochs, counts, hr, moveFrac, rrBuckets,
         respBuckets, ckFlags);
   }
 
   /// Per-epoch gravity-delta SUM → the Cole-Kripke count surrogate.
   ///
-  /// The sum has one term per SAMPLE in the epoch, so at 5 s it carries a fifth
-  /// of the terms a 1 Hz epoch does for the same movement. Scaling by the
-  /// cadence normalises it to the per-epoch sample count [ckCountDivisor] was
-  /// calibrated against (30 samples per 30 s epoch); `× 1.0` at 1 Hz.
-  static List<double> _rescaleCounts(List<double> counts, double cadenceSec) => [
-        for (final c in counts)
-          math.min(c * cadenceSec / ckCountDivisor, ckCountClip)
+  /// NO CADENCE FACTOR, on purpose — the sum is already cadence-invariant
+  /// under this file's own rate model (`gravityStillThresholdGPerS`,
+  /// `moveDeltaThresholdGPerS`: a per-sample delta grows linearly with the
+  /// sampling interval for the same physical movement). A 30 s epoch holds 30
+  /// terms of size `d` at 1 Hz and 6 terms of size `5d` at 5 s cadence — both
+  /// sums equal `30d`. Multiplying by `cadenceSec` here used to inflate the
+  /// 5 s-cadence count 5x relative to 1 Hz, which shifted `_coleKripke`'s
+  /// `si < 1.0` decision (and therefore `_onsetAndFinalWake`) on exactly the
+  /// non-WHOOP bands this rate model exists to support. The 1 Hz path is
+  /// unaffected either way (`cadenceSec == 1`), which is why the defect was
+  /// invisible until now.
+  static List<double> _rescaleCounts(List<double> counts) => [
+        for (final c in counts) math.min(c / ckCountDivisor, ckCountClip)
       ];
 
   static List<bool> _coleKripke(List<double> rescaled) {

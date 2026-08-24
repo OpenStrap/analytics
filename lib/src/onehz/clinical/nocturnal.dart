@@ -104,7 +104,15 @@ Metric<NocturnalRhr> nocturnalRhr(List<double> hr,
       }
       lo++;
     }
-    if (ts[hi] < firstFullEnd || count < needValid) continue;
+    // `count == 0` is its own guard, not just a stricter `needValid`: a caller
+    // that passes `minCoverage: 0` makes `needValid` 0 too, and `count <
+    // needValid` is then never true for a non-negative count — so a window
+    // with NO on-skin sample would otherwise reach `sum / count` as `0.0 / 0`,
+    // which is NaN in Dart. NaN LATCHES here (`m < best` is false for a NaN
+    // `m`, and false again once a NaN `best` is compared against anything
+    // later), so one such window would silently poison the whole night's
+    // trough instead of being skipped.
+    if (ts[hi] < firstFullEnd || count < needValid || count == 0) continue;
     final m = sum / count;
     if (best == null || m < best) best = m;
   }

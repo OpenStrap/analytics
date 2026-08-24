@@ -339,6 +339,22 @@ void main() {
       expect(ok.value!.low30Mean, closeTo(60, 1e-9));
     });
 
+    test(
+        'REGRESSION: minCoverage: 0 does not admit an all-off-skin window '
+        'as a trough', () {
+      // needValid = (minCoverage * perWindow).ceil() is 0 when minCoverage is
+      // 0, and `count < needValid` is then never true for a non-negative
+      // count — so a window with ZERO on-skin samples used to reach `sum /
+      // count` as 0.0 / 0, i.e. NaN, which then LATCHES as `best` (`m < best`
+      // is false for a NaN on either side) and comes back as a PRESENT metric
+      // whose low30Mean is NaN. An explicit `count == 0` guard is what stops
+      // it, independent of whatever minCoverage the caller passed.
+      final allOffSkin = List<double>.filled(2000, 0.0);
+      final m = nocturnalRhr(allOffSkin, minCoverage: 0.0);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+    });
+
     test('REGRESSION: hrDip refuses a 1-sample day and a 1-sample night', () {
       final m = hrDip([70], [60]);
       expect(m.present, isFalse);

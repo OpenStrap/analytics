@@ -46,8 +46,8 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 - **van Hees / GGIR angle sleep-window** — 2015/2018. Count-FREE, gravity-orientation @1 Hz is ample. **THE sleep/wake spine** (sidesteps the Cole-Kripke count-calibration trap). `24/7 · HIGH`
 - **True Phillips SRI** — epoch-by-epoch 24-h concordance (Phillips 2017), NOT SD-of-midsleep. `24/7 · HIGH`
 - **Cardiopulmonary Coupling (CPC)** — Thomas 2005; RR + RSA/RIIV respiration surrogate (substitute for EDR). Sleep-stability spectrogram + apnea-risk; plays to continuous RR. `24/7 · MED-HIGH`
-- **3-class autonomic stager (wake/NREM/REM)** + HR-dip onset, REM gated by 1 Hz immobility. Never claim N1/N2/N3. `24/7 · MED (honesty-bounded)`
-- **Sleep accounting** — onset/offset, WASO, TST, efficiency, NREM-REM cycles (~90 min from CPC/autonomic). `24/7 · HIGH`
+- **3-class cardio stager (wake/NREM/REM)** — `cardioStager`, Webster/Cole-Kripke wake + HRV; replaces the deleted HR-only autonomic stager. HR-dip onset, REM gated by 1 Hz immobility. Never claim N1/N2/N3. `24/7 · MED (honesty-bounded)`
+- **Sleep accounting** — onset/offset, WASO, TST, efficiency, NREM-REM cycles (~90 min from CPC/cardio stager). `24/7 · HIGH`
 
 ### Respiration & SpO₂ (PPG + RR)
 - **RSA respiratory rate from RR** — Lomb-Scargle HF-peak; Pimentel 2017 AR-order robustness. *Primary 24/7 respiration source.* `24/7 · HIGH`

@@ -580,6 +580,24 @@ void main() {
       expect(m.note, contains('RHR: baseline_dispersion_below_quantum:'));
       expect(m.note, contains('quantum=1'));
     });
+
+    test(
+        'A4 — an alternating baseline with nonzero MAD is STILL refused '
+        'below quantum', () {
+      // 58/59/58/59/... has a nonzero MAD (0.5), so robustZ succeeds and used
+      // to skip the quantum guard entirely — but its SD (~0.52) is still below
+      // the 1 bpm quantum. The guard must run for every quantized input, not
+      // only when robustZ came back null, or exactly this baseline lets a
+      // score through on quantization noise.
+      final base = <double>[
+        for (var i = 0; i < 14; i++) i.isEven ? 58.0 : 59.0
+      ];
+      final m = readinessComposite([rhrInput(52.0, base)],
+          minInputs: 1, minWeightSum: 0.0);
+      expect(m.present, isFalse);
+      expect(m.note, contains('RHR: baseline_dispersion_below_quantum:'));
+      expect(m.note, contains('quantum=1'));
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -649,9 +667,13 @@ void main() {
       expect(
           m.note, 'need_baseline:have=1,need=$readinessCompositeMinBaseline');
       // With >= minBaseline points it computes (14 nights, not 5 — A4).
+      // RHR baseline spread widened to i % 5 (sd ~1.4, above the 1-bpm
+      // quantum): i % 3 (sd ~0.83) is exactly the sub-quantum-dispersion case
+      // readinessComposite now refuses regardless of whether robustZ's MAD
+      // happened to be nonzero — see the quantum guard's own test below.
       final ok = readinessComposite([
         hrvInput(60.0, [for (var i = 0; i < 14; i++) 48.0 + i % 5]),
-        rhrInput(55.0, [for (var i = 0; i < 14; i++) 54.0 + i % 3]),
+        rhrInput(55.0, [for (var i = 0; i < 14; i++) 54.0 + i % 5]),
       ]);
       expect(ok.present, isTrue, reason: ok.note);
     });
