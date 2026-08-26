@@ -56,12 +56,25 @@ const int irregularScreenMinBeats = 500;
 /// to flag. Returns an absent Metric when there are too few clean beats.
 Metric<IrregularRhythm> irregularBeatScreen(
   List<double> rrMs, {
+  // Elapsed beat time (ms), same length + index alignment as [rrMs] — e.g.
+  // `RrCorrectionResult.nnTimesMs`. Used ONLY to require the irregularity be
+  // SUSTAINED across independent short windows rather than true of one number
+  // blended across the whole span. Optional for backward compatibility, but
+  // pass it whenever [rrMs] spans more than a few minutes of heterogeneous
+  // activity (a whole day) — see the sustained-window note below.
+  List<double>? nnTimesMs,
   double artifactFraction = 0.0,
   int minBeats = irregularScreenMinBeats,
   double sd1sd2Flag = 0.70,
   double pnnThresholdMs = 70,
   double pnnFlagPct = 30,
   double maxArtifact = 0.30,
+  // ponytail: fixed 5-min / 50%-of-windows heuristic, not backtested against
+  // labeled arrhythmia data (none available) — upgrade path is to calibrate
+  // windowMinutes/sustainedFraction once real AFib-vs-sinus recordings exist.
+  double windowMinutes = 5,
+  int minWindowBeats = 40,
+  double sustainedFraction = 0.5,
 }) {
   const inputs = ['rr_cleaned'];
   // The defensive [300, 2000] filter COMPACTS the series. Keep the mask too, so
@@ -125,7 +138,30 @@ Metric<IrregularRhythm> irregularBeatScreen(
   }
   final pnnPct = diffs.isEmpty ? 0.0 : 100.0 * over / diffs.length;
 
-  final flag = ratio >= sd1sd2Flag && pnnPct >= pnnFlagPct;
+  final aggregateHigh = ratio >= sd1sd2Flag && pnnPct >= pnnFlagPct;
+  // A single ratio blended across an entire day always clears both cutoffs —
+  // sleep, rest, exercise and posture changes are each legitimately
+  // "scattered" in a different way, and stacking them together manufactures
+  // the appearance of sustained irregularity out of ordinary daily
+  // variability (validated on real user data: 9/9 sampled days sat at or
+  // over BOTH thresholds, flagged or not — see analytics#irregular-rhythm
+  // false-positive fix). Require the same two conditions to independently
+  // hold in a real fraction of short, mostly-stationary windows instead —
+  // that is what "sustained" is supposed to mean. Falls back to the old
+  // whole-span verdict only when times weren't supplied (short/sleep-only
+  // callers where the whole span already IS roughly one physiological state).
+  final flag = aggregateHigh &&
+      (nnTimesMs == null ||
+          _sustainedAcrossWindows(
+            rrMs,
+            nnTimesMs,
+            sd1sd2Flag: sd1sd2Flag,
+            pnnThresholdMs: pnnThresholdMs,
+            pnnFlagPct: pnnFlagPct,
+            windowMinutes: windowMinutes,
+            minWindowBeats: minWindowBeats,
+            sustainedFraction: sustainedFraction,
+          ));
   // Confidence scales with beat count (~5000 beats ≈ a full strong night) AND
   // with the artifact fraction we were handed — it used to ignore it entirely,
   // so a barely-passing 29 %-artifact night published at the same confidence as
@@ -147,4 +183,59 @@ Metric<IrregularRhythm> irregularBeatScreen(
         '${pnnThresholdMs.round()}. PRV not ECG — wrist pulse misses P-waves. '
         'Discuss with a clinician only if you have symptoms.',
   );
+}
+
+/// True when the SD1/SD2 + pNNx criteria independently hold in a real
+/// fraction of short, roughly-stationary windows across [rrMs] — not just in
+/// the one number the whole span blends into. [timesMs] must be the same
+/// length as [rrMs] and index-aligned (elapsed ms per beat).
+bool _sustainedAcrossWindows(
+  List<double> rrMs,
+  List<double> timesMs, {
+  required double sd1sd2Flag,
+  required double pnnThresholdMs,
+  required double pnnFlagPct,
+  required double windowMinutes,
+  required int minWindowBeats,
+  required double sustainedFraction,
+}) {
+  if (timesMs.length != rrMs.length || rrMs.length < 2) return false;
+  final windowMs = windowMinutes * 60000;
+  var windowStart = timesMs.first;
+  var validWindows = 0;
+  var flaggedWindows = 0;
+  var bucket = <double>[];
+  void flush() {
+    if (bucket.length >= minWindowBeats) {
+      validWindows++;
+      final diffs = <double>[
+        for (var i = 1; i < bucket.length; i++) bucket[i] - bucket[i - 1]
+      ];
+      final sdsd = stddev(diffs);
+      final sdnn = stddev(bucket);
+      if (sdsd != null && sdnn != null) {
+        final sd1 = sdsd / math.sqrt2;
+        final v = 2 * sdnn * sdnn - sd1 * sd1;
+        final sd2 = v > 0 ? math.sqrt(v) : 0.0;
+        if (sd2 > 0) {
+          final ratio = sd1 / sd2;
+          final over = diffs.where((d) => d.abs() > pnnThresholdMs).length;
+          final pnn = 100.0 * over / diffs.length;
+          if (ratio >= sd1sd2Flag && pnn >= pnnFlagPct) flaggedWindows++;
+        }
+      }
+    }
+    bucket = [];
+  }
+
+  for (var i = 0; i < rrMs.length; i++) {
+    if (timesMs[i] - windowStart >= windowMs) {
+      flush();
+      windowStart = timesMs[i];
+    }
+    bucket.add(rrMs[i]);
+  }
+  flush();
+  if (validWindows == 0) return false;
+  return flaggedWindows / validWindows >= sustainedFraction;
 }
