@@ -93,6 +93,36 @@ void main() {
       expect(withTimes.value!.flag, isFalse);
     });
 
+    test('out-of-range artifact beats sprinkled through organised windows '
+        'do not fake a per-window flag', () {
+      // Every 6th beat is a hard-implausible outlier (>2000 ms) — the same
+      // [keep] mask the aggregate uses must also apply to the windowed pass,
+      // or these get counted as real successive-diff jumps inside a window.
+      final organised = <double>[
+        for (var i = 0; i < 3600; i++)
+          i % 6 == 5 ? 5000.0 : 900 + 15 * math.sin(i / 8)
+      ];
+      final times = <double>[];
+      var t = 0.0;
+      for (final v in organised) {
+        t += v;
+        times.add(t);
+      }
+      final m = irregularBeatScreen(organised, nnTimesMs: times);
+      expect(m.value!.flag, isFalse);
+    });
+
+    test('mismatched nnTimesMs length falls back to the whole-span verdict '
+        'instead of crashing', () {
+      final rnd = math.Random(7);
+      final rr = <double>[
+        for (var i = 0; i < 1200; i++)
+          800.0 + (rnd.nextBool() ? 250 : -50) + rnd.nextInt(120)
+      ];
+      final m = irregularBeatScreen(rr, nnTimesMs: [1.0, 2.0, 3.0]);
+      expect(m.value!.flag, isTrue);
+    });
+
     test('scatter sustained across (nearly) the whole day still flags with '
         'sustained-window times', () {
       final rnd = math.Random(7);

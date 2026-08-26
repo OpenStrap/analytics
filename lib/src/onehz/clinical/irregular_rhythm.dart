@@ -150,11 +150,19 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // that is what "sustained" is supposed to mean. Falls back to the old
   // whole-span verdict only when times weren't supplied (short/sleep-only
   // callers where the whole span already IS roughly one physiological state).
+  // Windows are built from the SAME clean beats as the aggregate above (the
+  // [keep] mask), not the raw input — an artifact beat the aggregate
+  // correctly excludes must not be allowed back in here to inflate one
+  // window's own ratio/pNN into a spurious per-window flag.
+  final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
+  final nnTimes = hasTimes
+      ? [for (var i = 0; i < rrMs.length; i++) if (keep[i]) nnTimesMs[i]]
+      : const <double>[];
   final flag = aggregateHigh &&
-      (nnTimesMs == null ||
+      (!hasTimes ||
           _sustainedAcrossWindows(
-            rrMs,
-            nnTimesMs,
+            nn,
+            nnTimes,
             sd1sd2Flag: sd1sd2Flag,
             pnnThresholdMs: pnnThresholdMs,
             pnnFlagPct: pnnFlagPct,
@@ -200,6 +208,16 @@ bool _sustainedAcrossWindows(
   required double sustainedFraction,
 }) {
   if (timesMs.length != rrMs.length || rrMs.length < 2) return false;
+  // Fail CLOSED (never sustained) on a bad config — a misconfigured caller
+  // must never manufacture a medical false positive.
+  if (!windowMinutes.isFinite ||
+      windowMinutes <= 0 ||
+      minWindowBeats < 2 ||
+      !sustainedFraction.isFinite ||
+      sustainedFraction < 0 ||
+      sustainedFraction > 1) {
+    return false;
+  }
   final windowMs = windowMinutes * 60000;
   var windowStart = timesMs.first;
   var validWindows = 0;
