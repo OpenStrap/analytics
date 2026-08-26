@@ -520,28 +520,83 @@ void main() {
     test(
         'degenerate-MAD baseline is rescued by mean/SD z (no intermittent "—")',
         () {
-      // A quantized RHR whose recent baseline clusters tight enough that the
-      // median-absolute-deviation collapses to 0 (deviations from the median 52
-      // are [0,0,0,0,0,0,1] => MAD 0), but SD > 0. robustZ can't score this, so
-      // before the fallback the WHOLE composite blanked to "—" here — the
-      // intermittent "readiness sometimes disappears (with sleep present)" bug.
-      final tightBase = <double>[52, 52, 52, 52, 52, 52, 53];
+      // A quantized RHR whose baseline clusters tight enough that the
+      // median-absolute-deviation collapses to 0 (most nights sit exactly on
+      // the median 52) but which still has more than one whole bpm of spread.
+      // robustZ can't score this, so before the fallback the WHOLE composite
+      // blanked to "—" here — the intermittent "readiness sometimes disappears
+      // (with sleep present)" bug. The fallback stays.
+      //
+      // FIXTURE RE-PINNED 2026-08 (A4): this used to be
+      // `[52,52,52,52,52,52,53]` — seven nights with an SD of 0.36 bpm, i.e.
+      // BELOW the 1 bpm the instrument can resolve. That shape is the one A4
+      // refuses (it is how `[58,58,59]` + 52 became a published 99.949), and it
+      // is asserted as a refusal in its own test below. The rescue itself is
+      // unchanged; only a baseline with resolvable dispersion reaches it.
+      final tightBase = <double>[
+        52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 49, 55, 53
+      ];
       // minInputs:1 — the subject here is the MAD==0 rescue, not the RD-04
       // minimum-inputs gate (which has its own test below).
       final m = readinessComposite([rhrInput(56.0, tightBase)],
           minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue,
-          reason: 'mean/SD z should rescue a MAD==0 (but SD>0) baseline');
+          reason: 'mean/SD z should rescue a MAD==0 (but SD>=1 bpm) baseline');
       expect(m.inputs_used, ['RHR']);
       // RHR well above a tight baseline => bad for readiness => below 50.
       expect(m.value!.score, lessThan(50));
 
       // A TRULY constant baseline (SD == 0 too) still honestly abstains — we
       // only rescue degenerate MAD, never fabricate against zero dispersion.
-      final flat = readinessComposite([
-        rhrInput(56.0, <double>[52, 52, 52, 52])
-      ]);
+      final flat =
+          readinessComposite([rhrInput(56.0, List<double>.filled(14, 52.0))]);
       expect(flat.present, isFalse);
+    });
+
+    test('A4 — three quantized nights are not a baseline (was: score 99.949)',
+        () {
+      // The measured production failure: [58,58,59] bpm + a 52 bpm night =>
+      // MAD 0 => mean/SD fallback on an SD of 0.577 bpm => z = -10.97 =>
+      // readiness 99.949 at confidence 0.60. Maximal recovery out of 6 bpm.
+      final m = readinessComposite([rhrInput(52.0, <double>[58, 58, 59])],
+          minInputs: 1, minWeightSum: 0.0);
+      expect(m.present, isFalse, reason: 'was: 99.949 at confidence 0.60');
+      expect(m.note, contains('need_baseline:have=3,need=14'));
+    });
+
+    test('A4 — a 14-night baseline with sub-bpm dispersion is REFUSED by name',
+        () {
+      // Long enough now, but MAD 0 and SD 0.267 bpm — below the 1 bpm the
+      // instrument resolves, so the fallback would be dividing a 6 bpm change
+      // by quantization noise. Refuse, with a machine-readable reason; do NOT
+      // clamp (a bounded-but-wrong score at confidence 0.60 is harder to catch
+      // than an absurd one).
+      final base = <double>[
+        58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 59
+      ];
+      final m = readinessComposite([rhrInput(52.0, base)],
+          minInputs: 1, minWeightSum: 0.0);
+      expect(m.present, isFalse);
+      expect(m.note, contains('RHR: baseline_dispersion_below_quantum:'));
+      expect(m.note, contains('quantum=1'));
+    });
+
+    test(
+        'A4 — an alternating baseline with nonzero MAD is STILL refused '
+        'below quantum', () {
+      // 58/59/58/59/... has a nonzero MAD (0.5), so robustZ succeeds and used
+      // to skip the quantum guard entirely — but its SD (~0.52) is still below
+      // the 1 bpm quantum. The guard must run for every quantized input, not
+      // only when robustZ came back null, or exactly this baseline lets a
+      // score through on quantization noise.
+      final base = <double>[
+        for (var i = 0; i < 14; i++) i.isEven ? 58.0 : 59.0
+      ];
+      final m = readinessComposite([rhrInput(52.0, base)],
+          minInputs: 1, minWeightSum: 0.0);
+      expect(m.present, isFalse);
+      expect(m.note, contains('RHR: baseline_dispersion_below_quantum:'));
+      expect(m.note, contains('quantum=1'));
     });
   });
 
@@ -611,12 +666,16 @@ void main() {
       expect(m.confidence, 0);
       expect(
           m.note, 'need_baseline:have=1,need=$readinessCompositeMinBaseline');
-      // With >= minBaseline points it computes.
+      // With >= minBaseline points it computes (14 nights, not 5 — A4).
+      // RHR baseline spread widened to i % 5 (sd ~1.4, above the 1-bpm
+      // quantum): i % 3 (sd ~0.83) is exactly the sub-quantum-dispersion case
+      // readinessComposite now refuses regardless of whether robustZ's MAD
+      // happened to be nonzero — see the quantum guard's own test below.
       final ok = readinessComposite([
-        hrvInput(60.0, [48.0, 49.0, 50.0, 51.0, 52.0]),
-        rhrInput(55.0, [54.0, 55.0, 56.0, 55.0, 54.0]),
+        hrvInput(60.0, [for (var i = 0; i < 14; i++) 48.0 + i % 5]),
+        rhrInput(55.0, [for (var i = 0; i < 14; i++) 54.0 + i % 5]),
       ]);
-      expect(ok.present, isTrue);
+      expect(ok.present, isTrue, reason: ok.note);
     });
 
     test('multivariateAnomaly: short baseline night carries need note', () {
@@ -708,7 +767,12 @@ void main() {
       // Whole-bpm RHR pinned at 55 for most of the window: MAD collapses to 0,
       // robustZ abstains and the deliberate `?? z(v, base)` fallback (#26)
       // produced the contribution. PRE-FIX the detail still said "robust-z".
-      final base = <double>[55, 55, 55, 55, 55, 55, 55, 58];
+      // Twelve nights pinned at 55 (MAD 0) plus two genuinely different ones,
+      // so the baseline still has more than 1 bpm of SD — below that the input
+      // is refused outright rather than scored (A4).
+      final base = <double>[
+        55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 58, 51
+      ];
       final m = readinessComposite([rhrInput(60, base)],
           minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue, reason: m.note);
@@ -718,7 +782,9 @@ void main() {
     });
 
     test('a dispersed baseline still discloses robust-z (median+MAD)', () {
-      final base = <double>[50, 52, 54, 56, 58, 60, 62];
+      final base = <double>[
+        50, 52, 54, 56, 58, 60, 62, 51, 53, 55, 57, 59, 61, 63
+      ];
       final m = readinessComposite([rhrInput(70, base)],
           minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isTrue, reason: m.note);
@@ -728,7 +794,7 @@ void main() {
     test('a fully constant baseline (MAD=0 AND SD=0) still abstains', () {
       // The fallback is NOT a licence to score against zero dispersion.
       final m =
-          readinessComposite([rhrInput(60, List<double>.filled(8, 55.0))]);
+          readinessComposite([rhrInput(60, List<double>.filled(14, 55.0))]);
       expect(m.present, isFalse);
       expect(m.toJson()['value'], '—');
     });

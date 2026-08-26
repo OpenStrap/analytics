@@ -37,6 +37,7 @@
 
 import 'dart:math' as math;
 import '../types.dart';
+import '../util.dart';
 import '../clinical/hrv_time.dart';
 import 'cardio_stager.dart' show cardioStager;
 import 'accounting.dart' show SleepStage;
@@ -66,12 +67,21 @@ class HrTs {
 }
 
 /// Gravity vector sample (g): [ts] unix seconds.
+///
+/// [valid] mirrors [AccelSample.valid]: false means the vector was never
+/// decoded and is handed over as exact (0,0,0). That is NOT a measurement of
+/// anything — a run of them is a perfectly constant vector, i.e. a wrist held
+/// perfectly still, which is how 8 h of undecoded accel published a 100 %-
+/// efficiency night. Every consumer below asks about [valid] explicitly rather
+/// than comparing (0,0,0) against a threshold (same rule van_hees.dart states
+/// for its z-angle).
 class GravTs {
   final int ts;
   final double x;
   final double y;
   final double z;
-  const GravTs(this.ts, this.x, this.y, this.z);
+  final bool valid;
+  const GravTs(this.ts, this.x, this.y, this.z, {this.valid = true});
 }
 
 /// RR interval: [ts] unix seconds, [rrMs].
@@ -171,13 +181,20 @@ class HypnogramMetrics {
 /// Advanced sleep stager — constants + the full V1/V2 algorithm.
 class AdvancedSleepStager {
   // ── Stage-0 constants ───────────────────────────────────────────────────────
-  static const double gravityStillThresholdG = 0.01;
+  /// Stillness threshold on the gravity vector, in **g per second**.
+  ///
+  /// It is applied to a CONSECUTIVE-SAMPLE delta, so as a bare `g` figure it
+  /// silently meant "0.01 g between whatever two samples this device happened
+  /// to send". A faster sensor moves less between samples and therefore read as
+  /// motionless everywhere — a 50 Hz IMU staged an awake day as 16 h of sleep.
+  /// The number is unchanged at 1 Hz, where g and g/s are the same value; every
+  /// comparison now scales it by the measured cadence.
+  static const double gravityStillThresholdGPerS = 0.01;
   static const int stillWindowMin = 15;
   static const double stillFraction = 0.70;
   static const int maxGapMin = 20;
   static const int mergeMin = 15;
   static const int minSleepMin = 60;
-  static const double defaultIntervalS = 60.0;
   static const int secondsPerDay = 86400;
   static const int minWindowSamples = 3;
   static const double hrSleepBaselineMult = 1.05;
@@ -215,7 +232,25 @@ class AdvancedSleepStager {
   static const double featureWindowS = 5 * 60.0;
   static const double ckCountDivisor = 100.0;
   static const double ckCountClip = 300.0;
-  static const double moveDeltaThresholdG = 0.01;
+  /// Movement threshold on the gravity vector, in **g per second** — same
+  /// consecutive-sample-delta trap as [gravityStillThresholdGPerS], same fix.
+  static const double moveDeltaThresholdGPerS = 0.01;
+
+  /// Coarsest cadence the gravity-delta thresholds above will score (s/sample).
+  ///
+  /// They are RATES, so the per-sample cut grows with the sampling interval —
+  /// while |Δg| between two unit gravity vectors saturates at 2 g however long
+  /// you wait. At 30 s the cut is 0.3 g, already a ~17° orientation change; by
+  /// ~200 s it exceeds anything the sensor can produce and EVERY sample reads
+  /// still, which would publish a coarse band's whole day as one unbroken sleep
+  /// session. The rate model only holds while the interval is short against a
+  /// postural change, and 30 s is also this file's own staging epoch ([epochS])
+  /// — a delta spanning more than one epoch cannot inform a 30 s epoch grid.
+  ///
+  /// ponytail: one ceiling for both thresholds. Splitting them, or replacing
+  /// the linear rate with a saturating angle model, needs data at those
+  /// cadences that we do not have.
+  static const double maxStillCadenceSec = epochS;
   static const double hrDogSigma1S = 120.0;
   static const double hrDogSigma2S = 600.0;
 
@@ -248,9 +283,11 @@ class AdvancedSleepStager {
   //      (per-epoch HR/HRV/RR/resp features -> percentile classifier -> median
   //      smoothing -> `_reimposePhysiology`), which overrides the raw CK call,
   //      and physiology is reimposed after.
-  //   3. RELATIVE, NOT ABSOLUTE. `_rescaleCounts` divides by `ckCountDivisor`
-  //      and clips, so the spine reacts to WITHIN-NIGHT relative motion, not to
-  //      an absolute count threshold the surrogate cannot honor.
+  //   3. RELATIVE, NOT ABSOLUTE. `_rescaleCounts` normalises by the epoch's
+  //      sample count (via the measured cadence) and divides by
+  //      `ckCountDivisor` and clips, so the spine reacts to WITHIN-NIGHT
+  //      relative motion, not to an absolute count threshold the surrogate
+  //      cannot honor — and not to how fast the device happens to sample.
   // The van Hees angle window remains the primary in-bed detector (the catalog's
   // sanctioned method); CK is a secondary within-window continuity spine. Do NOT
   // read CK output as a validated sleep/wake score. The catalog DO-NOT-SHIP line
@@ -456,10 +493,19 @@ class AdvancedSleepStager {
 
   // ── Stage-0 helpers ─────────────────────────────────────────────────────────
 
+  /// |Δ gravity| vs the previous sample (index 0 is 0 by definition). NaN when
+  /// EITHER endpoint is invalid — the arm may have moved across the gap and the
+  /// record cannot say. Every comparison against NaN is false, so
+  /// [_classifyStill]'s `deltas[i] < threshold` degrades to "not still", never
+  /// to "perfectly still" (van Hees' `deltaDeg` contract, same reasoning).
   static List<double> _gravityDeltas(List<GravTs> g) {
     final n = g.length;
     final out = List<double>.filled(n, 0);
     for (var i = 1; i < n; i++) {
+      if (!g[i].valid || !g[i - 1].valid) {
+        out[i] = double.nan;
+        continue;
+      }
       final dx = g[i - 1].x - g[i].x;
       final dy = g[i - 1].y - g[i].y;
       final dz = g[i - 1].z - g[i].z;
@@ -468,22 +514,12 @@ class AdvancedSleepStager {
     return out;
   }
 
-  static double _medianIntervalS(List<int> times) {
-    if (times.length < 2) return defaultIntervalS;
-    final gaps = <int>[];
-    for (var i = 0; i < times.length - 1; i++) {
-      final g = times[i + 1] - times[i];
-      if (g > 0 && g < 300) gaps.add(g);
-    }
-    if (gaps.isEmpty) return 60;
-    gaps.sort();
-    return math.max(gaps[gaps.length ~/ 2].toDouble(), 1.0);
-  }
-
-  static int _windowSize(List<int> times) {
-    final interval = _medianIntervalS(times);
-    return math.max(minWindowSamples, ((stillWindowMin * 60) / interval).toInt());
-  }
+  /// Still-window length in SAMPLES for a measured cadence [interval] (s).
+  /// The cadence itself comes from [sampleCadenceSeconds], which ABSTAINS
+  /// rather than falling back — this used to fall back to 60 s, which turned a
+  /// device we cannot read into a confident 5-sample window.
+  static int _windowSize(double interval) =>
+      math.max(minWindowSamples, ((stillWindowMin * 60) / interval).toInt());
 
   static double _largestGapS(List<int> times) {
     if (times.length < 2) return 0;
@@ -495,6 +531,12 @@ class AdvancedSleepStager {
     return m.toDouble();
   }
 
+  // ponytail: invalid samples still count toward gravity span/gaps here, so a
+  // record padded with undecoded rows reads as DENSE and the HR-only sparse
+  // bridging below stays off. That errs toward under-reporting sleep (the safe
+  // side, and the reason it is left alone) but can split a genuinely sparse
+  // night that also holds undecoded rows. Filter `valid` here too if that shows
+  // up on real records.
   static bool _isGravitySparse(List<GravTs> grav, List<HrTs> hr) {
     if (grav.length < 2 || hr.length < 2) return false;
     final hrSpan = hr.last.ts - hr.first.ts;
@@ -520,11 +562,22 @@ class AdvancedSleepStager {
   static List<bool> _classifyStill(List<GravTs> grav, List<double> deltas) {
     final n = grav.length;
     if (n < 2) return List<bool>.filled(n, false);
-    final half = _windowSize([for (final g in grav) g.ts]) ~/ 2;
+    // No measurable cadence — or one past [maxStillCadenceSec], where the g/s
+    // cut stops discriminating — ⇒ nothing is asserted still ⇒ no runs ⇒ no
+    // sessions ⇒ `mainSleep` is absent. The honest chain already exists; this
+    // just enters it instead of staging on a 60 s guess.
+    final cadence =
+        sampleCadenceSeconds([for (final g in grav) g.ts.toDouble()]);
+    if (cadence == null || cadence > maxStillCadenceSec) {
+      return List<bool>.filled(n, false);
+    }
+    final window = _windowSize(cadence);
+    final half = window ~/ 2;
+    // g/s × the seconds this delta actually spans. Identical at 1 Hz.
+    final stillCut = gravityStillThresholdGPerS * cadence;
     final stillPrefix = List<int>.filled(n + 1, 0);
     for (var i = 0; i < n; i++) {
-      stillPrefix[i + 1] =
-          stillPrefix[i] + (deltas[i] < gravityStillThresholdG ? 1 : 0);
+      stillPrefix[i + 1] = stillPrefix[i] + (deltas[i] < stillCut ? 1 : 0);
     }
     final flags = List<bool>.filled(n, false);
     for (var i = 0; i < n; i++) {
@@ -804,14 +857,26 @@ class AdvancedSleepStager {
     final rrBuckets = List<List<double>>.generate(nEpochs, (_) => <double>[]);
     final respBuckets = List<List<double>>.generate(nEpochs, (_) => <double>[]);
 
-    // gravity deltas over the segment.
-    final gDeltas = _gravityDeltas(gSeg);
-    for (var k = 0; k < gSeg.length; k++) {
-      final i = idx(gSeg[k].ts);
-      if (i == null) continue;
-      counts[i] += gDeltas[k];
-      gravN[i] += 1;
-      if (gDeltas[k] >= moveDeltaThresholdG) moveN[i] += 1;
+    // gravity deltas over the segment. Both the per-sample move test and the
+    // Cole-Kripke count need the CADENCE: a delta spans one sampling interval,
+    // and `counts` is a SUM of them per epoch, so its magnitude is pure cadence
+    // (30 terms per epoch at 1 Hz, 6 at 5 s) before it means anything about
+    // movement. Absent a measurable cadence there is no motion evidence at all
+    // — leave `counts` at 0, `gravN` at 0 (⇒ `moveFrac` 1.0, "moving", which is
+    // this grid's existing conservative default) and hand Cole-Kripke nothing.
+    final cadence =
+        sampleCadenceSeconds([for (final g in gSeg) g.ts.toDouble()]);
+    final cadenceOk = cadence != null && cadence <= maxStillCadenceSec;
+    if (cadenceOk) {
+      final moveCut = moveDeltaThresholdGPerS * cadence;
+      final gDeltas = _gravityDeltas(gSeg);
+      for (var k = 0; k < gSeg.length; k++) {
+        final i = idx(gSeg[k].ts);
+        if (i == null) continue;
+        counts[i] += gDeltas[k];
+        gravN[i] += 1;
+        if (gDeltas[k] >= moveCut) moveN[i] += 1;
+      }
     }
     for (final h in hSeg) {
       final i = idx(h.ts);
@@ -836,12 +901,33 @@ class AdvancedSleepStager {
       if (hrCnt[i] > 0) hr[i] = hrSum[i] / hrCnt[i];
       moveFrac[i] = gravN[i] > 0 ? moveN[i] / gravN[i] : 1.0;
     }
-    return _EpochGrid(edges, nEpochs, counts, hr, moveFrac, rrBuckets, respBuckets,
-        _coleKripke(_rescaleCounts(counts)));
+    // No cadence ⇒ no motion evidence ⇒ no sleep asserted. `counts` would be
+    // all-zero here, and an all-zero Cole-Kripke score is `si < 1` on every
+    // epoch, i.e. SLEEP everywhere — the exact fabrication the abstain exists
+    // to avoid, so it is spelled out rather than left to the arithmetic.
+    final ckFlags = !cadenceOk
+        ? List<bool>.filled(nEpochs, false)
+        : _coleKripke(_rescaleCounts(counts));
+    return _EpochGrid(edges, nEpochs, counts, hr, moveFrac, rrBuckets,
+        respBuckets, ckFlags);
   }
 
-  static List<double> _rescaleCounts(List<double> counts) =>
-      [for (final c in counts) math.min(c / ckCountDivisor, ckCountClip)];
+  /// Per-epoch gravity-delta SUM → the Cole-Kripke count surrogate.
+  ///
+  /// NO CADENCE FACTOR, on purpose — the sum is already cadence-invariant
+  /// under this file's own rate model (`gravityStillThresholdGPerS`,
+  /// `moveDeltaThresholdGPerS`: a per-sample delta grows linearly with the
+  /// sampling interval for the same physical movement). A 30 s epoch holds 30
+  /// terms of size `d` at 1 Hz and 6 terms of size `5d` at 5 s cadence — both
+  /// sums equal `30d`. Multiplying by `cadenceSec` here used to inflate the
+  /// 5 s-cadence count 5x relative to 1 Hz, which shifted `_coleKripke`'s
+  /// `si < 1.0` decision (and therefore `_onsetAndFinalWake`) on exactly the
+  /// non-WHOOP bands this rate model exists to support. The 1 Hz path is
+  /// unaffected either way (`cadenceSec == 1`), which is why the defect was
+  /// invisible until now.
+  static List<double> _rescaleCounts(List<double> counts) => [
+        for (final c in counts) math.min(c / ckCountDivisor, ckCountClip)
+      ];
 
   static List<bool> _coleKripke(List<double> rescaled) {
     final n = rescaled.length;
@@ -1349,7 +1435,15 @@ class AdvancedSleepStager {
     final minStageableSec = 3 * epSec;
     if (span < minStageableSec) return [StageSegment(start, end, 'wake')];
 
-    final gByTs = <int, GravTs>{for (final g in grav) if (g.ts >= start && g.ts < end) g.ts: g};
+    // Invalid samples are NOT samples: they must not seed `usable`, and they
+    // must not become the source of a carry-forward. A second with only an
+    // undecoded vector falls through to the same unstaged→WAKE path as a
+    // second with no row at all (cardioStager itself never reads
+    // [AccelSample.valid], so it can only be protected here).
+    final gByTs = <int, GravTs>{
+      for (final g in grav)
+        if (g.valid && g.ts >= start && g.ts < end) g.ts: g
+    };
     final hByTs = <int, HrTs>{for (final h in hr) if (h.ts >= start && h.ts < end) h.ts: h};
     final accel = List<AccelSample>.filled(
         span, AccelSample(start * 1000.0, 0, 0, 1.0));
@@ -1437,7 +1531,10 @@ class AdvancedSleepStager {
 
   static List<StageSegment> _stageSession(int start, int end, List<GravTs> grav,
       List<HrTs> hr, List<RrTs> rr, List<RespTs> resp) {
-    final gSeg = [for (final g in grav) if (g.ts >= start && g.ts <= end) g];
+    final gSeg = [
+      for (final g in grav)
+        if (g.valid && g.ts >= start && g.ts <= end) g
+    ];
     if (gSeg.length < 2) return [StageSegment(start, end, 'light')];
     final hSeg = _rowsBetween(hr, start, end);
     final rSeg = [for (final r in rr) if (r.ts >= start && r.ts <= end) r];
@@ -1517,7 +1614,10 @@ class AdvancedSleepStager {
   static List<StageSegment> _stageSessionV2(
       int start, int end, List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
     final lo = start - _v2PadLo, hi = end + _v2PadHi;
-    final gravW = [for (final g in grav) if (g.ts >= lo && g.ts < hi) g];
+    final gravW = [
+      for (final g in grav)
+        if (g.valid && g.ts >= lo && g.ts < hi) g
+    ];
     final hrW = [for (final h in hr) if (h.ts >= lo && h.ts < hi) h];
     final rrW = [for (final r in rr) if (r.ts >= lo && r.ts < hi) r];
     final feats = _v2Features(start, end, gravW, hrW, rrW);

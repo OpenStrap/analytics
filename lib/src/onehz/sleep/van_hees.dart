@@ -63,6 +63,11 @@ class SleepWindow {
   /// Duration of the detected sleep period (seconds).
   final int sptSec;
 
+  /// Seconds per entry of [immobile] / [immobileUnknown] / [zAngleDeg] — the
+  /// measured cadence of the accel stream, 1.0 for the 1 Hz substrate. The
+  /// masks are per-SAMPLE, so this is what turns a mask count into seconds.
+  final double cadenceSec;
+
   const SleepWindow({
     required this.onsetIdx,
     required this.offsetIdx,
@@ -72,6 +77,7 @@ class SleepWindow {
     required this.zAngleDeg,
     required this.sptSec,
     this.immobileUnknown = const <bool>[],
+    this.cadenceSec = 1.0,
   });
 
   /// Seconds whose immobility is genuinely undecidable — an unresolved record
@@ -81,7 +87,7 @@ class SleepWindow {
     for (final u in immobileUnknown) {
       if (u) c++;
     }
-    return c;
+    return (c * cadenceSec).round();
   }
 
   Map<String, dynamic> toJson() => {
@@ -136,6 +142,17 @@ class ImmobilityMask {
   /// The angle-change threshold actually used, in degrees.
   final double thresholdDeg;
 
+  /// Measured sampling cadence of [zAngleDeg] (seconds per sample), or NULL
+  /// when the stream has no measurable cadence or is coarser than
+  /// [vanHeesMaxCadenceSec]. Null means NOTHING is asserted immobile: every
+  /// second is undecidable, because a 5°-between-successive-samples rule cannot
+  /// see an arm that moved and came back inside one sampling gap.
+  final double? cadenceSec;
+
+  /// [sustainedSec] expressed in SAMPLES at [cadenceSec] — the length the
+  /// forward-window scan actually walks. 300 at 1 Hz.
+  final int sustainedSamples;
+
   const ImmobilityMask({
     required this.immobile,
     required this.immobileUnknown,
@@ -143,8 +160,24 @@ class ImmobilityMask {
     required this.deltaDeg,
     required this.sustainedSec,
     required this.thresholdDeg,
+    required this.cadenceSec,
+    required this.sustainedSamples,
   });
 }
+
+/// Coarsest cadence the van Hees rule is published at (seconds per sample).
+///
+/// van Hees 2015/2018 and GGIR specify the rule on a **5-second** rolling
+/// median of the z-angle: the 5°/5-min test is a statement about how much the
+/// wrist angle changes between successive 5 s values. Sampled slower than that,
+/// the successive difference stops bounding the movement it is meant to bound —
+/// an arm can lift and return inside one gap — and the rule over-calls rest,
+/// which is the unsafe direction for a sleep window.
+///
+/// ponytail: hard ceiling at the published epoch, so a 15 s band gets an ABSENT
+/// sleep window rather than a generous one. Raising it is one edit here plus
+/// validation data at that cadence — not a judgement call.
+const double vanHeesMaxCadenceSec = 5;
 
 /// Compute [ImmobilityMask] for a 1 Hz accel series. Safe on any length —
 /// a series shorter than the sustained window yields an all-undecidable mask
@@ -165,8 +198,32 @@ ImmobilityMask immobilityMask(
       deltaDeg: const <double>[],
       sustainedSec: win,
       thresholdDeg: angleThresholdDeg,
+      cadenceSec: null,
+      sustainedSamples: win,
     );
   }
+
+  // Every window below (the 5 min sustained scan, the 5 s smoother) was written
+  // in ARRAY POSITIONS, which is only seconds at 1 Hz. `AccelSample.tsMs`
+  // already carries the clock, so measure the cadence instead of assuming one.
+  final cadence =
+      sampleCadenceSeconds([for (final a in accel) a.tsMs / 1000.0]);
+  if (cadence == null || cadence > vanHeesMaxCadenceSec) {
+    // Nothing asserted, everything undecidable — the same honest shape the
+    // truncated record tail already uses, not a claim of movement either.
+    return ImmobilityMask(
+      immobile: List<bool>.filled(n, false),
+      immobileUnknown: List<bool>.filled(n, true),
+      zAngleDeg: List<double>.filled(n, double.nan),
+      deltaDeg: List<double>.filled(n, double.nan),
+      sustainedSec: win,
+      thresholdDeg: angleThresholdDeg,
+      cadenceSec: null,
+      sustainedSamples: win,
+    );
+  }
+  final winSamples = math.max(1, (win / cadence).round());
+  final smoothSamples = math.max(1, (smoothSec / cadence).round());
 
   // 1–2. z-angle + rolling-median smoothing.
   //
@@ -181,7 +238,7 @@ ImmobilityMask immobilityMask(
       (i) => accel[i].valid
           ? zAngle(accel[i].x, accel[i].y, accel[i].z)
           : double.nan);
-  final ang = _rollingMedian(raw, smoothSec);
+  final ang = _rollingMedian(raw, smoothSamples);
 
   // 3. per-second immobility: |Δ z-angle| < threshold sustained for ≥ window.
   final dAng = List<double>.filled(n, 0);
@@ -212,7 +269,7 @@ ImmobilityMask immobilityMask(
   // failed on the data in hand), otherwise the arm could have moved where we
   // were not looking ⇒ undecidable, never asserted rest.
   for (var i = 0; i < n; i++) {
-    final hi = math.min(n, i + win);
+    final hi = math.min(n, i + winSamples);
     var maxd = 0.0;
     var gap = !accel[i].valid;
     for (var k = i + 1; k < hi; k++) {
@@ -226,7 +283,7 @@ ImmobilityMask immobilityMask(
       }
     }
     final still = maxd < angleThresholdDeg;
-    final fullWindow = hi - i >= win;
+    final fullWindow = hi - i >= winSamples;
     immobile[i] = still && fullWindow && !gap;
     immobileUnknown[i] = still && (!fullWindow || gap);
   }
@@ -238,13 +295,18 @@ ImmobilityMask immobilityMask(
     deltaDeg: dAng,
     sustainedSec: win,
     thresholdDeg: angleThresholdDeg,
+    cadenceSec: cadence,
+    sustainedSamples: winSamples,
   );
 }
 
-/// Detect the nocturnal sleep window from a sequence of 1 Hz accel vectors.
+/// Detect the nocturnal sleep window from a sequence of accel vectors.
 ///
-/// [accel] one gravity vector per second (assumed ~1 Hz, contiguous). [tsMs]
-/// optional matching wall-clock times. Parameters follow GGIR defaults.
+/// [accel] gravity vectors carrying their own absolute times. The cadence is
+/// MEASURED from `tsMs` ([sampleCadenceSeconds]) — there was never a `tsMs`
+/// parameter, and the every-window-is-a-position assumption that stood in for
+/// one only held at 1 Hz. Coarser than [vanHeesMaxCadenceSec] ⇒ absent.
+/// Parameters follow GGIR defaults.
 Metric<SleepWindow> vanHeesSleepWindow(
   List<AccelSample> accel, {
   double angleThresholdDeg = 5,
@@ -259,13 +321,6 @@ Metric<SleepWindow> vanHeesSleepWindow(
 }) {
   const inputs = ['accel_1hz'];
   final n = accel.length;
-  if (n < sustainedMin * 60) {
-    return const Metric<SleepWindow>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'too few accel samples for a sustained-inactivity block',
-    );
-  }
 
   // 1–3. z-angle, smoothing and the per-second sustained-inactivity rule —
   //       the shared primitive, also used by daytime nap detection.
@@ -275,8 +330,25 @@ Metric<SleepWindow> vanHeesSleepWindow(
     sustainedMin: sustainedMin,
     smoothSec: smoothSec,
   );
+  final cadence = mask.cadenceSec;
+  if (cadence == null) {
+    return const Metric<SleepWindow>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'accel cadence not measurable, or coarser than the published '
+          'van Hees epoch (see vanHeesMaxCadenceSec) — the successive-angle '
+          'rule cannot bound movement inside a sampling gap',
+    );
+  }
+  final win = mask.sustainedSamples;
+  if (n < win) {
+    return const Metric<SleepWindow>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'too few accel samples for a sustained-inactivity block',
+    );
+  }
   final ang = mask.zAngleDeg;
-  final win = mask.sustainedSec;
   final immobile = mask.immobile;
   final immobileUnknown = mask.immobileUnknown;
 
@@ -284,7 +356,7 @@ Metric<SleepWindow> vanHeesSleepWindow(
   //    seconds extend a block, so a night still running when the record ends is
   //    reported up to the last second we can actually certify — the undecidable
   //    tail is left out rather than annexed on the assumption it stayed still.
-  final bridge = bridgeGapMin * 60;
+  final bridge = math.max(1, ((bridgeGapMin * 60) / cadence).round());
   var bestStart = -1, bestEnd = -1, bestLen = 0;
   var i = 0;
   while (i < n) {
@@ -336,8 +408,13 @@ Metric<SleepWindow> vanHeesSleepWindow(
     if (u) unresolved++;
   }
 
+  // `bestLen` is a SAMPLE count; the published SPT is seconds. Identical at
+  // 1 Hz, and the only place the two units were ever silently the same number.
+  final sptSec = (bestLen * cadence).round();
+  final undecidableSec = (unresolved * cadence).round();
+
   // Confidence grows with the detected SPT length up to a typical night.
-  final conf = clamp(bestLen / (7 * 3600), 0.3, 0.95);
+  final conf = clamp(sptSec / (7 * 3600), 0.3, 0.95);
   return Metric<SleepWindow>(
     value: SleepWindow(
       onsetIdx: bestStart,
@@ -347,14 +424,15 @@ Metric<SleepWindow> vanHeesSleepWindow(
       immobile: immobile,
       immobileUnknown: immobileUnknown,
       zAngleDeg: ang,
-      sptSec: bestLen,
+      sptSec: sptSec,
+      cadenceSec: cadence,
     ),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
     note: 'van Hees angle-based REST window (5°/${sustainedMin}min); '
         'a rest period, not PSG sleep'
-        '${unresolved > 0 ? '; ${unresolved}s are undecidable (forward window '
+        '${unresolved > 0 ? '; ${undecidableSec}s are undecidable (forward window '
             'truncated by the record end, or unmeasured gravity) and are '
             'excluded' : ''}',
   );

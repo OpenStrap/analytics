@@ -189,4 +189,147 @@ void main() {
     expect(rr.beatTimesMs(0), [1000.0, 1800.0, 2600.0]);
     expect(rr.length, 3);
   });
+
+  // ── C9: the ONE median-interval helper ────────────────────────────────────
+  // Three near-duplicates used to live in load_trimp / hr_zones /
+  // advanced_stager with three signatures and three numeric fallbacks (1.0,
+  // 1.0 via `fallbackSampleMin * 60`, and 60). The fallbacks fired for a
+  // device SLOWER than their 300 s gap filter, not for a device with no data —
+  // so a 301 s band had every reading credited with one second.
+  //
+  // Every case here is at 301 s or 600 s, never 300: a 300 s device passed the
+  // old `<= 300` filters cleanly and was never the bug.
+  group('sampleCadenceSeconds', () {
+    List<double> at(double cadence, int n, {double t0 = 0}) =>
+        [for (var i = 0; i < n; i++) t0 + i * cadence];
+
+    test('measures the cadence of a regular stream', () {
+      expect(sampleCadenceSeconds(at(1, 100)), closeTo(1.0, 1e-12));
+      expect(sampleCadenceSeconds(at(60, 100)), closeTo(60.0, 1e-12));
+      // 300 s is SUPPORTED. It always was; the cliff is above it.
+      expect(sampleCadenceSeconds(at(300, 100)), closeTo(300.0, 1e-12));
+    });
+
+    test('301 s and 600 s ABSTAIN instead of falling back to 1.0 / 60', () {
+      expect(sampleCadenceSeconds(at(301, 100)), isNull);
+      expect(sampleCadenceSeconds(at(600, 100)), isNull);
+    });
+
+    test('nothing to measure → null, never a number', () {
+      expect(sampleCadenceSeconds(const []), isNull);
+      expect(sampleCadenceSeconds(const [5.0]), isNull);
+      // Duplicate timestamps are not a cadence.
+      expect(sampleCadenceSeconds(const [5.0, 5.0, 5.0]), isNull);
+    });
+
+    test('dropouts do NOT abstain — a hole is a hole, not a cadence', () {
+      // A sleep-only source: 8 h of 1 Hz then a 16 h gap. The median is still
+      // 1 s and it is still right; the caller caps the hole at that cadence.
+      final night = [...at(1, 28800), 28800 + 57600.0];
+      expect(sampleCadenceSeconds(night), closeTo(1.0, 1e-12));
+      // Mild jitter (1 s alternating with 2 s) stays inside the 2x mode
+      // tolerance — a jittering device is still a device we can read.
+      final jitter = <double>[0];
+      for (var i = 0; i < 200; i++) {
+        jitter.add(jitter.last + (i.isEven ? 1 : 2));
+      }
+      expect(sampleCadenceSeconds(jitter), isNotNull);
+    });
+
+    test('a stream with no dominant mode has no cadence → null', () {
+      // THREE regimes in equal thirds — 1 s, 60 s, 600 s, which is what one
+      // series fed by two devices at different rates looks like. The median
+      // (60 s) is a real value but describes only a third of the record, so
+      // there is no cadence to hand a caller.
+      //
+      // This check is DELIBERATELY NARROW. A two-mode stream (dense sampling
+      // plus long holes) passes on purpose: there the median IS the cadence
+      // and the long gaps are dropouts, which every caller already caps at the
+      // median — "a hole in the stream is not elapsed effort". Tightening this
+      // enough to catch that case would abstain on ordinary dropout-heavy
+      // nights, which is a worse failure than the one it would prevent.
+      final mixed = <double>[0];
+      for (var i = 0; i < 99; i++) {
+        mixed.add(mixed.last + (i % 3 == 0 ? 1 : (i % 3 == 1 ? 60 : 600)));
+      }
+      expect(sampleCadenceSeconds(mixed), isNull);
+    });
+  });
+
+  group('C9 callers abstain at 301 s and 600 s', () {
+    test('HeartRateZones.timeInZone: 300 s scores, 301 s and 600 s are null',
+        () {
+      final zoneSet = HeartRateZones.zonesFromMaxHr(200);
+      List<HrSample> stream(double cadence, int n) => [
+            for (var i = 0; i < n; i++) HrSample(i * cadence * 1000.0, 150)
+          ];
+      // 300 s: 20 readings, each credited its own 300 s → 6000 s in z3.
+      expect(HeartRateZones.timeInZone(stream(300, 20), zoneSet)!.total,
+          closeTo(6000, 1e-9));
+      // 301 s used to return 20 x 1.0 s = 20 s — a ~300x undercount published
+      // as minutes. It is now absent.
+      expect(HeartRateZones.timeInZone(stream(301, 20), zoneSet), isNull);
+      expect(HeartRateZones.timeInZone(stream(600, 20), zoneSet), isNull);
+    });
+
+    test('StrainScorer: 301 s and 600 s produce no durations and no strain',
+        () {
+      final bpm = List<double>.filled(40, 150.0);
+      List<double> ts(double cadence) =>
+          [for (var i = 0; i < 40; i++) i * cadence];
+      expect(StrainScorer.medianIntervalSeconds(ts(300)), closeTo(300, 1e-12));
+      expect(StrainScorer.medianIntervalSeconds(ts(301)), isNull);
+      expect(StrainScorer.medianIntervalSeconds(ts(600)), isNull);
+      expect(StrainScorer.sampleDurationsMinutes(ts(301)), isEmpty);
+      expect(StrainScorer.sampleDurationsMinutes(ts(600)), isEmpty);
+      // The abstention has to reach the published number, not stop at the
+      // helper: `banisterTRIMP` credits `fallbackSampleMin` per sample when
+      // handed an empty list, which is the fabricated 1 s all over again.
+      expect(StrainScorer.strain(bpm, ts(301), maxHR: 190, restingHR: 50),
+          isNull);
+      expect(StrainScorer.strain(bpm, ts(600), maxHR: 190, restingHR: 50),
+          isNull);
+      expect(StrainScorer.strain(bpm, ts(300), maxHR: 190, restingHR: 50),
+          isNotNull);
+    });
+
+    test('AdvancedSleepStager stages nothing past its own cadence ceiling', () {
+      // A perfectly still, sleep-shaped night. It used to be staged on a 60 s
+      // guess at ANY cadence; `sampleCadenceSeconds` stopped that above 300 s.
+      //
+      // The 300 s case moved in phase 3 (C4) and is now ABSENT too, which is a
+      // stricter ceiling than this helper's, not a contradiction of it:
+      // `gravityStillThresholdGPerS` is a RATE, so the per-sample cut is
+      // `0.01 x cadence` — and |Δg| between two unit gravity vectors saturates
+      // at 2, so at 300 s the cut is 3.0 g and EVERY sample reads still whatever
+      // the wrist did. This synthetic (all deltas exactly 0) cannot see that;
+      // a real 300 s day would have come out as one unbroken 8 h sleep session.
+      // See `AdvancedSleepStager.maxStillCadenceSec` and
+      // `test/onehz/sleep_cadence_test.dart`.
+      List<GravTs> grav(int cadence) => [
+            for (var t = 0; t < 8 * 3600; t += cadence) GravTs(t, 0, 0, 1.0)
+          ];
+      List<HrTs> hr(int cadence) => [
+            for (var t = 0; t < 8 * 3600; t += cadence) HrTs(t, 52)
+          ];
+      expect(AdvancedSleepStager.detectSleep(grav(30), hr(30)), isNotEmpty);
+      expect(AdvancedSleepStager.detectSleep(grav(300), hr(300)), isEmpty);
+      expect(AdvancedSleepStager.detectSleep(grav(301), hr(301)), isEmpty);
+      expect(AdvancedSleepStager.detectSleep(grav(600), hr(600)), isEmpty);
+    });
+
+    test('1 Hz is untouched — the refactor moves nothing on a WHOOP stream',
+        () {
+      final zoneSet = HeartRateZones.zonesFromMaxHr(200);
+      final oneHz = [for (var i = 0; i < 3600; i++) HrSample(i * 1000.0, 150)];
+      // 3600 samples, each 1 s, tail gets the 1 s median.
+      expect(HeartRateZones.timeInZone(oneHz, zoneSet)!.total,
+          closeTo(3600, 1e-9));
+      final ts = [for (var i = 0; i < 3600; i++) i.toDouble()];
+      expect(StrainScorer.medianIntervalSeconds(ts), closeTo(1.0, 1e-12));
+      final durs = StrainScorer.sampleDurationsMinutes(ts);
+      expect(durs.length, 3600);
+      expect(durs.every((d) => (d - 1 / 60.0).abs() < 1e-12), isTrue);
+    });
+  });
 }

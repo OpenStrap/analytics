@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../types.dart';
+import '../util.dart';
 
 /// One display heart-rate zone defined by a bpm interval.
 class HeartRateZone {
@@ -172,18 +173,23 @@ class HeartRateZones {
   /// Each sample is credited with the duration until the next sample. The tail
   /// sample gets the median plausible interval so a regular stream is fully
   /// accounted for without letting one pathological gap dominate a zone.
-  static TimeInHeartRateZone timeInZone(
+  ///
+  /// NULL when [sampleCadenceSeconds] cannot vouch for the stream's cadence —
+  /// see it for the rule. Every duration in here is a multiple of that cadence,
+  /// so without it there is no time-in-zone, only a number shaped like one: a
+  /// 301 s stream used to credit each reading with a single second and publish
+  /// a ~300× undercount as minutes.
+  static TimeInHeartRateZone? timeInZone(
     List<HrSample> hr,
     HeartRateZoneSet zoneSet,
   ) {
     final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
     final zoneSeconds = List<double>.filled(5, 0);
     var below = 0.0;
-    if (sorted.isEmpty) {
-      return TimeInHeartRateZone(seconds: zoneSeconds, belowZone1: 0);
-    }
 
-    final tailSeconds = _medianIntervalSeconds(sorted);
+    final tailSeconds =
+        sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
+    if (tailSeconds == null) return null;
     for (var i = 0; i < sorted.length; i++) {
       final sample = sorted[i];
       if (!sample.valid) continue;
@@ -207,15 +213,4 @@ class HeartRateZones {
         : fallbackSeconds;
   }
 
-  static double _medianIntervalSeconds(List<HrSample> sorted) {
-    if (sorted.length < 2) return 1.0;
-    final gaps = <double>[];
-    for (var i = 1; i < sorted.length; i++) {
-      final gapSeconds = (sorted[i].tsMs - sorted[i - 1].tsMs) / 1000.0;
-      if (gapSeconds > 0 && gapSeconds <= 300) gaps.add(gapSeconds);
-    }
-    if (gaps.isEmpty) return 1.0;
-    gaps.sort();
-    return math.max(gaps[gaps.length ~/ 2], 1.0);
-  }
 }

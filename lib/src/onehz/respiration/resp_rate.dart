@@ -322,9 +322,11 @@ Metric<RespEstimate> rsaRespRate(
 ///
 /// Respiratory-Induced Intensity Variation: a 0.1–0.5 Hz band-pass on the green
 /// ADC, then the dominant spectral peak in the respiratory band => breaths/min.
-/// [adc] the 1 Hz green ADC samples, [tsSec] their times (seconds). Uneven
-/// times are fine — we use Lomb-Scargle, no resampling. [validFraction] of the
-/// window that passed the contact/SQI gate drives confidence.
+/// [adc] the green ADC samples, [tsSec] their times (seconds). Uneven times are
+/// fine — we use Lomb-Scargle, no resampling — but the stream must sample at
+/// 1 Hz OR FASTER, because the band is fixed and anything slower aliases into
+/// it (see the Nyquist gate below). [validFraction] of the window that passed
+/// the contact/SQI gate drives confidence.
 Metric<RespEstimate> riivRespRate(
   List<double> adc,
   List<double> tsSec, {
@@ -345,6 +347,28 @@ Metric<RespEstimate> riivRespRate(
       tier: Tier.relative,
       inputs_used: inputs,
       note: 'degenerate timestamps',
+    );
+  }
+  // NYQUIST. Unlike RSA (which derives its ceiling per window, `_beatNyquist`),
+  // this band was FIXED at 0.1–0.5 Hz with no reference to the sampling rate at
+  // all. A stream slower than 1 Hz cannot represent it: at 5 s sampling every
+  // real breath sits above Nyquist and folds back INSIDE the band as an alias,
+  // so the peak is real, in range, and about a rate nobody is breathing —
+  // measured on a real night, 21.2 br/min was published as 10.8. Narrowing the
+  // search grid is no defence, because an alias is in-band by construction.
+  // The only honest output is absence.
+  final cadenceSec = sampleCadenceSeconds(tsSec);
+  if (cadenceSec == null || 1.0 / (2 * cadenceSec) < respHiHz) {
+    return Metric<RespEstimate>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: cadenceSec == null
+          ? 'no measurable sampling cadence — cannot rule out a respiratory '
+              'alias, so RIIV is withheld'
+          : 'sampling at ${round6(cadenceSec)}s (Nyquist '
+              '${round6(1.0 / (2 * cadenceSec))} Hz) cannot represent the '
+              '${respLoHz}–${respHiHz} Hz respiratory band — every rate in it '
+              'would alias into the band; withheld',
     );
   }
   // Detrend (remove DC/slow baseline wander) via a robust-ish linear fit; the

@@ -11,7 +11,10 @@
 //       and those gates are load-bearing for night accuracy.
 //   - True Phillips Sleep Regularity Index       (sri.dart)
 //   - Sleep accounting (onset/offset/WASO/TST/eff/cycles) (accounting.dart)
-//   - 3-class autonomic stager (wake/NREM/REM)    (stager.dart) — honesty-bounded
+//   - 3-class cardio stager (wake/NREM/REM)       (cardio_stager.dart) —
+//       honesty-bounded; stager.dart holds only the shared post-processing
+//       (StagerResult, Webster rescore, consolidation) it reuses. The
+//       autonomic-HR-only stager that used to live in stager.dart is DELETED.
 //   - Cardiopulmonary Coupling (CPC)              (cpc.dart)
 //   - Nonparametric circadian IS/IV/RA/L5/M10     (circadian_np.dart)
 //
@@ -26,11 +29,10 @@ export 'hr_fallback.dart';
 export 'advanced_stager.dart';
 export 'sri.dart';
 export 'accounting.dart';
-// stager.dart still provides StagerResult + consolidateSleepStages (both used
-// by cardio_stager and tests), but its `autonomicStager` is a DEPRECATED
-// duplicate of `cardioStager` and is NOT re-exported from the barrel — deep-
-// import 'src/onehz/sleep/stager.dart' if you still need the legacy estimator.
-export 'stager.dart' hide autonomicStager;
+// stager.dart provides StagerResult + the shared Webster/consolidation
+// post-processing (both used by cardio_stager and tests). Its deprecated
+// `autonomicStager` is DELETED — `cardioStager` is the stager.
+export 'stager.dart';
 export 'cardio_stager.dart';
 export 'cpc.dart';
 export 'circadian_np.dart';

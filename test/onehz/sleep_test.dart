@@ -1,9 +1,3 @@
-// This file deliberately exercises `autonomicStager`, which is deprecated but
-// still exported for back-compat. Testing shipped-but-deprecated API is the
-// point, so the deprecation notice is suppressed for the whole file. Older Dart
-// analyzers report `deprecated_member_use_from_same_package` where newer ones
-// don't, and CI runs `--fatal-infos` on both, so this has to be file-level.
-// ignore_for_file: deprecated_member_use_from_same_package
 // SLEEP & CIRCADIAN family — synthetic known-answer + real-capture plausibility.
 //
 // No TS oracle exists for the 1 Hz sleep/circadian methods, so every method is
@@ -21,10 +15,6 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
-// autonomicStager is DEPRECATED and no longer re-exported from the barrel
-// (superseded by cardioStager); deep-import it here for the legacy coverage.
-import 'package:openstrap_analytics/src/onehz/sleep/stager.dart'
-    show autonomicStager;
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
 void main() {
@@ -625,46 +615,6 @@ void main() {
     });
   });
 
-  // ------------------------------------------------------------------- stager
-  group('3-class autonomic stager', () {
-    test('constructed NREM/REM/wake epochs classify correctly', () {
-      // Build 90 min: 30 min deep NREM (low stable HR, immobile), 30 min REM
-      // (elevated variable HR, immobile/atonic), 30 min wake (moving).
-      final hr = <double>[];
-      final immobile = <bool>[];
-      final rnd = math.Random(1);
-      // NREM: HR ~48 ± 0.5, immobile.
-      for (var i = 0; i < 30 * 60; i++) {
-        hr.add(48 + (rnd.nextDouble() - 0.5));
-        immobile.add(true);
-      }
-      // REM: HR ~62 ± 6 (variable), immobile (atonia).
-      for (var i = 0; i < 30 * 60; i++) {
-        hr.add(62 + (rnd.nextDouble() - 0.5) * 12);
-        immobile.add(true);
-      }
-      // Wake: HR ~70, MOVING.
-      for (var i = 0; i < 30 * 60; i++) {
-        hr.add(70 + (rnd.nextDouble() - 0.5) * 4);
-        immobile.add(false);
-      }
-      final m = autonomicStager(hr, immobile, epochSec: 30);
-      expect(m.present, isTrue);
-      final s = m.value!;
-      // Each phase has 60 epochs of 30s. Check the dominant label per third.
-      final third = s.stages.length ~/ 3;
-      final nremPart = s.stages.sublist(0, third);
-      final remPart = s.stages.sublist(third, 2 * third);
-      final wakePart = s.stages.sublist(2 * third);
-      expect(_dominant(nremPart), SleepStage.nrem);
-      expect(_dominant(remPart), SleepStage.rem);
-      expect(_dominant(wakePart), SleepStage.wake);
-      // Honesty: tier is ESTIMATE, confidence bounded.
-      expect(m.tier, Tier.estimate);
-      expect(m.confidence, lessThanOrEqualTo(0.6));
-    });
-  });
-
   // ---------------------------------------------------------------------- CPC
   group('Cardiopulmonary Coupling (WITHDRAWN)', () {
     test('abstains — no respiration channel independent of the beat times', () {
@@ -680,6 +630,7 @@ void main() {
         nn.add(rr);
         times.add(t);
       }
+      // ignore: deprecated_member_use_from_same_package
       final m = cardiopulmonaryCoupling(nn, times);
       expect(m.present, isFalse);
       expect(m.note, contains('respiration channel'));
@@ -730,7 +681,6 @@ void main() {
           histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final accel = <AccelSample>[];
       final hr = <double>[];
-      final immobileFromRest = <bool>[];
       final rrMs = <double>[];
       var t = 0.0;
       for (final line in lines) {
@@ -765,20 +715,13 @@ void main() {
       // dominant frequency in the physiological respiratory range (or absent).
       final corr = correctRr(rrMs);
       if (corr.nn.length >= 60) {
+        // ignore: deprecated_member_use_from_same_package
         final cpc = cardiopulmonaryCoupling(corr.nn, corr.nnTimesMs);
         if (cpc.present) {
           expect(cpc.value!.dominantHz, inInclusiveRange(0.0, 0.45));
           expect(cpc.value!.hfc, greaterThanOrEqualTo(0));
         }
       }
-
-      // Stager on the real HR + a built immobility mask (all immobile here as a
-      // smoke test): must run and return an ESTIMATE-tier result or absent.
-      for (var i = 0; i < hr.length; i++) {
-        immobileFromRest.add(true);
-      }
-      final st = autonomicStager(hr, immobileFromRest, epochSec: 30);
-      expect(st.tier, Tier.estimate);
     });
   });
 
@@ -903,22 +846,6 @@ void main() {
       expect(r.toJson()['cycle_count'], r.n);
     });
   });
-}
-
-SleepStage _dominant(List<SleepStage> xs) {
-  final counts = <SleepStage, int>{};
-  for (final s in xs) {
-    counts[s] = (counts[s] ?? 0) + 1;
-  }
-  var best = SleepStage.wake;
-  var bestN = -1;
-  counts.forEach((k, v) {
-    if (v > bestN) {
-      bestN = v;
-      best = k;
-    }
-  });
-  return best;
 }
 
 // ---------------------------------------------------------------------------

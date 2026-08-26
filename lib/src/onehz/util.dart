@@ -75,6 +75,79 @@ double? mad(List<double> xs, {bool scaled = true}) {
   return scaled ? raw * 1.4826 : raw;
 }
 
+/// The fastest cadence [sampleCadenceSeconds] will vouch for (seconds).
+///
+/// Above this the metrics that consume a cadence — time-in-zone credit, TRIMP
+/// per-sample duration, the still-window sample count — have no calibration and
+/// no validation data, so the helper abstains rather than picking a number.
+/// It is a CEILING ON WHAT WE HAVE MEASURED, not a physical limit: raising it
+/// is one edit here plus evidence for the metrics downstream.
+const double maxSupportedCadenceSec = 300;
+
+/// Gaps within this factor of the median count as belonging to the same mode.
+/// 2× because every downstream use of a cadence — sample counts for a window,
+/// one sample's worth of tail credit — degrades gracefully at a 2× error and
+/// catastrophically at a 300× one, which is the failure this exists to stop.
+const double _cadenceModeTolerance = 2.0;
+
+/// The median must describe at least this share of the gaps. Below it the
+/// stream has no single cadence (two interleaved sources, a burst-mode band)
+/// and the median is the midpoint between two regimes rather than either of
+/// them — a number that is wrong for both halves of the record.
+const double _cadenceMinModeFraction = 0.5;
+
+/// Measured sampling cadence (seconds) of a time-ordered stream — or NULL.
+///
+/// ONE helper for what used to be three near-duplicates with three signatures
+/// (`StrainScorer.medianIntervalSeconds`, `HeartRateZones._medianIntervalSeconds`,
+/// `AdvancedSleepStager._medianIntervalS`). Callers pass seconds; a stream held
+/// in ms or ints maps at the call site.
+///
+/// IT ABSTAINS INSTEAD OF FALLING BACK. The three originals returned 1.0, 1.0
+/// and 60 respectively when they could not measure a cadence — and the case
+/// that reached those fallbacks was not "no data", it was "every gap exceeded
+/// the plausibility filter", i.e. a device SLOWER than the filter. A 301 s band
+/// therefore had every reading credited with one second: roughly a 300×
+/// undercount, published at full confidence. An absent cadence has to become an
+/// absent metric, which is this project's contract; a wrong one becomes a
+/// wrong number nobody can see.
+///
+/// Returns null when:
+///  * fewer than two samples, or no positive gap — nothing to measure;
+///  * the median gap exceeds [maxSupportedCadenceSec] — a device we cannot
+///    yet score (this is the 301 s case, and it is now absent, not 1.0);
+///  * the median describes under [_cadenceMinModeFraction] of the gaps — see
+///    that constant. Ordinary dropouts do NOT trip this: a night of 1 Hz with a
+///    16 h hole still has essentially every gap at 1 s, and mild jitter (1 s
+///    alternating with 2 s) stays inside [_cadenceModeTolerance].
+///
+/// There is deliberately NO floor at 1 s. All three originals had one; on a
+/// 1 Hz substrate it never bound, and on a faster source it would have been a
+/// fabrication in the small direction.
+double? sampleCadenceSeconds(List<double> tsSec) {
+  if (tsSec.length < 2) return null;
+  final gaps = <double>[];
+  for (var i = 1; i < tsSec.length; i++) {
+    final g = tsSec[i] - tsSec[i - 1];
+    // Non-positive gaps are duplicate or unsorted timestamps, not a cadence.
+    // Pathological LONG gaps are deliberately kept: a dropout is a minority of
+    // the gaps and cannot move a median, whereas filtering them out first is
+    // exactly how a genuinely-slow device ended up indistinguishable from a
+    // stream with no usable gaps at all.
+    if (g > 0) gaps.add(g);
+  }
+  final m = median(gaps);
+  if (m == null || m > maxSupportedCadenceSec) return null;
+  var inMode = 0;
+  for (final g in gaps) {
+    if (g <= m * _cadenceModeTolerance && g * _cadenceModeTolerance >= m) {
+      inMode++;
+    }
+  }
+  if (inMode < gaps.length * _cadenceMinModeFraction) return null;
+  return m;
+}
+
 /// Iglewicz–Hoaglin modified z-score of [x] against a sample, using
 /// median + MAD. Returns null if MAD is 0 (degenerate / fully-quantized) so
 /// the caller can fall back to a coarser test rather than divide by zero.

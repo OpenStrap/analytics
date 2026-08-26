@@ -339,6 +339,22 @@ void main() {
       expect(ok.value!.low30Mean, closeTo(60, 1e-9));
     });
 
+    test(
+        'REGRESSION: minCoverage: 0 does not admit an all-off-skin window '
+        'as a trough', () {
+      // needValid = (minCoverage * perWindow).ceil() is 0 when minCoverage is
+      // 0, and `count < needValid` is then never true for a non-negative
+      // count — so a window with ZERO on-skin samples used to reach `sum /
+      // count` as 0.0 / 0, i.e. NaN, which then LATCHES as `best` (`m < best`
+      // is false for a NaN on either side) and comes back as a PRESENT metric
+      // whose low30Mean is NaN. An explicit `count == 0` guard is what stops
+      // it, independent of whatever minCoverage the caller passed.
+      final allOffSkin = List<double>.filled(2000, 0.0);
+      final m = nocturnalRhr(allOffSkin, minCoverage: 0.0);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+    });
+
     test('REGRESSION: hrDip refuses a 1-sample day and a 1-sample night', () {
       final m = hrDip([70], [60]);
       expect(m.present, isFalse);
@@ -623,7 +639,7 @@ void main() {
         const HrSample(120000, 150), // z3 for 60 s
         const HrSample(180000, 170), // z4 for 60 s
         const HrSample(240000, 190), // z5 for tail median 60 s
-      ], zoneSet);
+      ], zoneSet)!;
       expect(time.secondsInZone(1), closeTo(60, 1e-9));
       expect(time.secondsInZone(2), closeTo(60, 1e-9));
       expect(time.secondsInZone(3), closeTo(60, 1e-9));
@@ -640,7 +656,7 @@ void main() {
         const HrSample(1000, 150), // z3
         const HrSample(2000, 190), // z5, next gap huge
         const HrSample(700000, 190), // huge gap capped to 1 s
-      ], zoneSet);
+      ], zoneSet)!;
       expect(time.secondsInZone(2), closeTo(1, 1e-9));
       expect(time.secondsInZone(3), closeTo(1, 1e-9));
       expect(time.secondsInZone(5), closeTo(2, 1e-9));
