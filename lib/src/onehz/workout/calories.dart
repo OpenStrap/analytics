@@ -281,13 +281,51 @@ class Calories {
   /// case and for the same reason: no gate, no honest energy figure. It is
   /// never the zeros, because a zero here reads downstream as a measured day
   /// with nothing in it.
-  static ({double total, double active, double basal})? dailyEnergy(
+  /// METs for a measured walking cadence, or null when the cadence carries no
+  /// honest MET.
+  ///
+  /// Tudor-Locke et al. 2019 (CADENCE-Adults, Int J Behav Nutr Phys Act 16:8):
+  /// heuristic cadence thresholds of 100, 110, 120 and 130 steps/min
+  /// correspond to 3, 4, 5 and 6 METs in adults. Linear between the anchors;
+  /// CLAMPED at both ends of the fitted range rather than extrapolated —
+  /// below 100 spm is under the study's own moderate floor (the same boundary
+  /// [activeHRRFraction] holds on the HR side, ACSM moderate), and above
+  /// 130 spm is running, which drives HR over the flex gate and bills there.
+  static double? metFromCadenceSpm(double cadenceSpm) {
+    if (!cadenceSpm.isFinite || cadenceSpm < 100.0) return null;
+    final met = 3.0 + (cadenceSpm - 100.0) * 0.1;
+    return met > 6.0 ? 6.0 : met;
+  }
+
+  /// [cadenceSpmPerMin], when given, must be index-aligned with [hrPerMin]
+  /// (one entry per minute; null = no measured cadence that minute — which is
+  /// most minutes: the pedometer that can resolve gait only runs while the
+  /// phone holds the live link). It fills the exact gap MOT-02 knowingly
+  /// opened: the HR-flex gate refuses everything below the ACSM moderate
+  /// floor because Keytel has no fitted data there, so a walk at 95 bpm
+  /// added ZERO active kcal for its whole duration. Cadence is the one signal
+  /// here that measures walking (MT-05 showed the 1 Hz accel cannot), and
+  /// CADENCE-Adults prices it: a minute the HR gate refuses, whose cadence is
+  /// at/above the study's own moderate floor, bills (MET − 1) basal-minutes
+  /// of surplus via [metFromCadenceSpm]. A minute the HR gate accepts bills
+  /// by HR alone — HR sees intensity cadence cannot, and a minute is never
+  /// billed twice. The `walking` component of the result is that surplus,
+  /// already included in `active`.
+  static ({double total, double active, double basal, double walking})?
+      dailyEnergy(
     List<double> hrPerMin, {
     required WorkoutUserProfile profile,
     required double hrmax,
     required double restingHr,
     int dayMinutes = 1440,
+    List<double?>? cadenceSpmPerMin,
   }) {
+    if (cadenceSpmPerMin != null &&
+        cadenceSpmPerMin.length != hrPerMin.length) {
+      throw ArgumentError(
+          'cadenceSpmPerMin (${cadenceSpmPerMin.length}) must align with '
+          'hrPerMin (${hrPerMin.length}): one entry per wake minute');
+    }
     // (weight/height/age still can't be told apart from their defaults here:
     // WorkoutUserProfile's own constructor bakes 70/170/30 in at construction,
     // so by the time a profile object arrives there is no way left to tell "the
@@ -304,17 +342,34 @@ class Calories {
     final basalPerMin = bmrDay / 1440.0;
 
     var active = 0.0;
-    for (final hr in hrPerMin) {
+    var walking = 0.0;
+    for (var i = 0; i < hrPerMin.length; i++) {
+      final hr = hrPerMin[i];
       // `hr < flexHr` is false for NaN, so an unfiltered non-finite minute
       // would bill active and carry its NaN into the day total.
-      if (!hr.isFinite || hr < flexHr) continue; // below flex → basal only
-      final activePerMin =
-          activeKcalPerS(coeffs, hr, hrmax, weightKg, age) * 60.0;
-      final surplus = activePerMin - basalPerMin;
-      if (surplus > 0) active += surplus;
+      if (hr.isFinite && hr >= flexHr) {
+        final activePerMin =
+            activeKcalPerS(coeffs, hr, hrmax, weightKg, age) * 60.0;
+        final surplus = activePerMin - basalPerMin;
+        if (surplus > 0) active += surplus;
+        continue; // HR billed the minute — cadence never doubles it.
+      }
+      // Below flex (or no HR at all — measured gait stands on its own):
+      // a measured walking cadence prices the minute the HR gate refused.
+      final cad = cadenceSpmPerMin?[i];
+      if (cad == null) continue;
+      final met = metFromCadenceSpm(cad);
+      if (met == null) continue;
+      walking += (met - 1.0) * basalPerMin;
     }
+    active += walking;
     final basal = basalPerMin * dayMinutes;
-    return (total: basal + active, active: active, basal: basal);
+    return (
+      total: basal + active,
+      active: active,
+      basal: basal,
+      walking: walking,
+    );
   }
 
   /// Estimate (kcal, kJ) for a workout bout. Each sample is weighted by the

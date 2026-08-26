@@ -108,6 +108,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `autoDetectWorkouts` | `workout/auto_detect.dart` | automatic workout detection | — |
 | `hrRecovery` | `workout/hr_recovery.dart` | HRR — HR drop N seconds post-peak | Cole/Lauer 1999-style HRR |
 | `Calories.dailyEnergy` / `estimateBoutCalories` | `workout/calories.dart` | Keytel HR→kcal regression + Harris-Benedict/Mifflin BMR | Keytel et al. 2005 |
+| `Calories.metFromCadenceSpm` | `workout/calories.dart` | walking METs from measured cadence, for sub-flex-gate minutes (100/110/120/130 spm ↔ 3/4/5/6 METs, linear between, clamped) | Tudor-Locke et al. 2019 (CADENCE-Adults) |
 
 ### `wellness/`
 | Function | File | Method | Citation |
@@ -149,6 +150,7 @@ Lipponen & Tarvainen 2019 · Laguna, Moody & Mark 1998 · Bigger 1992 · Bauer e
 Alavi et al. 2022 · Mishra et al. 2020 · Plews et al. 2013 · Halberg & Nelson 1979 ·
 Banister 1991 · Edwards 1993 · Baevsky & Berseneva 2008 · McCraty & Zayas 2014 · McCraty,
 Atkinson, Tomasino & Bradley 2009 · van Hees et al. · Rosenblum et al. 2024 · Phillips et
-al. 2017 · Pimentel et al. · Brage et al. 2004 · Keytel et al. 2005 · Hopkins 2004 ·
+al. 2017 · Pimentel et al. · Brage et al. 2004 · Keytel et al. 2005 · Tudor-Locke et al.
+2019 · Hopkins 2004 ·
 Mahalanobis 1936 · Killick et al. 2012 · Wittmann & Roenneberg 2006 · Pietilä et al. 2018 ·
 Malik et al.

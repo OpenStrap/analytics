@@ -904,6 +904,118 @@ void main() {
           reason: 'ACSM moderate floor: 40 % HRR ≡ 64 % HRmax');
     });
 
+    group('walking cadence term (CADENCE-Adults)', () {
+      // MOT-02 knowingly traded walking away: HR-flex bills nothing below the
+      // ACSM moderate floor because Keytel has no fitted data there, and a
+      // walk at 95 bpm added ZERO active kcal for its entire duration (edge
+      // report: "Walking calories are not counted"). MT-05 established the
+      // 1 Hz accel cannot fill that gap. MEASURED CADENCE can: it is the one
+      // gait signal the platform actually has (the 100 Hz pedometer), and
+      // CADENCE-Adults publishes the cadence↔MET line for exactly this
+      // region. Minutes the HR gate refuses are billed from cadence instead —
+      // never both, and never from a cadence nobody measured.
+      const profile = WorkoutUserProfile(
+          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const hrmax = 190.0, rhr = 60.0;
+      final basalPerMin =
+          Calories.mifflinBmrKcalDay(80, 180, 30, 'male') / 1440.0;
+
+      test('metFromCadenceSpm follows the published anchors', () {
+        // Tudor-Locke 2019: heuristic thresholds 100/110/120/130 steps/min
+        // for 3/4/5/6 METs. Linear between anchors, clamped at the ends of
+        // the fitted range — 140 spm is running, and running bills by HR.
+        expect(Calories.metFromCadenceSpm(100), closeTo(3.0, 1e-9));
+        expect(Calories.metFromCadenceSpm(110), closeTo(4.0, 1e-9));
+        expect(Calories.metFromCadenceSpm(120), closeTo(5.0, 1e-9));
+        expect(Calories.metFromCadenceSpm(130), closeTo(6.0, 1e-9));
+        expect(Calories.metFromCadenceSpm(140), closeTo(6.0, 1e-9));
+        expect(Calories.metFromCadenceSpm(99.9), isNull,
+            reason: 'below the moderate floor the study does not price it');
+        expect(Calories.metFromCadenceSpm(double.nan), isNull);
+      });
+
+      test('a below-gate walk with measured cadence finally bills', () {
+        // One hour at 95 bpm, 110 spm — the reported walk. HR-only: 0 kcal.
+        final hr = List<double>.filled(60, 95.0);
+        final cad = List<double?>.filled(60, 110.0);
+        final without = Calories.dailyEnergy(hr,
+            profile: profile, hrmax: hrmax, restingHr: rhr)!;
+        expect(without.active, 0.0,
+            reason: 'the HR gate alone still refuses — unchanged');
+        final with_ = Calories.dailyEnergy(hr,
+            profile: profile,
+            hrmax: hrmax,
+            restingHr: rhr,
+            cadenceSpmPerMin: cad)!;
+        // 4 METs → surplus (4−1)·basal per minute, 60 minutes.
+        expect(with_.walking, closeTo(60 * 3 * basalPerMin, 0.5));
+        expect(with_.active, closeTo(with_.walking, 1e-9),
+            reason: 'no HR-billed minutes in this hour');
+        expect(with_.total, closeTo(with_.basal + with_.active, 1e-6));
+      });
+
+      test('a minute the HR gate bills is never ALSO billed from cadence', () {
+        final hr = List<double>.filled(60, 150.0); // above gate: HR bills
+        final byHr = Calories.dailyEnergy(hr,
+            profile: profile, hrmax: hrmax, restingHr: rhr)!;
+        final both = Calories.dailyEnergy(hr,
+            profile: profile,
+            hrmax: hrmax,
+            restingHr: rhr,
+            cadenceSpmPerMin: List<double?>.filled(60, 120.0))!;
+        expect(both.active, closeTo(byHr.active, 1e-9),
+            reason: 'HR sees intensity cadence cannot; it wins the minute');
+        expect(both.walking, 0.0);
+      });
+
+      test('an unmeasured or ambling minute stays basal', () {
+        final hr = List<double>.filled(3, 95.0);
+        final e = Calories.dailyEnergy(hr,
+            profile: profile,
+            hrmax: hrmax,
+            restingHr: rhr,
+            cadenceSpmPerMin: [null, 85.0, double.infinity])!;
+        expect(e.walking, 0.0,
+            reason: 'null = nobody measured; 85 spm = below the moderate '
+                'floor; non-finite = not a measurement');
+        expect(e.active, 0.0);
+      });
+
+      test('measured gait on an off-skin-HR minute still bills', () {
+        // HR 0 (poor contact) while the pedometer counts a real walk: the
+        // cadence measurement stands on its own. The HR branch already skips
+        // the minute; the walking branch must not require an HR to exist.
+        final e = Calories.dailyEnergy(List<double>.filled(30, 0.0),
+            profile: profile,
+            hrmax: hrmax,
+            restingHr: rhr,
+            cadenceSpmPerMin: List<double?>.filled(30, 105.0))!;
+        expect(e.walking, closeTo(30 * 2.5 * basalPerMin, 0.5)); // 3.5 METs
+      });
+
+      test('a misaligned cadence series is a caller bug, said out loud', () {
+        expect(
+            () => Calories.dailyEnergy(List<double>.filled(10, 95.0),
+                profile: profile,
+                hrmax: hrmax,
+                restingHr: rhr,
+                cadenceSpmPerMin: List<double?>.filled(9, 110.0)),
+            throwsArgumentError);
+      });
+
+      test('unusable anchors still abstain, cadence or not', () {
+        // The contract is unchanged: no gate, no energy figure. Walking kcal
+        // published alone would be a partial day wearing a whole day's key.
+        expect(
+            Calories.dailyEnergy(List<double>.filled(60, 95.0),
+                profile: profile,
+                hrmax: double.nan,
+                restingHr: rhr,
+                cadenceSpmPerMin: List<double?>.filled(60, 110.0)),
+            isNull);
+      });
+    });
+
     test('an exercise block adds active calories on top of basal', () {
       final profile = const WorkoutUserProfile(
           weightKg: 80, heightCm: 180, age: 30, sex: 'male');
