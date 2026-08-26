@@ -630,6 +630,7 @@ void main() {
         nn.add(rr);
         times.add(t);
       }
+      // ignore: deprecated_member_use_from_same_package
       final m = cardiopulmonaryCoupling(nn, times);
       expect(m.present, isFalse);
       expect(m.note, contains('respiration channel'));
@@ -714,6 +715,7 @@ void main() {
       // dominant frequency in the physiological respiratory range (or absent).
       final corr = correctRr(rrMs);
       if (corr.nn.length >= 60) {
+        // ignore: deprecated_member_use_from_same_package
         final cpc = cardiopulmonaryCoupling(corr.nn, corr.nnTimesMs);
         if (cpc.present) {
           expect(cpc.value!.dominantHz, inInclusiveRange(0.0, 0.45));
