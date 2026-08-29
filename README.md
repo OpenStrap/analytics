@@ -71,7 +71,10 @@ hoping you don't notice.
 import 'package:openstrap_analytics/onehz.dart';
 
 // nnMs: cleaned beat-to-beat RR intervals in ms (see foundations/rr_correction.dart
-// for turning raw RR into this). nnTimesMs: elapsed ms per beat, same length.
+// for turning raw RR into this). nnTimesMs: cumulative beat timestamp in ms
+// (time since the first beat, NOT the per-beat RR duration), same length.
+final nnMs = <double>[800, 810, 795, 805];
+final nnTimesMs = <double>[0, 800, 1610, 2405];
 final Metric<HrvTime> hrv = hrvTime(nnMs, nnTimesMs: nnTimesMs, artifactFraction: 0.04);
 if (hrv.value != null) {
   print('RMSSD ${hrv.value!.rmssd} ms (confidence ${hrv.confidence}, tier ${hrv.tier})');
