@@ -124,14 +124,14 @@ Metric<CosinorFit> cosinor(
     ssTot += (y[i] - yMean) * (y[i] - yMean);
     ssRes += (y[i] - fit) * (y[i] - fit);
   }
-  final r2 = ssTot == 0 ? 0.0 : clamp(1 - ssRes / ssTot, 0, 1);
+  final r2 = ssTot == 0 ? 0.0 : (1 - ssRes / ssTot).clamp(0, 1).toDouble();
   // Adjusted for the 3 fitted parameters (M, β, γ). Confidence MUST come from
   // the adjusted value: the raw R² of a 3-parameter fit is upward-biased
   // (E[R²] = 2/(n−1) under the null), so a handful of noise points used to
   // score confidence 0.95 at tier HIGH.
-  final r2Adj = clamp(1 - (1 - r2) * (n - 1) / (n - 3), 0, 1);
+  final r2Adj = (1 - (1 - r2) * (n - 1) / (n - 3)).clamp(0, 1).toDouble();
 
-  final conf = clamp(r2Adj, 0.1, 0.95);
+  final conf = r2Adj.clamp(0.1, 0.95).toDouble();
   return Metric<CosinorFit>(
     value: CosinorFit(
       mesor: mesor,

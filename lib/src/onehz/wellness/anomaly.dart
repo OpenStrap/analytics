@@ -328,7 +328,7 @@ List<List<double>> _robustCorr(
         final xa = [for (final s in std) s[a]];
         final xb = [for (final s in std) s[b]];
         final r = _corr(xa, xb);
-        final rc = clamp(r ?? 0.0, -0.95, 0.95);
+        final rc = (r ?? 0.0).clamp(-0.95, 0.95);
         m[a][b] = rc;
         m[b][a] = rc;
       }

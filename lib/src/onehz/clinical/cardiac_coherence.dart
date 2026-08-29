@@ -128,11 +128,7 @@ Metric<CardiacCoherence> cardiacCoherence(
   // this span actually covers (floored/ceilinged), lightly penalized when the
   // found peak isn't near the guided pace (could still be real RSA, just less
   // clearly the paced-breathing entrainment this feature is meant to reward).
-  final conf = clamp(
-    (spanSec / 180.0).clamp(0.3, 1.0) * (onPace ? 1.0 : 0.85),
-    0.2,
-    0.9,
-  );
+  final conf = ((spanSec / 180.0).clamp(0.3, 1.0) * (onPace ? 1.0 : 0.85)).clamp(0.2, 0.9);
 
   return Metric<CardiacCoherence>(
     value: CardiacCoherence(ratio: ratio, score: score, peakHz: peakHz),

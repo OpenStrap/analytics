@@ -249,7 +249,7 @@ Metric<WeekdayEffect> weekdayEffect(
       // stapled to it.
       meaningful: omnibusP <= alpha && peakP <= alpha,
     ),
-    confidence: clamp(0.25 + 0.25 * (span / 365.0), 0.25, 0.5),
+    confidence: (0.25 + 0.25 * (span / 365.0)).clamp(0.25, 0.5),
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'descriptive weekday split, Kruskal-Wallis omnibus then a '

@@ -31,6 +31,19 @@ pile of textbook equations. What comes out of here is an honest approximation bu
 exactly what the band hands over, nothing more. It trends correctly, it'll tell you when
 you're under-recovered — it's not their secret sauce, and it never claims to be.
 
+## Where this fits
+
+Three repos, one pipeline:
+
+- [**protocol**](https://github.com/OpenStrap/protocol) — decodes the raw bytes off the
+  band into the 1 Hz records this package consumes.
+- **analytics** (this repo) — the math above: records in, metrics out.
+- [**edge**](https://github.com/OpenStrap/edge) — storage, sync, Bluetooth, and the UI
+  that calls this package and shows you the numbers.
+
+A byte-level change (a new record, an opcode) belongs in `protocol`; see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full breakdown.
+
 ## How a number knows how much to trust itself
 
 Almost everything returns the same shape — `Metric<T>`. (A handful of multi-day/list
@@ -110,7 +123,8 @@ not a feature, no matter how tempting the plausible-looking headline is.
 dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
 
-290 tests, nothing mocked — pure functions, fixture in, assertion out.
+Nothing mocked — pure functions, fixture in, assertion out. See the badge above for the
+current pass/fail count.
 
 ## If you want to add a metric
 

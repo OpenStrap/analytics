@@ -414,7 +414,7 @@ Metric<SleepWindow> vanHeesSleepWindow(
   final undecidableSec = (unresolved * cadence).round();
 
   // Confidence grows with the detected SPT length up to a typical night.
-  final conf = clamp(sptSec / (7 * 3600), 0.3, 0.95);
+  final conf = (sptSec / (7 * 3600)).clamp(0.3, 0.95);
   return Metric<SleepWindow>(
     value: SleepWindow(
       onsetIdx: bestStart,

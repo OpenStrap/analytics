@@ -202,7 +202,7 @@ Metric<RelativeOdiResult> relativeOdi(
     }
   }
   final nanCount = relR.where((v) => v.isNaN).length;
-  final conf = clamp(0.5 * validFraction, 0.1, 0.5);
+  final conf = (0.5 * validFraction).clamp(0.1, 0.5);
   return Metric<RelativeOdiResult>(
     value: RelativeOdiResult(
       meanRelR: meanRelR,

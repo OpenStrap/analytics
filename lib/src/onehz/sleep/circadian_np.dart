@@ -123,14 +123,14 @@ Metric<CircadianNp> circadianNonparametric(
       : 0.0;
 
   final days = n / epochsPerDay;
-  final conf = clamp(days / 7.0, 0.3, 0.95);
+  final conf = (days / 7.0).clamp(0.3, 0.95);
   return Metric<CircadianNp>(
     value: CircadianNp(
-      interdailyStability: clamp(is_, 0, 1),
+      interdailyStability: is_.clamp(0, 1),
       intradailyVariability: math.max(0, iv),
       m10: m10.value,
       l5: l5.value,
-      relativeAmplitude: clamp(ra, 0, 1),
+      relativeAmplitude: ra.clamp(0, 1),
       m10StartEpoch: m10.start,
       l5StartEpoch: l5.start,
     ),

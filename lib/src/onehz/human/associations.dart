@@ -870,7 +870,7 @@ Metric<AssociationScan> scanAssociations({
     // Deliberately capped low and never a function of how strong the findings
     // look. This is one person's uncontrolled observational history; more of it
     // buys a little confidence, and nothing buys a lot.
-    confidence: clamp(0.20 + 0.20 * (span / 365.0), 0.20, 0.45),
+    confidence: (0.20 + 0.20 * (span / 365.0)).clamp(0.20, 0.45),
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'association only, in your own history — never cause. lag is derived '

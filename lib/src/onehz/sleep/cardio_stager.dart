@@ -243,7 +243,7 @@ class SleepUserProfile {
 
   /// Personal-vs-local blend weight: 0 at cold start → 0.5 hard cap at ≥14
   /// nights (so per-night-local always holds ≥50% of every threshold).
-  double get personalWeight => clamp(nights / 28.0, 0.0, 0.5);
+  double get personalWeight => (nights / 28.0).clamp(0.0, 0.5);
 
   static double? _d(dynamic v) => (v is num) ? v.toDouble() : null;
 
@@ -966,15 +966,12 @@ CardioStagerResult classifyCardioEpochs(
   // HR-relative gates (wake, REM floor, deep trough) had anything to fire on.
   final hrCovConf = nEpoch == 0
       ? 0.0
-      : clamp(
-          [
+      : ([
                 for (final h in hr)
                   if (!h.isNaN) h
               ].length /
-              nEpoch.toDouble(),
-          0.0,
-          1.0);
-  final conf = clamp((0.35 + 0.25 * rrCov) * hrCovConf, 0.15, 0.6);
+              nEpoch.toDouble()).clamp(0.0, 1.0);
+  final conf = ((0.35 + 0.25 * rrCov) * hrCovConf).clamp(0.15, 0.6);
 
   return CardioStagerResult(
     StagerResult(

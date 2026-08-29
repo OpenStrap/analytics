@@ -36,9 +36,9 @@ void main() {
     });
 
     test('clamp', () {
-      expect(clamp(5, 0, 3), 3);
-      expect(clamp(-1, 0, 3), 0);
-      expect(clamp(2, 0, 3), 2);
+      expect(5.clamp(0, 3), 3);
+      expect((-1).clamp(0, 3), 0);
+      expect(2.clamp(0, 3), 2);
     });
   });
 

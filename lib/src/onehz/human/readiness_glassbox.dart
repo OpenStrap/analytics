@@ -218,7 +218,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
     );
   }
 
-  final score = clamp(wpsum / wsum, 0, 100);
+  final score = (wpsum / wsum).clamp(0, 100).toDouble();
 
   // Drivers ranked by |contribution|; only NAME a driver past the SWC.
   final ranked = [...raw]..sort((a, b) => b.c.abs().compareTo(a.c.abs()));
@@ -235,7 +235,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
   final narrative = _buildNarrative(score, drivers);
 
   // Confidence reflects how many of the priority inputs were usable.
-  final conf = clamp(nUsable / inputs.length.toDouble(), 0.3, 0.9);
+  final conf = (nUsable / inputs.length.toDouble()).clamp(0.3, 0.9);
   return Metric<GlassBoxReadiness>(
     value: GlassBoxReadiness(score, items, drivers, narrative, nUsable),
     confidence: conf,

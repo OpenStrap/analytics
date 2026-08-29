@@ -687,7 +687,7 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     ctl = ctl + lc * (dailyTrimp[i] - ctl);
     atl = atl + la * (dailyTrimp[i] - atl);
   }
-  final conf = clamp(dailyTrimp.length / 42.0, 0.3, 0.85);
+  final conf = (dailyTrimp.length / 42.0).clamp(0.3, 0.85);
   return Metric<LoadState>(
     value: LoadState(ctl, atl, ctl - atl),
     confidence: conf,

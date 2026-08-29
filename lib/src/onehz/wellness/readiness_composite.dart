@@ -286,7 +286,7 @@ Metric<Readiness> readinessComposite(
   final score = 100 / (1 + math.exp(-composite));
 
   // Confidence scales with how many inputs were available (more = better).
-  final conf = clamp(0.3 + 0.15 * used.length, 0.3, 0.9);
+  final conf = (0.3 + 0.15 * used.length).clamp(0.3, 0.9);
 
   return Metric<Readiness>(
     value: Readiness(score, composite),

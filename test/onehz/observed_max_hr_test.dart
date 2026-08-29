@@ -66,6 +66,28 @@ void main() {
       }
     });
 
+    test('motion split across the ends of a long hold still counts', () {
+      // Two 3 s bursts of arm swing bracketing a quiet middle. Neither burst
+      // alone clears the gate once padded out to a 15 s window (0.076 avg),
+      // but the full ~19 s span between them does (0.101 avg) — the minimal
+      // 15 s window from any single start index can never see both bursts at
+      // once, so a corroborated hold that's real gets missed unless a start
+      // is allowed to keep extending past its first duration-qualifying
+      // window when that window's motion doesn't (yet) pass the gate.
+      const bpm = 180.0;
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 21; i++) {
+        final t = i * 1000.0;
+        final dev = (i <= 2 || i >= 18) ? 0.4 : 0.001;
+        hr.add(HrSample(t, bpm));
+        accel.add(AccelSample(t, 0, 0, 1.0 + dev));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isTrue);
+      expect(m.value!.bpm, bpm);
+    });
+
     test('a gap in the stream breaks the hold', () {
       final a = _run(0, 10, 180, 0.20);
       final b = _run(60000, 10, 180, 0.20); // 50 s later

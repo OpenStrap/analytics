@@ -174,7 +174,7 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // with the artifact fraction we were handed — it used to ignore it entirely,
   // so a barely-passing 29 %-artifact night published at the same confidence as
   // a clean one.
-  final conf = clamp(nn.length / 5000.0 * (1 - artifactFraction), 0.2, 0.9);
+  final conf = (nn.length / 5000.0 * (1 - artifactFraction)).clamp(0.2, 0.9);
   return Metric<IrregularRhythm>(
     value: IrregularRhythm(
       sd1: sd1,

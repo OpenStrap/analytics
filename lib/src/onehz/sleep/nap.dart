@@ -455,7 +455,7 @@ Metric<List<NapWindow>> detectNaps(
     // Confidence, NOT efficiency. A 20% dip below the awake baseline earns
     // full marks on that axis; the rest rewards evidence, not sleep quality.
     // Capped at 0.85 — this is a wrist estimate and never becomes a fact.
-    final dipScore = clamp((baseline - medHr) / (baseline * 0.20), 0, 1);
+    final dipScore = ((baseline - medHr) / (baseline * 0.20)).clamp(0, 1);
     final stillScore = tib <= 0 ? 0.0 : tst / tib;
     // Wear corroboration for THIS bout, not for the day. A day-global
     // `wristOff.isNotEmpty` flag rewarded every nap on a day the band happened
@@ -463,16 +463,12 @@ Metric<List<NapWindow>> detectNaps(
     // day it never came off — backwards on both counts. This scores how much of
     // THIS bout is contradicted by an off-body span: none → full marks.
     final worstOff = offFrac > exFrac ? offFrac : exFrac;
-    final corroborated = clamp(1 - worstOff / maxNapOffWristFraction, 0, 1);
-    final conf = clamp(
-      0.20 +
+    final corroborated = (1 - worstOff / maxNapOffWristFraction).clamp(0, 1);
+    final conf = (0.20 +
           0.30 * dipScore +
           0.25 * coverage +
           0.15 * stillScore +
-          0.10 * corroborated,
-      0.2,
-      0.85,
-    );
+          0.10 * corroborated).clamp(0.2, 0.85);
 
     naps.add(NapWindow(
       startSec: aStart - baseSec,

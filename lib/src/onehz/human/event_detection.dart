@@ -232,7 +232,7 @@ Metric<EventState> alcoholNightFlag(
       signsPresent: signs,
       ambiguous: ambiguous,
     ),
-    confidence: clamp(signs / 4.0, 0.2, 0.85),
+    confidence: (signs / 4.0).clamp(0.2, 0.85),
     tier: Tier.high,
     inputs_used: inputs,
     note: note,
@@ -267,7 +267,7 @@ Metric<RoughNight> roughNight(EventState ev) {
           : 'a typical night for you');
   return Metric<RoughNight>(
     value: RoughNight(rough, ev.signsPresent, descriptor),
-    confidence: clamp(ev.signsPresent / 4.0, 0.2, 0.8),
+    confidence: (ev.signsPresent / 4.0).clamp(0.2, 0.8),
     tier: Tier.relative,
     inputs_used: inputs,
     note: 'neutral state descriptor — never attributes a cause',

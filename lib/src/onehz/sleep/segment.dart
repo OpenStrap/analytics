@@ -142,7 +142,7 @@ class StageInterval {
   required int tstSec,
   required double confidence,
 }) {
-  final t = clamp(confidence / kMaxSleepConfidence, 0.0, 1.0);
+  final t = (confidence / kMaxSleepConfidence).clamp(0.0, 1.0);
   double rel(double best, double worst) => worst + (best - worst) * t;
   final deepHalf = math.max(
     (rel(_deepRelHalfBest, _deepRelHalfWorst) * deepSec).round(),
@@ -669,8 +669,8 @@ SleepSegmentation segmentSleep(
   for (final b in rr) {
     if (b.ts >= chosen.start && b.ts < chosen.end) rrSeconds.add(b.ts);
   }
-  final hrCov = clamp(hrCovered / inBed, 0.0, 1.0);
-  final rrCov = clamp(rrSeconds.length / inBed, 0.0, 1.0);
+  final hrCov = (hrCovered / inBed).clamp(0.0, 1.0);
+  final rrCov = (rrSeconds.length / inBed).clamp(0.0, 1.0);
   final stagingConf = (0.35 + 0.25 * rrCov) * hrCov;
   // Confidence in the window WE PUBLISHED, on van Hees' own construction
   // (length up to a typical 7 h night, clamped) — but measured on `chosen`, the
@@ -679,9 +679,9 @@ SleepSegmentation segmentSleep(
   // file never reads. Half of every night's published confidence came from the
   // detector that lost, and that confidence sets the SLP-13 stage-interval
   // widths.
-  final windowConf = clamp(inBed / (7 * 3600), 0.3, 0.95);
+  final windowConf = (inBed / (7 * 3600)).clamp(0.3, 0.95);
   final conf =
-      clamp((windowConf + stagingConf) / 2.0, 0.0, kMaxSleepConfidence);
+      ((windowConf + stagingConf) / 2.0).clamp(0.0, kMaxSleepConfidence);
 
   return SleepSegmentation(
     window: SleepWindow(

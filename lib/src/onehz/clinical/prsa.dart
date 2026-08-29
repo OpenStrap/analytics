@@ -137,7 +137,7 @@ Metric<PrsaResult> _prsa(
   final xm2 = profile[l - 2]; // k=-2
   final capacity = (x0 + x1 - xm1 - xm2) / 4;
 
-  final conf = clamp(anchors.length / 1000.0, 0.3, 0.95);
+  final conf = (anchors.length / 1000.0).clamp(0.3, 0.95);
   return Metric<PrsaResult>(
     value: PrsaResult(
       capacity: capacity,
