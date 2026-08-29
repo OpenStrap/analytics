@@ -1835,12 +1835,8 @@ class AdvancedSleepStager {
     double Function(double?) zfun(List<double?> vals) {
       final present = [for (final v in vals) if (v != null) v];
       if (present.isEmpty) return (_) => 0;
-      final m = present.reduce((a, b) => a + b) / present.length;
-      var sd0 = 0.0;
-      for (final v in present) {
-        sd0 += (v - m) * (v - m);
-      }
-      sd0 = math.sqrt(sd0 / present.length);
+      final m = mean(present)!;
+      final sd0 = stddevPop(present)!;
       final sd = sd0 == 0 ? 1.0 : sd0;
       return (v) => v == null ? 0 : (v - m) / sd;
     }

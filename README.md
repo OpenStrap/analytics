@@ -110,7 +110,7 @@ not a feature, no matter how tempting the plausible-looking headline is.
 dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
 
-624 passed / 6 skipped (630 total), nothing mocked — pure functions, fixture in,
+All pass (a handful skipped), nothing mocked — pure functions, fixture in,
 assertion out.
 
 ## Validation

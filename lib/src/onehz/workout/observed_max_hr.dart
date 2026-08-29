@@ -166,6 +166,12 @@ Metric<HrCeiling> sessionHrCeiling(
     var trailStart = i;
     var trailSum = 0.0;
     var trailCount = 0;
+    // Running max of the trailing sub-window average seen so far as j sweeps
+    // forward. trailStart only ever advances, so once j moves past a burst
+    // the trailing sum itself forgets it — bestTrail is what keeps a burst
+    // near the start of a long hold (or anywhere before a quiet tail) from
+    // being lost once the window slides past it.
+    var bestTrail = 0.0;
     for (var j = i; j < rows.length; j++) {
       if (j > i && rows[j].ts - rows[j - 1].ts > gapMs) break; // stream broke
       lo = math.min(lo, rows[j].hr);
@@ -178,14 +184,16 @@ Metric<HrCeiling> sessionHrCeiling(
         trailCount--;
         trailStart++;
       }
+      final trailAvg = trailSum / trailCount;
+      if (trailAvg > bestTrail) bestTrail = trailAvg;
       final span = rows[j].ts - rows[i].ts;
       if (span < holdMs) continue;
       if (span > maxSpanMs) break; // gave this start its fair shot
       // The window qualifies on duration. `lo` is the bpm sustained across
       // all of it. Only stop once a short burst of real motion actually
-      // corroborates it, checked against the trailing few seconds rather
-      // than the whole hold's average.
-      if (trailSum / trailCount >= gate) {
+      // corroborated it ANYWHERE in the span so far (bestTrail), not just in
+      // whatever the trailing window currently covers.
+      if (bestTrail >= gate) {
         if (best == null || lo > best.bpm) {
           best = HrCeiling(
             bpm: lo,
