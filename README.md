@@ -71,7 +71,7 @@ Eight families, each its own subdirectory with its own sub-barrel, built on two 
 foundation layers:
 
 - **`foundations/`** — Lipponen-Tarvainen RR artifact correction, Winsorized-EWMA rolling
-  baselines, inverse-variance fusion, a PPG signal-quality index.
+  baselines, inverse-variance fusion.
 - **`clinical/`** (Tier-1) — HRV time/frequency domain (RMSSD/SDNN/pNNx, Lomb-Scargle
   LF/HF), PRSA (deceleration/acceleration capacity), nocturnal RHR/dip, an illness-risk
   CUSUM state machine, Plews ln-RMSSD readiness, Baevsky stress index, Banister/Edwards
@@ -86,8 +86,8 @@ foundation layers:
 - **`motion/`** — ENMO/MAD activity metrics, a hybrid live/1 Hz step estimator (AN-2554
   100 Hz pedometer preferred, a gated-and-bout-length-checked 1 Hz fallback for whatever
   the live stream missed), energy-expenditure fusion.
-- **`workout/`** — workout detection (both explicit and automatic), heart-rate-reserve
-  zones, Keytel/Harris-Benedict calorie estimation.
+- **`workout/`** — automatic workout detection (bout suggestion, never explicit/
+  retroactive), heart-rate-reserve zones, Keytel/Harris-Benedict calorie estimation.
 - **`wellness/`** — the canonical composite readiness score, multivariate (Mahalanobis)
   anomaly detection, CUSUM changepoint detection, temperature-based illness flagging.
 - **`human/`** — sleep regularity index, social jetlag/chronotype, single-night event
@@ -110,7 +110,8 @@ not a feature, no matter how tempting the plausible-looking headline is.
 dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
 
-290 tests, nothing mocked — pure functions, fixture in, assertion out.
+624 passed / 6 skipped (630 total), nothing mocked — pure functions, fixture in,
+assertion out.
 
 ## If you want to add a metric
 

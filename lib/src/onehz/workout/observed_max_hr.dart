@@ -143,10 +143,16 @@ Metric<HrCeiling> sessionHrCeiling(
 
   final holdMs = holdSeconds * 1000.0;
   final gapMs = maxGapSeconds * 1000.0;
+  // A real held effort's corroborating motion is not necessarily even across
+  // the hold (e.g. a couple of seconds of arm swing at each end of a quiet
+  // middle), so a start that fails the motion gate on the MINIMAL qualifying
+  // window still gets to extend further before giving up — capped, so one
+  // quiet start can't turn this into an O(n²) scan of a whole day.
+  final maxSpanMs = holdMs * 4;
   HrCeiling? best;
-  // ponytail: O(n · holdSeconds) — one session at 1 Hz, so ~15 passes over a
-  // few thousand samples. A monotonic-deque sliding minimum if it ever runs
-  // over a whole day.
+  // ponytail: O(n · holdSeconds) — one session at 1 Hz, so a bounded number of
+  // passes over a few thousand samples. A monotonic-deque sliding minimum if
+  // it ever runs over a whole day.
   for (var i = 0; i < rows.length; i++) {
     var lo = rows[i].hr;
     var motionSum = 0.0;
@@ -158,19 +164,22 @@ Metric<HrCeiling> sessionHrCeiling(
       count++;
       final span = rows[j].ts - rows[i].ts;
       if (span < holdMs) continue;
-      // The window qualifies on duration. `lo` is the bpm sustained across all
-      // of it; extending further can only lower it, so this is the best this
-      // start can do and we stop.
+      if (span > maxSpanMs) break; // gave this start its fair shot
+      // The window qualifies on duration. `lo` is the bpm sustained across
+      // all of it. Only stop once the motion actually corroborates — that's
+      // the earliest point extending further can only lower `lo` for no gain.
       final motion = motionSum / count;
-      if (motion >= gate && (best == null || lo > best.bpm)) {
-        best = HrCeiling(
-          bpm: lo,
-          tsMs: rows[i].ts,
-          heldSeconds: (span / 1000).round(),
-          motionG: motion,
-        );
+      if (motion >= gate) {
+        if (best == null || lo > best.bpm) {
+          best = HrCeiling(
+            bpm: lo,
+            tsMs: rows[i].ts,
+            heldSeconds: (span / 1000).round(),
+            motionG: motion,
+          );
+        }
+        break;
       }
-      break;
     }
   }
 

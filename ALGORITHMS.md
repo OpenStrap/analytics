@@ -46,7 +46,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 |---|---|---|
 | `correctRr` | `foundations/rr_correction.dart` | Lipponen & Tarvainen 2019 RR artifact correction (dRR/mRR/sRR beat classification, Kubios-style) |
 | `Baselines` (Winsorized-EWMA) | `foundations/ewma_baselines.dart` | Winsorized exponentially-weighted moving baseline — the rolling personal reference most other metrics compare against |
-| PPG signal-quality index | `foundations/ppg_sqi.dart` | Skewness-based SQI |
 | inverse-variance fusion | `foundations/fusion.dart` | Standard inverse-variance weighting for combining multiple noisy estimates of the same quantity |
 
 ### `clinical/` — Tier-1 cardiac/autonomic metrics
@@ -104,7 +103,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 ### `workout/`
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `detectWorkouts` | `workout/workout_detect.dart` | explicit workout detection + zones | — |
 | `autoDetectWorkouts` | `workout/auto_detect.dart` | automatic workout detection | — |
 | `hrRecovery` | `workout/hr_recovery.dart` | HRR — HR drop N seconds post-peak | Cole/Lauer 1999-style HRR |
 | `Calories.dailyEnergy` / `estimateBoutCalories` | `workout/calories.dart` | Keytel HR→kcal regression + Harris-Benedict/Mifflin BMR | Keytel et al. 2005 |
