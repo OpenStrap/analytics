@@ -116,6 +116,24 @@ void main() {
       expect(m.value!.bpm, 170);
     });
 
+    test('a single one-sample motion spike cannot corroborate a hold', () {
+      // 20s at 170 bpm: ONE sample of real burst-level motion (same 0.25 dev
+      // the other burst tests use) at t=0, dead still for the rest. Checked
+      // raw at trailCount==1 that one sample alone clears the gate; diluted
+      // across the couple-of-seconds window the gate is meant to require, it
+      // does not — one noisy sample is not a corroborating burst.
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 20; i++) {
+        final t = i * 1000.0;
+        hr.add(HrSample(t, 170));
+        accel.add(AccelSample(t, 0, 0, 1.0 + (i == 0 ? 0.25 : 0.005)));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isFalse,
+          reason: 'one noisy sample is not a corroborating burst');
+    });
+
     test('a gap in the stream breaks the hold', () {
       final a = _run(0, 10, 180, 0.20);
       final b = _run(60000, 10, 180, 0.20); // 50 s later

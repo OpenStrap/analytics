@@ -184,8 +184,14 @@ Metric<HrCeiling> sessionHrCeiling(
         trailCount--;
         trailStart++;
       }
+      // Only trust the trailing average once it actually spans a full
+      // corrobMs — before that (the first couple of samples at a fresh
+      // start index) it's one or two samples, and a single noisy sample
+      // could otherwise "corroborate" as if it were a real sustained burst.
       final trailAvg = trailSum / trailCount;
-      if (trailAvg > bestTrail) bestTrail = trailAvg;
+      if (rows[j].ts - rows[i].ts >= corrobMs && trailAvg > bestTrail) {
+        bestTrail = trailAvg;
+      }
       final span = rows[j].ts - rows[i].ts;
       if (span < holdMs) continue;
       if (span > maxSpanMs) break; // gave this start its fair shot

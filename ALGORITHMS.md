@@ -101,7 +101,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `relativeIntensityBands` | `motion/enmo.dart` | ENMO/MAD activity intensity bands | — |
 | `staticTilt` | `motion/orientation.dart` | orientation/posture from gravity vector | — |
 | `branchedEnergyFusion` | `motion/energy_fusion.dart` | HR-anchored-when-possible energy expenditure fusion | Brage et al. 2004 |
-| `dailyActiveMinutes` | `motion/steps.dart` | minutes of sustained wrist movement from the 1 Hz substrate, no step count — true per-step counting is impossible below gait Nyquist | AN-2554-adjacent (see `livePedometer` for the real 100 Hz method) |
+| `dailyActiveMinutes` | `motion/steps.dart` | minutes of sustained wrist movement from the 1 Hz substrate, no step count — true per-step counting is impossible below gait Nyquist | internal ESTIMATE (personal dynamic-floor movement threshold, no published method; unrelated to AN-2554 — see `livePedometer` for the real AN-2554-derived 100 Hz method) |
 
 ### `workout/`
 | Function | File | Method | Citation |

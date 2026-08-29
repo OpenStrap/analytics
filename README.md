@@ -74,7 +74,7 @@ import 'package:openstrap_analytics/onehz.dart';
 // for turning raw RR into this). nnTimesMs: cumulative beat timestamp in ms
 // (time since the first beat, NOT the per-beat RR duration), same length.
 final nnMs = <double>[800, 810, 795, 805];
-final nnTimesMs = <double>[0, 800, 1610, 2405];
+final nnTimesMs = <double>[0, 810, 1605, 2410]; // nnTimesMs[i] = nnTimesMs[i-1] + nnMs[i]
 final Metric<HrvTime> hrv = hrvTime(nnMs, nnTimesMs: nnTimesMs, artifactFraction: 0.04);
 if (hrv.value != null) {
   print('RMSSD ${hrv.value!.rmssd} ms (confidence ${hrv.confidence}, tier ${hrv.tier})');
@@ -102,9 +102,10 @@ foundation layers:
   (IS/IV/RA/L5/M10).
 - **`respiration/`** — RSA-derived respiratory rate fused with motion-modulated RIIV,
   CVHR-based apnea screening, a relative (never absolute) oxygen-desaturation ratio.
-- **`motion/`** — ENMO/MAD activity metrics, a hybrid live/1 Hz step estimator (AN-2554
-  100 Hz pedometer preferred, a gated-and-bout-length-checked 1 Hz fallback for whatever
-  the live stream missed), energy-expenditure fusion.
+- **`motion/`** — ENMO/MAD activity metrics, a 100 Hz AN-2554-derived live pedometer
+  plus a separate 1 Hz movement-minutes estimate (no step count — true per-step
+  counting is impossible below gait Nyquist) for whatever the live stream missed,
+  energy-expenditure fusion.
 - **`workout/`** — automatic workout detection (bout suggestion, never explicit/
   retroactive), heart-rate-reserve zones, Keytel/Harris-Benedict calorie estimation.
 - **`wellness/`** — the canonical composite readiness score, multivariate (Mahalanobis)
