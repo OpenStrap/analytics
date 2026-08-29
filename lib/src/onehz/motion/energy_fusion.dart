@@ -48,7 +48,6 @@
 // ---------------------------------------------------------------------------
 
 import '../types.dart';
-import '../util.dart';
 
 /// Per-sample fused energy estimate.
 class EnergyPoint {
@@ -90,10 +89,10 @@ double _normHr(double hr, double? restingHr, double? maxHr) {
   if (hr <= 0) return 0.0;
   if (restingHr != null && maxHr != null && maxHr > restingHr) {
     final hrr = (hr - restingHr) / (maxHr - restingHr);
-    return clamp(hrr, 0.0, 1.0);
+    return hrr.clamp(0.0, 1.0);
   }
   final v = (hr - 50.0) / (180.0 - 50.0);
-  return clamp(v, 0.0, 1.0);
+  return v.clamp(0.0, 1.0);
 }
 
 /// Branched HR-accel energy fusion over time-aligned 1 Hz HR + ENMO samples.
@@ -156,13 +155,13 @@ Metric<EnergyFusion> branchedEnergyFusion(
     }
     var idx = wA * a + (1 - wA) * (hValid ? h : 0.0);
     if (branch == 'transient') idx *= 0.7; // discount artifact-prone motion
-    idx = clamp(idx, 0.0, 1.0);
+    idx = idx.clamp(0.0, 1.0);
     load += idx;
     pts.add(EnergyPoint(tsMs[i], idx, a, hValid ? h : 0.0, wA, branch));
   }
   // confidence: data coverage × (calibration bonus)
   final cov = usable / n;
-  final conf = clamp(cov * (calibrated ? 0.7 : 0.5), 0.0, 0.7);
+  final conf = (cov * (calibrated ? 0.7 : 0.5)).clamp(0.0, 0.7);
   return Metric<EnergyFusion>(
     value: EnergyFusion(pts, load, calibrated),
     confidence: conf,

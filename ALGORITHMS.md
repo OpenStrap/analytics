@@ -9,6 +9,9 @@ relative-only ADC channels (skin temp, SpO2, ambient light).
 This file is the index — what's implemented, where it lives, and who published it. If a
 row here doesn't have a real citation next to it, that's a bug in this file, go fix it.
 
+See `docs/ALGORITHM_CATALOG_1HZ.md` for the underlying literature review and what's
+deliberately not shipped.
+
 Almost everything returns a `Metric<T>` envelope:
 
 ```dart
@@ -46,7 +49,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 |---|---|---|
 | `correctRr` | `foundations/rr_correction.dart` | Lipponen & Tarvainen 2019 RR artifact correction (dRR/mRR/sRR beat classification, Kubios-style) |
 | `Baselines` (Winsorized-EWMA) | `foundations/ewma_baselines.dart` | Winsorized exponentially-weighted moving baseline — the rolling personal reference most other metrics compare against |
-| PPG signal-quality index | `foundations/ppg_sqi.dart` | Skewness-based SQI |
 | inverse-variance fusion | `foundations/fusion.dart` | Standard inverse-variance weighting for combining multiple noisy estimates of the same quantity |
 
 ### `clinical/` — Tier-1 cardiac/autonomic metrics
@@ -61,7 +63,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `illnessCusum` | `clinical/illness_cusum.dart` | Online CUSUM state machine (green/yellow/red) over RHR — "NightSignal" | Alavi et al. 2022; Mishra et al. 2020 |
 | `readinessLnRmssd` | `clinical/readiness_lnrmssd.dart` | ln(RMSSD) z-scored against a rolling prior-nights baseline | Plews et al. 2013 |
 | `cosinor` | `clinical/cosinor.dart` | Cosinor rhythmometry (MESOR/amplitude/acrophase) | Halberg & Nelson 1979 |
-| `banisterTrimp` / `StrainScorer.edwardsTRIMP` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991; Edwards 1993 |
+| `banisterTrimp` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991 |
 | `strainScoreMetric` | `clinical/load_trimp.dart` | log-squash of TRIMP onto a 0-21 scale | — |
 | `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
@@ -99,12 +101,11 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `relativeIntensityBands` | `motion/enmo.dart` | ENMO/MAD activity intensity bands | — |
 | `staticTilt` | `motion/orientation.dart` | orientation/posture from gravity vector | — |
 | `branchedEnergyFusion` | `motion/energy_fusion.dart` | HR-anchored-when-possible energy expenditure fusion | Brage et al. 2004 |
-| `dailyStepEstimate` | `motion/steps.dart` | 1 Hz fallback step estimate — ENMO+HR gated, bout-length gated (contiguous-run requirement), only for minutes the live 100 Hz pedometer didn't cover | AN-2554-adjacent (see `livePedometer` for the real 100 Hz method) |
+| `dailyActiveMinutes` | `motion/steps.dart` | minutes of sustained wrist movement from the 1 Hz substrate, no step count — true per-step counting is impossible below gait Nyquist | internal ESTIMATE (personal dynamic-floor movement threshold, no published method; unrelated to AN-2554 — see `livePedometer` for the real AN-2554-derived 100 Hz method) |
 
 ### `workout/`
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `detectWorkouts` | `workout/workout_detect.dart` | explicit workout detection + zones | — |
 | `autoDetectWorkouts` | `workout/auto_detect.dart` | automatic workout detection | — |
 | `hrRecovery` | `workout/hr_recovery.dart` | HRR — HR drop N seconds post-peak | Cole/Lauer 1999-style HRR |
 | `Calories.dailyEnergy` / `estimateBoutCalories` | `workout/calories.dart` | Keytel HR→kcal regression + Harris-Benedict/Mifflin BMR | Keytel et al. 2005 |
@@ -122,14 +123,13 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 ### `human/`
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `sleepRegularityIndex` | `human/sleep_regularity.dart` | SRI (see also `phillipsSri` above) | Phillips et al. 2017 |
 | `sleepDebt` | `human/sleep_regularity.dart` | accumulated sleep debt vs. need | — |
 | `socialJetlag` / `chronotype` | `human/circadian_lifestyle.dart` | MSFsc-based social jetlag + chronotype | Wittmann & Roenneberg 2006; MCTQ |
 | `alcoholNightFlag` | `human/event_detection.dart` | dose-graded autonomic-stress signature — **reports state, never asserts a cause** | Pietilä et al. 2018 |
 | `roughNight` | `human/event_detection.dart` | neutral fallback descriptor when the signature is ambiguous | — |
 | `percentileOfYou` / `personalRecord` | `human/percentile_of_you.dart` | percentile-vs-your-own-history, miss-tolerant personal-record streaks | — |
 | `glassBoxReadiness` | `human/readiness_glassbox.dart` | **deprecated** — kept only for its percentile-of-you breakdown + narrative and edge back-compat; `readinessComposite` is canonical | — |
-| `vo2maxEstimate` / `physiologicalAge` / `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | Uth-Sørensen-style HR-ratio VO2max estimate (still `ESTIMATE`, never a lab claim) |
+| `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | — |
 | `journalCorrelations` | `human/coaching.dart` | per-tag mean-difference correlation vs. logged outcomes, on-device, personal | — |
 
 ---

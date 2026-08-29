@@ -185,8 +185,6 @@ double? z(double x, List<double> sample) {
   return (x - m) / sd;
 }
 
-double clamp(double x, double lo, double hi) => math.max(lo, math.min(hi, x));
-
 /// Ordinary-least-squares slope of y vs x (x defaults to 0..n-1). Null if <2.
 double? olsSlope(List<double> y, [List<double>? x]) {
   final n = y.length;
@@ -471,7 +469,7 @@ double normalTwoSidedP(double zScore) {
                                                                   t *
                                                                       (-0.82215223 +
                                                                           t * 0.17087277)))))))));
-  return clamp(ans, 0.0, 1.0);
+  return ans.clamp(0.0, 1.0);
 }
 
 /// Benjamini-Hochberg (1995) step-up FDR adjustment over a family of p-values.

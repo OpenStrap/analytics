@@ -53,7 +53,7 @@ Metric<BrvResult> breathingRateVariability(List<double> brpm) {
   final cv = m == 0 ? 0.0 : sd / m;
   final slope = theilSen(brpm); // robust trend across the window
   // Confidence grows with window count, capped (MED tier).
-  final conf = clamp(0.3 + 0.05 * brpm.length, 0.3, 0.8);
+  final conf = (0.3 + 0.05 * brpm.length).clamp(0.3, 0.8);
   return Metric<BrvResult>(
     value: BrvResult(
       meanBrpm: m,

@@ -202,11 +202,8 @@ Metric<NightHrvShape> nightHrvShape(
     ),
     // Bounded by how many bins actually carried beats — a night that abstained
     // on half its bins is not a shape you can read.
-    confidence: clamp(
-      0.8 * bins.where((b) => b.present).length / bins.length,
-      0.0,
-      0.8,
-    ),
+    confidence: (0.8 * bins.where((b) => b.present).length / bins.length)
+        .clamp(0.0, 0.8),
     tier: Tier.high,
     inputs_used: inputs,
     note: 'per-bin RMSSD (${binMin.round()}-min bins, PRV not ECG-HRV) — a '

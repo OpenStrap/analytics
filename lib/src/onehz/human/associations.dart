@@ -643,7 +643,10 @@ Metric<AssociationScan> scanAssociations({
           v.key, 'need_pairs:have=$nPresent,need=$minPairedDays'));
       continue;
     }
-    final vals = <double>[for (final e in g) if (e != null) e];
+    final vals = <double>[
+      for (final e in g)
+        if (e != null) e
+    ];
     if (vals.toSet().length < 2) {
       refusals.add(AssociationRefusal(v.key, 'constant'));
       continue;
@@ -705,14 +708,15 @@ Metric<AssociationScan> scanAssociations({
         refusals.add(AssociationRefusal(subject, 'constant'));
         continue;
       }
-      final rhoRaw =
-          _pearsonMasked(rankRaw[inp.key]!, _lagShift(rankRaw[out.key]!, lag)) ??
-              rho;
+      final rhoRaw = _pearsonMasked(
+              rankRaw[inp.key]!, _lagShift(rankRaw[out.key]!, lag)) ??
+          rho;
 
       // The feelable number, computed on the RAW (unadjusted) series: a person
       // experiences their actual nights, not weekday residuals. The adjustment
       // is what earns the claim; the contrast is what states it.
-      final contrast = _contrast(grid[inp.key]!, _lagShift(grid[out.key]!, lag));
+      final contrast =
+          _contrast(grid[inp.key]!, _lagShift(grid[out.key]!, lag));
       if (contrast == null) {
         refusals.add(AssociationRefusal(subject, 'no_contrast'));
         continue;
@@ -724,7 +728,8 @@ Metric<AssociationScan> scanAssociations({
       if (rhoRaw.abs() - rho.abs() > 0.15) caveats.add('weekday_confounded');
       if (coverage[inp.key]! < 0.8) caveats.add('sparse_input');
       if (selfReported.contains(inp.key)) caveats.add('self_reported_input');
-      if (contrast.split == ContrastSplit.binary) caveats.add('binary_contrast');
+      if (contrast.split == ContrastSplit.binary)
+        caveats.add('binary_contrast');
       // The SHIPPED twelve weeks, not the effective `minPairedDays`. Every row
       // here already cleared `n >= minPairedDays` and n can never exceed span,
       // so `span < minPairedDays` is unreachable by construction — writing it
@@ -809,7 +814,10 @@ Metric<AssociationScan> scanAssociations({
   // ---- effect-size floor + FDR gate ---------------------------------------
   final outcomeIqr = <String, double>{};
   for (final v in usable) {
-    final vals = <double>[for (final e in grid[v.key]!) if (e != null) e];
+    final vals = <double>[
+      for (final e in grid[v.key]!)
+        if (e != null) e
+    ];
     final q1 = percentile(vals, 25), q3 = percentile(vals, 75);
     outcomeIqr[v.key] = (q1 == null || q3 == null) ? 0.0 : (q3 - q1).abs();
   }
@@ -832,7 +840,8 @@ Metric<AssociationScan> scanAssociations({
     String? clash;
     for (final kept in findings) {
       if (kept.outcomeKey != cand.outcomeKey) continue;
-      final r = _pearsonMasked(rankAdj[kept.inputKey]!, rankAdj[cand.inputKey]!);
+      final r =
+          _pearsonMasked(rankAdj[kept.inputKey]!, rankAdj[cand.inputKey]!);
       if (r != null && r.abs() >= redundancyRho) {
         clash = kept.inputKey;
         break;
@@ -870,7 +879,7 @@ Metric<AssociationScan> scanAssociations({
     // Deliberately capped low and never a function of how strong the findings
     // look. This is one person's uncontrolled observational history; more of it
     // buys a little confidence, and nothing buys a lot.
-    confidence: clamp(0.20 + 0.20 * (span / 365.0), 0.20, 0.45),
+    confidence: (0.20 + 0.20 * (span / 365.0)).clamp(0.20, 0.45),
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'association only, in your own history — never cause. lag is derived '
@@ -941,8 +950,8 @@ const Map<String, _Spec> _catalog = {
   // --- the night that ended this morning ---
   'tst_min': _Spec('Sleep duration', 'min', VarTiming.night,
       derivedFrom: {'rem_min', 'deep_min', 'light_min'}),
-  'efficiency': _Spec('Sleep efficiency', '%', VarTiming.night,
-      derivedFrom: {'tst_min'}),
+  'efficiency':
+      _Spec('Sleep efficiency', '%', VarTiming.night, derivedFrom: {'tst_min'}),
   'rem_min': _Spec('REM sleep', 'min', VarTiming.night),
   'deep_min': _Spec('Deep sleep', 'min', VarTiming.night),
   'light_min': _Spec('Light sleep', 'min', VarTiming.night),
@@ -952,8 +961,7 @@ const Map<String, _Spec> _catalog = {
       derivedFrom: {'tst_min'}),
   'midsleep_sec': _Spec('Sleep midpoint', 's', VarTiming.night),
   'rmssd': _Spec('HRV', 'ms', VarTiming.night),
-  'ln_rmssd':
-      _Spec('HRV (ln)', '', VarTiming.night, derivedFrom: {'rmssd'}),
+  'ln_rmssd': _Spec('HRV (ln)', '', VarTiming.night, derivedFrom: {'rmssd'}),
   'sdnn': _Spec('HRV (SDNN)', 'ms', VarTiming.night),
   'rhr': _Spec('Resting heart rate', 'bpm', VarTiming.night),
   'resp_rate': _Spec('Respiratory rate', 'br/min', VarTiming.night),
@@ -969,8 +977,8 @@ const Map<String, _Spec> _catalog = {
     'resp_rate',
     'skin_temp_z',
   }),
-  'sleep_quality': _Spec('Sleep quality (logged)', '', VarTiming.night,
-      role: VarRole.input),
+  'sleep_quality':
+      _Spec('Sleep quality (logged)', '', VarTiming.night, role: VarRole.input),
 
   // --- the waking day ---
   'strain': _Spec('Strain', '', VarTiming.day,
@@ -1048,7 +1056,10 @@ List<double?> _weekdayAdjust(List<double?> v, List<int> weekday,
     final x = v[i];
     if (x != null) byDay[weekday[i]].add(x);
   }
-  final all = <double>[for (final x in v) if (x != null) x];
+  final all = <double>[
+    for (final x in v)
+      if (x != null) x
+  ];
   final overall = median(all);
   if (overall == null) return List<double?>.filled(v.length, null);
   final centre = [
@@ -1068,7 +1079,10 @@ List<double?> _weekdayAdjust(List<double?> v, List<int> weekday,
 /// is what keeps the permutation test valid; re-ranking inside each surrogate's
 /// own mask would compare two differently-defined statistics.
 List<double?> _ranksWithNulls(List<double?> v) {
-  final idx = <int>[for (var i = 0; i < v.length; i++) if (v[i] != null) i];
+  final idx = <int>[
+    for (var i = 0; i < v.length; i++)
+      if (v[i] != null) i
+  ];
   final ranks = averageRanks([for (final i in idx) v[i]!]);
   final out = List<double?>.filled(v.length, null);
   for (var k = 0; k < idx.length; k++) {

@@ -243,7 +243,7 @@ class SleepUserProfile {
 
   /// Personal-vs-local blend weight: 0 at cold start → 0.5 hard cap at ≥14
   /// nights (so per-night-local always holds ≥50% of every threshold).
-  double get personalWeight => clamp(nights / 28.0, 0.0, 0.5);
+  double get personalWeight => (nights / 28.0).clamp(0.0, 0.5);
 
   static double? _d(dynamic v) => (v is num) ? v.toDouble() : null;
 
@@ -409,8 +409,8 @@ CardioStagerResult cardioStager(
   // stager could not read, reported as zero wake. No new parameter is needed
   // for the fix — `accel[i].tsMs` is already the clock `_cleanBeatsInWindow`
   // binary-searches, so the cadence is measurable from the input we have.
-  final cadenceSec =
-      sampleCadenceSeconds([for (var i = 0; i < n; i++) accel[i].tsMs / 1000.0]);
+  final cadenceSec = sampleCadenceSeconds(
+      [for (var i = 0; i < n; i++) accel[i].tsMs / 1000.0]);
   // Coarser than one sample per epoch ⇒ there is no 30-s epoch to score, and
   // the Webster/Cole-Kripke continuity rules below are specified at this epoch
   // length. Stretching `epochSec` to fit the device would make a number appear
@@ -426,7 +426,8 @@ CardioStagerResult cardioStager(
   // thresholds from below, and the drift accumulates over the whole night.
   // Abstain rather than publish a grid whose real spacing does not match its
   // own label.
-  if ((perEpoch * cadenceSec - epochSec).abs() > 1e-6) return _abstain(epochSec);
+  if ((perEpoch * cadenceSec - epochSec).abs() > 1e-6)
+    return _abstain(epochSec);
   final nEpoch = n ~/ perEpoch;
   if (nEpoch < 3) return _abstain(epochSec);
 
@@ -966,15 +967,13 @@ CardioStagerResult classifyCardioEpochs(
   // HR-relative gates (wake, REM floor, deep trough) had anything to fire on.
   final hrCovConf = nEpoch == 0
       ? 0.0
-      : clamp(
-          [
+      : ([
                 for (final h in hr)
                   if (!h.isNaN) h
               ].length /
-              nEpoch.toDouble(),
-          0.0,
-          1.0);
-  final conf = clamp((0.35 + 0.25 * rrCov) * hrCovConf, 0.15, 0.6);
+              nEpoch.toDouble())
+          .clamp(0.0, 1.0);
+  final conf = ((0.35 + 0.25 * rrCov) * hrCovConf).clamp(0.15, 0.6);
 
   return CardioStagerResult(
     StagerResult(
@@ -1032,12 +1031,7 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
     List<AccelSample> accel, int s, int t, int epochSec) {
   final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t).beats;
   if (beats.length < 5) return double.nan;
-  final m = mean(beats)!;
-  var ss = 0.0;
-  for (final v in beats) {
-    ss += (v - m) * (v - m);
-  }
-  return math.sqrt(ss / (beats.length - 1));
+  return stddev(beats) ?? double.nan;
 }
 
 /// Clean RR beats (ms) inside a ±[halfWinMs] window centred on epoch [s,t),
@@ -1225,8 +1219,8 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     List<double> rrTsMs, List<AccelSample> accel, int s, int t, int epochSec) {
   // ±90 s per the REM feature spec — a DIFFERENT window from the RMSSD/SDNN
   // one; see [_cleanBeatsInWindow].
-  final win = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t,
-      halfWinMs: 90 * 1000);
+  final win =
+      _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: 90 * 1000);
   final beats = win.beats; // clean RR (ms)
   final beatTsSec = win.tsSec; // matching beat times (s), rebased to window
   if (beats.length < 16)

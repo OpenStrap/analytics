@@ -146,9 +146,7 @@ class HeartRateZones {
     ];
     if (valid.length < minDays) return null;
     valid.sort();
-    final rhr = valid.length.isOdd
-        ? valid[valid.length ~/ 2]
-        : (valid[valid.length ~/ 2 - 1] + valid[valid.length ~/ 2]) / 2.0;
+    final rhr = percentileSorted(valid, 50)!;
     if (!(maxHr > rhr)) return null;
     final reserve = maxHr - rhr;
     final built = <HeartRateZone>[];

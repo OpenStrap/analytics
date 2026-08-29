@@ -88,7 +88,8 @@ Metric<CardiacCoherence> cardiacCoherence(
   // honesty guard rather than pretending a short session sees down to 0.0033 Hz.
   final totalLoHz = (1.0 / spanSec).clamp(0.0033, searchLoHz);
 
-  final ls = lombScargle(tSec, nnMs, freqGrid(totalLoHz, totalHiHz, gridPoints));
+  final ls =
+      lombScargle(tSec, nnMs, freqGrid(totalLoHz, totalHiHz, gridPoints));
   if (ls == null) {
     return const Metric<CardiacCoherence>.absent(
       tier: Tier.estimate,
@@ -128,11 +129,8 @@ Metric<CardiacCoherence> cardiacCoherence(
   // this span actually covers (floored/ceilinged), lightly penalized when the
   // found peak isn't near the guided pace (could still be real RSA, just less
   // clearly the paced-breathing entrainment this feature is meant to reward).
-  final conf = clamp(
-    (spanSec / 180.0).clamp(0.3, 1.0) * (onPace ? 1.0 : 0.85),
-    0.2,
-    0.9,
-  );
+  final conf = ((spanSec / 180.0).clamp(0.3, 1.0) * (onPace ? 1.0 : 0.85))
+      .clamp(0.2, 0.9);
 
   return Metric<CardiacCoherence>(
     value: CardiacCoherence(ratio: ratio, score: score, peakHz: peakHz),

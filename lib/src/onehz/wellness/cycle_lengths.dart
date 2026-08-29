@@ -29,7 +29,6 @@
 // that this is a prompt to ask a clinician, not an answer.
 
 import '../types.dart';
-import '../util.dart';
 
 /// Consecutive-cycle difference used by the published criteria, in days.
 const int cycleLengthDifferenceCriterionDays = 7;
@@ -137,7 +136,7 @@ Metric<CycleLengthSeries> cycleLengthSeries(
       maxConsecutiveDifferenceDays: diffs.reduce((a, b) => a > b ? a : b),
       longestIntervalDays: lengths.reduce((a, b) => a > b ? a : b),
     ),
-    confidence: clamp(lengths.length / 24.0, 0.3, 0.8),
+    confidence: (lengths.length / 24.0).clamp(0.3, 0.8),
     tier: Tier.high,
     inputs_used: inputs,
     note: caveat,

@@ -34,12 +34,6 @@ void main() {
       final zr = robustZ(7, [1, 2, 3, 4, 5]);
       expect(zr, closeTo((7 - 3) / 1.4826, 1e-6));
     });
-
-    test('clamp', () {
-      expect(clamp(5, 0, 3), 3);
-      expect(clamp(-1, 0, 3), 0);
-      expect(clamp(2, 0, 3), 2);
-    });
   });
 
   group('regression', () {
@@ -260,9 +254,8 @@ void main() {
     test('HeartRateZones.timeInZone: 300 s scores, 301 s and 600 s are null',
         () {
       final zoneSet = HeartRateZones.zonesFromMaxHr(200);
-      List<HrSample> stream(double cadence, int n) => [
-            for (var i = 0; i < n; i++) HrSample(i * cadence * 1000.0, 150)
-          ];
+      List<HrSample> stream(double cadence, int n) =>
+          [for (var i = 0; i < n; i++) HrSample(i * cadence * 1000.0, 150)];
       // 300 s: 20 readings, each credited its own 300 s → 6000 s in z3.
       expect(HeartRateZones.timeInZone(stream(300, 20), zoneSet)!.total,
           closeTo(6000, 1e-9));
@@ -285,10 +278,10 @@ void main() {
       // The abstention has to reach the published number, not stop at the
       // helper: `banisterTRIMP` credits `fallbackSampleMin` per sample when
       // handed an empty list, which is the fabricated 1 s all over again.
-      expect(StrainScorer.strain(bpm, ts(301), maxHR: 190, restingHR: 50),
-          isNull);
-      expect(StrainScorer.strain(bpm, ts(600), maxHR: 190, restingHR: 50),
-          isNull);
+      expect(
+          StrainScorer.strain(bpm, ts(301), maxHR: 190, restingHR: 50), isNull);
+      expect(
+          StrainScorer.strain(bpm, ts(600), maxHR: 190, restingHR: 50), isNull);
       expect(StrainScorer.strain(bpm, ts(300), maxHR: 190, restingHR: 50),
           isNotNull);
     });
@@ -306,12 +299,10 @@ void main() {
       // a real 300 s day would have come out as one unbroken 8 h sleep session.
       // See `AdvancedSleepStager.maxStillCadenceSec` and
       // `test/onehz/sleep_cadence_test.dart`.
-      List<GravTs> grav(int cadence) => [
-            for (var t = 0; t < 8 * 3600; t += cadence) GravTs(t, 0, 0, 1.0)
-          ];
-      List<HrTs> hr(int cadence) => [
-            for (var t = 0; t < 8 * 3600; t += cadence) HrTs(t, 52)
-          ];
+      List<GravTs> grav(int cadence) =>
+          [for (var t = 0; t < 8 * 3600; t += cadence) GravTs(t, 0, 0, 1.0)];
+      List<HrTs> hr(int cadence) =>
+          [for (var t = 0; t < 8 * 3600; t += cadence) HrTs(t, 52)];
       expect(AdvancedSleepStager.detectSleep(grav(30), hr(30)), isNotEmpty);
       expect(AdvancedSleepStager.detectSleep(grav(300), hr(300)), isEmpty);
       expect(AdvancedSleepStager.detectSleep(grav(301), hr(301)), isEmpty);

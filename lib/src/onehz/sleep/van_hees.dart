@@ -400,8 +400,7 @@ Metric<SleepWindow> vanHeesSleepWindow(
 
   final hasTs = accel.every((a) => a.tsMs != 0) || accel.first.tsMs != 0;
   final onsetMs = hasTs ? accel[bestStart].tsMs : null;
-  final offsetMs =
-      hasTs ? accel[math.min(bestEnd, n - 1)].tsMs : null;
+  final offsetMs = hasTs ? accel[math.min(bestEnd, n - 1)].tsMs : null;
 
   var unresolved = 0;
   for (final u in immobileUnknown) {
@@ -414,7 +413,7 @@ Metric<SleepWindow> vanHeesSleepWindow(
   final undecidableSec = (unresolved * cadence).round();
 
   // Confidence grows with the detected SPT length up to a typical night.
-  final conf = clamp(sptSec / (7 * 3600), 0.3, 0.95);
+  final conf = (sptSec / (7 * 3600)).clamp(0.3, 0.95);
   return Metric<SleepWindow>(
     value: SleepWindow(
       onsetIdx: bestStart,

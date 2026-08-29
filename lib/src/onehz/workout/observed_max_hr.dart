@@ -143,34 +143,73 @@ Metric<HrCeiling> sessionHrCeiling(
 
   final holdMs = holdSeconds * 1000.0;
   final gapMs = maxGapSeconds * 1000.0;
+  // A real held effort's corroborating motion is not necessarily even across
+  // the hold (e.g. a couple of seconds of arm swing at each end of a quiet
+  // middle), so corroboration is judged on a short trailing sub-window, not
+  // the whole hold's average — a real burst anywhere in the hold would get
+  // diluted back below the gate by an otherwise-quiet average, which is
+  // exactly the edges-quiet-middle case this exists for. As the window
+  // extends past the minimal holdSeconds, that trailing sub-window sweeps
+  // across the rest of the candidate span, so a burst anywhere in it still
+  // gets found — capped, so one quiet start can't turn this into an O(n²)
+  // scan of a whole day.
+  final maxSpanMs = holdMs * 4;
+  const corrobMs = 3000.0; // "a couple of seconds of arm swing"
   HrCeiling? best;
-  // ponytail: O(n · holdSeconds) — one session at 1 Hz, so ~15 passes over a
-  // few thousand samples. A monotonic-deque sliding minimum if it ever runs
-  // over a whole day.
+  // ponytail: O(n · holdSeconds) — one session at 1 Hz, so a bounded number of
+  // passes over a few thousand samples. A monotonic-deque sliding minimum if
+  // it ever runs over a whole day.
   for (var i = 0; i < rows.length; i++) {
     var lo = rows[i].hr;
     var motionSum = 0.0;
     var count = 0;
+    var trailStart = i;
+    var trailSum = 0.0;
+    var trailCount = 0;
+    // Running max of the trailing sub-window average seen so far as j sweeps
+    // forward. trailStart only ever advances, so once j moves past a burst
+    // the trailing sum itself forgets it — bestTrail is what keeps a burst
+    // near the start of a long hold (or anywhere before a quiet tail) from
+    // being lost once the window slides past it.
+    var bestTrail = 0.0;
     for (var j = i; j < rows.length; j++) {
       if (j > i && rows[j].ts - rows[j - 1].ts > gapMs) break; // stream broke
       lo = math.min(lo, rows[j].hr);
       motionSum += rows[j].motion;
       count++;
+      trailSum += rows[j].motion;
+      trailCount++;
+      while (rows[j].ts - rows[trailStart].ts > corrobMs) {
+        trailSum -= rows[trailStart].motion;
+        trailCount--;
+        trailStart++;
+      }
+      // Only trust the trailing average once it actually spans a full
+      // corrobMs — before that (the first couple of samples at a fresh
+      // start index) it's one or two samples, and a single noisy sample
+      // could otherwise "corroborate" as if it were a real sustained burst.
+      final trailAvg = trailSum / trailCount;
+      if (rows[j].ts - rows[i].ts >= corrobMs && trailAvg > bestTrail) {
+        bestTrail = trailAvg;
+      }
       final span = rows[j].ts - rows[i].ts;
       if (span < holdMs) continue;
-      // The window qualifies on duration. `lo` is the bpm sustained across all
-      // of it; extending further can only lower it, so this is the best this
-      // start can do and we stop.
-      final motion = motionSum / count;
-      if (motion >= gate && (best == null || lo > best.bpm)) {
-        best = HrCeiling(
-          bpm: lo,
-          tsMs: rows[i].ts,
-          heldSeconds: (span / 1000).round(),
-          motionG: motion,
-        );
+      if (span > maxSpanMs) break; // gave this start its fair shot
+      // The window qualifies on duration. `lo` is the bpm sustained across
+      // all of it. Only stop once a short burst of real motion actually
+      // corroborated it ANYWHERE in the span so far (bestTrail), not just in
+      // whatever the trailing window currently covers.
+      if (bestTrail >= gate) {
+        if (best == null || lo > best.bpm) {
+          best = HrCeiling(
+            bpm: lo,
+            tsMs: rows[i].ts,
+            heldSeconds: (span / 1000).round(),
+            motionG: motionSum / count,
+          );
+        }
+        break;
       }
-      break;
     }
   }
 
@@ -183,7 +222,7 @@ Metric<HrCeiling> sessionHrCeiling(
   }
   return Metric<HrCeiling>(
     value: best,
-    confidence: clamp(best.heldSeconds / (holdSeconds * 2.0), 0.3, 0.8),
+    confidence: (best.heldSeconds / (holdSeconds * 2.0)).clamp(0.3, 0.8),
     tier: Tier.high,
     inputs_used: inputs,
     note: 'OBSERVED ceiling, not physiological HRmax — an underestimate if you '
