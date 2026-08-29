@@ -183,7 +183,7 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final perHour = cycleCount / analyzedHours;
-  final conf = clamp((1 - artifactFraction) * 0.85, 0.2, 0.85);
+  final conf = ((1 - artifactFraction) * 0.85).clamp(0.2, 0.85);
   return Metric<CvhrResult>(
     value: CvhrResult(
       cycleCount: cycleCount,
@@ -389,8 +389,8 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
     tier: Tier.relative,
     // The floor is 5 nights, so a 5-night answer must not read like a 30-night
     // one. Confidence rises with the nights actually behind it.
-    confidence: clamp(
-        0.3 + 0.4 * (kept.length / cvhrDistributionWindowNights), 0.3, 0.7),
+    confidence: (0.3 + 0.4 * (kept.length / cvhrDistributionWindowNights))
+        .clamp(0.3, 0.7),
     inputs_used: inputs,
     note: 'CVHR is a CARDIAC SURROGATE, not a breathing measurement: this is '
         'how often the pattern showed up across ${kept.length} of your own '

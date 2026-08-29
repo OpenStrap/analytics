@@ -115,7 +115,7 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   final saturation =
       meanNnTodayMs != null && meanNnTodayMs > 1100 && z != null && z > 1.0;
 
-  final conf = clamp(priorWindow.length / windowDays.toDouble(), 0.3, 0.9);
+  final conf = (priorWindow.length / windowDays.toDouble()).clamp(0.3, 0.9);
   return Metric<ReadinessLnRmssd>(
     value: ReadinessLnRmssd(
       lnRmssdToday: today,

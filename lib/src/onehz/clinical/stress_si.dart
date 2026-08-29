@@ -104,7 +104,7 @@ Metric<StressIndex> baevskyStressIndex(List<double> nnMs,
       amoPct: (median(amos) ?? 0),
       mxdmnS: (median(ranges) ?? 0),
     ),
-    confidence: clamp(0.4 + sis.length / 60.0, 0.4, 0.7),
+    confidence: (0.4 + sis.length / 60.0).clamp(0.4, 0.7),
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'Baevsky Stress Index — median of ~5-min-window SI '

@@ -66,6 +66,56 @@ void main() {
       }
     });
 
+    test('motion at both edges of a quiet middle still corroborates', () {
+      // 30s hold at 170 bpm: a couple seconds of arm swing at each end,
+      // quiet in between. Averaging motion over the whole window dilutes
+      // the edges away; corroboration has to find the burst.
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 30; i++) {
+        final t = i * 1000.0;
+        final edge = i < 3 || i >= 27;
+        hr.add(HrSample(t, 170));
+        accel.add(AccelSample(t, 0, 0, 1.0 + (edge ? 0.25 : 0.005)));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isTrue);
+      expect(m.value!.bpm, 170);
+    });
+
+    test('a burst at the very start of the hold still corroborates', () {
+      // 40s at 170 bpm: arm-swing burst only in seconds 0-2, quiet after.
+      // The trailing 3s window sweeps past the burst almost immediately, so
+      // corroboration has to remember it, not just see it at the current j.
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 40; i++) {
+        final t = i * 1000.0;
+        final burst = i < 3;
+        hr.add(HrSample(t, 170));
+        accel.add(AccelSample(t, 0, 0, 1.0 + (burst ? 0.25 : 0.005)));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isTrue);
+      expect(m.value!.bpm, 170);
+    });
+
+    test('a mid-window burst followed by a long quiet tail still corroborates',
+        () {
+      // 40s at 170 bpm: burst at seconds 10-12, quiet for the remaining 27s.
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 40; i++) {
+        final t = i * 1000.0;
+        final burst = i >= 10 && i < 13;
+        hr.add(HrSample(t, 170));
+        accel.add(AccelSample(t, 0, 0, 1.0 + (burst ? 0.25 : 0.005)));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isTrue);
+      expect(m.value!.bpm, 170);
+    });
+
     test('a gap in the stream breaks the hold', () {
       final a = _run(0, 10, 180, 0.20);
       final b = _run(60000, 10, 180, 0.20); // 50 s later

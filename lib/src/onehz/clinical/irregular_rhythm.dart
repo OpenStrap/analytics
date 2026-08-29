@@ -84,7 +84,24 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // inflated sdsd/sd1, pushing both flag conditions toward a false "sustained
   // irregularity" screen positive.
   final keep = [for (final v in rrMs) v >= 300 && v <= 2000];
-  final nn = [for (var i = 0; i < rrMs.length; i++) if (keep[i]) rrMs[i]];
+  final nn = [
+    for (var i = 0; i < rrMs.length; i++)
+      if (keep[i]) rrMs[i]
+  ];
+  // Per-element flag, aligned to [nn]: was this beat immediately preceded (no
+  // dropped beat in between) by the previous kept beat in the ORIGINAL rrMs?
+  // Carried into the window pass below so it can skip diffs across a removed
+  // artifact beat the same way the aggregate diffs already do (see [keep]
+  // note above) instead of just diffing consecutive elements of the
+  // compacted array.
+  final nnAdjacent = <bool>[];
+  var prevKeptOrigIdx = -1;
+  for (var i = 0; i < rrMs.length; i++) {
+    if (keep[i]) {
+      nnAdjacent.add(prevKeptOrigIdx == i - 1);
+      prevKeptOrigIdx = i;
+    }
+  }
   if (nn.length < minBeats) {
     return const Metric<IrregularRhythm>.absent(
       tier: Tier.estimate,
@@ -156,13 +173,17 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // window's own ratio/pNN into a spurious per-window flag.
   final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
   final nnTimes = hasTimes
-      ? [for (var i = 0; i < rrMs.length; i++) if (keep[i]) nnTimesMs[i]]
+      ? [
+          for (var i = 0; i < rrMs.length; i++)
+            if (keep[i]) nnTimesMs[i]
+        ]
       : const <double>[];
   final flag = aggregateHigh &&
       (!hasTimes ||
           _sustainedAcrossWindows(
             nn,
             nnTimes,
+            nnAdjacent,
             sd1sd2Flag: sd1sd2Flag,
             pnnThresholdMs: pnnThresholdMs,
             pnnFlagPct: pnnFlagPct,
@@ -174,7 +195,7 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // with the artifact fraction we were handed — it used to ignore it entirely,
   // so a barely-passing 29 %-artifact night published at the same confidence as
   // a clean one.
-  final conf = clamp(nn.length / 5000.0 * (1 - artifactFraction), 0.2, 0.9);
+  final conf = (nn.length / 5000.0 * (1 - artifactFraction)).clamp(0.2, 0.9);
   return Metric<IrregularRhythm>(
     value: IrregularRhythm(
       sd1: sd1,
@@ -199,7 +220,10 @@ Metric<IrregularRhythm> irregularBeatScreen(
 /// length as [rrMs] and index-aligned (elapsed ms per beat).
 bool _sustainedAcrossWindows(
   List<double> rrMs,
-  List<double> timesMs, {
+  List<double> timesMs,
+  // Aligned to [rrMs]: whether each beat was truly adjacent (no dropped
+  // artifact beat in between) to the previous one in the ORIGINAL series.
+  List<bool> adjacent, {
   required double sd1sd2Flag,
   required double pnnThresholdMs,
   required double pnnFlagPct,
@@ -207,7 +231,11 @@ bool _sustainedAcrossWindows(
   required int minWindowBeats,
   required double sustainedFraction,
 }) {
-  if (timesMs.length != rrMs.length || rrMs.length < 2) return false;
+  if (timesMs.length != rrMs.length ||
+      adjacent.length != rrMs.length ||
+      rrMs.length < 2) {
+    return false;
+  }
   // Fail CLOSED (never sustained) on a bad config — a misconfigured caller
   // must never manufacture a medical false positive.
   if (!windowMinutes.isFinite ||
@@ -223,11 +251,16 @@ bool _sustainedAcrossWindows(
   var validWindows = 0;
   var flaggedWindows = 0;
   var bucket = <double>[];
+  var bucketAdjacent = <bool>[];
   void flush() {
     if (bucket.length >= minWindowBeats) {
       validWindows++;
+      // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
+      // across a beat that was dropped as an artifact in the original series,
+      // even though it's now a consecutive pair in this compacted bucket.
       final diffs = <double>[
-        for (var i = 1; i < bucket.length; i++) bucket[i] - bucket[i - 1]
+        for (var i = 1; i < bucket.length; i++)
+          if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
       ];
       final sdsd = stddev(diffs);
       final sdnn = stddev(bucket);
@@ -244,6 +277,7 @@ bool _sustainedAcrossWindows(
       }
     }
     bucket = [];
+    bucketAdjacent = [];
   }
 
   for (var i = 0; i < rrMs.length; i++) {
@@ -252,6 +286,7 @@ bool _sustainedAcrossWindows(
       windowStart = timesMs[i];
     }
     bucket.add(rrMs[i]);
+    bucketAdjacent.add(adjacent[i]);
   }
   flush();
   if (validWindows == 0) return false;

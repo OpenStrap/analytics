@@ -65,13 +65,32 @@ metric that needs 7 nights of baseline and only has 3 says so directly (`note:
 "need_baseline:have=3,need=7"`) instead of quietly computing something off 3 nights and
 hoping you don't notice.
 
+## Quick start
+
+```dart
+import 'package:openstrap_analytics/onehz.dart';
+
+// nnMs: cleaned beat-to-beat RR intervals in ms (see foundations/rr_correction.dart
+// for turning raw RR into this). nnTimesMs: cumulative beat timestamp in ms
+// (time since the first beat, NOT the per-beat RR duration), same length.
+final nnMs = <double>[800, 810, 795, 805];
+final nnTimesMs = <double>[0, 800, 1610, 2405];
+final Metric<HrvTime> hrv = hrvTime(nnMs, nnTimesMs: nnTimesMs, artifactFraction: 0.04);
+if (hrv.value != null) {
+  print('RMSSD ${hrv.value!.rmssd} ms (confidence ${hrv.confidence}, tier ${hrv.tier})');
+}
+```
+
+Every metric function in the package follows this shape: plain `List<double>` (or a
+small typed input class for the composite ones) in, `Metric<T>` out.
+
 ## What's actually in here
 
 Eight families, each its own subdirectory with its own sub-barrel, built on two shared
 foundation layers:
 
 - **`foundations/`** — Lipponen-Tarvainen RR artifact correction, Winsorized-EWMA rolling
-  baselines, inverse-variance fusion, a PPG signal-quality index.
+  baselines, inverse-variance fusion.
 - **`clinical/`** (Tier-1) — HRV time/frequency domain (RMSSD/SDNN/pNNx, Lomb-Scargle
   LF/HF), PRSA (deceleration/acceleration capacity), nocturnal RHR/dip, an illness-risk
   CUSUM state machine, Plews ln-RMSSD readiness, Baevsky stress index, Banister/Edwards
@@ -86,8 +105,8 @@ foundation layers:
 - **`motion/`** — ENMO/MAD activity metrics, a hybrid live/1 Hz step estimator (AN-2554
   100 Hz pedometer preferred, a gated-and-bout-length-checked 1 Hz fallback for whatever
   the live stream missed), energy-expenditure fusion.
-- **`workout/`** — workout detection (both explicit and automatic), heart-rate-reserve
-  zones, Keytel/Harris-Benedict calorie estimation.
+- **`workout/`** — automatic workout detection (bout suggestion, never explicit/
+  retroactive), heart-rate-reserve zones, Keytel/Harris-Benedict calorie estimation.
 - **`wellness/`** — the canonical composite readiness score, multivariate (Mahalanobis)
   anomaly detection, CUSUM changepoint detection, temperature-based illness flagging.
 - **`human/`** — sleep regularity index, social jetlag/chronotype, single-night event
@@ -110,7 +129,24 @@ not a feature, no matter how tempting the plausible-looking headline is.
 dart test   # run from the repo root — some fixtures resolve paths relative to it
 ```
 
-290 tests, nothing mocked — pure functions, fixture in, assertion out.
+All pass (a handful skipped), nothing mocked — pure functions, fixture in,
+assertion out.
+
+## Validation
+
+`tool/` has four harnesses that score shipped detectors against labelled corpora, not
+synthetic fixtures — run one before touching the logic it covers:
+
+- `dart run tool/oxwalk_validate.dart <path-to-OxWalk_Dec2022>` — the pedometer against
+  OxWalk (Oxford, CC BY): 39 subjects, camera-annotated heel strikes.
+- `dart run tool/stager_harness.dart <fixture.json>` — the sleep-staging decision layer
+  against a PSG-labelled corpus (e.g. DREAMT), reporting Cohen's kappa.
+- `dart run tool/nap_harness.dart <fixture.json>` — the nap detector against hand-labelled
+  days.
+- `dart run tool/whoop_proportions.dart <dir-of-night-json>` — sweeps sleep-stage cutoffs
+  against normative stage proportions on real device captures.
+
+Each file's header comment has the full usage, flags, and fixture schema.
 
 ## If you want to add a metric
 

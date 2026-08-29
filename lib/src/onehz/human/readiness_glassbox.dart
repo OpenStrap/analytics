@@ -82,7 +82,8 @@ class ReadinessBreakdownItem {
             percentileOfYou == null ? null : round6(percentileOfYou!),
         'weight': round6(weight),
         'weighted_contribution': round6(weightedContribution),
-        'past_mdc': beyondUsualSpread, // wire name kept; SWC gate since 2026-08-17
+        'past_mdc':
+            beyondUsualSpread, // wire name kept; SWC gate since 2026-08-17
         'used': used,
         if (note != null) 'note': note,
       };
@@ -94,8 +95,8 @@ class GlassBoxReadiness {
   final List<Driver> drivers; // ranked by |w·z|, only NAMED past the SWC
   final String narrative; // deterministic, definitional "why"
   final int inputsUsed;
-  const GlassBoxReadiness(this.score, this.breakdown, this.drivers, this.narrative,
-      this.inputsUsed);
+  const GlassBoxReadiness(this.score, this.breakdown, this.drivers,
+      this.narrative, this.inputsUsed);
   Map<String, dynamic> toJson() => {
         'score': round6(score),
         'breakdown': [for (final b in breakdown) b.toJson()],
@@ -218,7 +219,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
     );
   }
 
-  final score = clamp(wpsum / wsum, 0, 100);
+  final double score = (wpsum / wsum).clamp(0, 100);
 
   // Drivers ranked by |contribution|; only NAME a driver past the SWC.
   final ranked = [...raw]..sort((a, b) => b.c.abs().compareTo(a.c.abs()));
@@ -235,7 +236,7 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
   final narrative = _buildNarrative(score, drivers);
 
   // Confidence reflects how many of the priority inputs were usable.
-  final conf = clamp(nUsable / inputs.length.toDouble(), 0.3, 0.9);
+  final conf = (nUsable / inputs.length.toDouble()).clamp(0.3, 0.9);
   return Metric<GlassBoxReadiness>(
     value: GlassBoxReadiness(score, items, drivers, narrative, nUsable),
     confidence: conf,

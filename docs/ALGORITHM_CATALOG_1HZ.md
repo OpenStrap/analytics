@@ -40,7 +40,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 - **24-h SDNN + SDANN/SDNN-index** — jitter-immune (operate on 5-min means). `24/7 · HIGH`
 - **Nocturnal HR dip %** / night-day ratio (dipper/non-dipper/riser) — CV-risk + acute-strain signal. `24/7 · HIGH`
 - **NightSignal FSM + CUSUM/EWMA on RHR** — Alavi 2022 / Mishra 2020 (28-day baseline, designed ARL, yellow→red persistence). Best wearable-validated deterministic illness alarm. `24/7 · HIGH`
-- **TRIMP (Edwards + Banister) + CTL/ATL/TSB** — Edwards 1993 / Banister; Morton 1990. Needs measured HRmax + RHR. Guard non-wear gaps. `24/7 · HIGH`
+- **TRIMP (Banister) + CTL/ATL/TSB** — Banister; Morton 1990. Needs measured HRmax + RHR. Guard non-wear gaps. `24/7 · HIGH`
 
 ### Sleep & circadian (accel + HR + RR + temp + light)
 - **van Hees / GGIR angle sleep-window** — 2015/2018. Count-FREE, gravity-orientation @1 Hz is ample. **THE sleep/wake spine** (sidesteps the Cole-Kripke count-calibration trap). `24/7 · HIGH`

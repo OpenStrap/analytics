@@ -548,7 +548,7 @@ class AdvancedSleepStager {
 
   static double? _hrBaseline(List<HrTs> hr) {
     if (hr.isEmpty) return null;
-    return _median([for (final h in hr) h.bpm]);
+    return median([for (final h in hr) h.bpm]);
   }
 
   static bool _hrSleepBandAcross(int a, int b, List<HrTs> hr, double? baseline) {
@@ -1056,7 +1056,7 @@ class AdvancedSleepStager {
       final lo = math.max(0, i - halfW);
       final hi = math.min(n, i + halfW + 1);
       final winDog = dogHR.isEmpty ? <double>[0.0] : dogHR.sublist(lo, hi);
-      final hrVar = winDog.length >= 2 ? _populationStd(winDog) : double.nan;
+      final hrVar = winDog.length >= 2 ? stddevPop(winDog)! : double.nan;
 
       final winRR = <double>[];
       final winResp = <double>[];
@@ -1068,7 +1068,7 @@ class AdvancedSleepStager {
       final rmssd =
           filteredRR.length >= 5 ? (_rmssdRaw(filteredRR) ?? double.nan) : double.nan;
       final sdnn =
-          filteredRR.length >= 5 ? (_sdnnRaw(filteredRR) ?? double.nan) : double.nan;
+          filteredRR.length >= 5 ? (stddev(filteredRR) ?? double.nan) : double.nan;
       // BUG FIX (2026-07): `winResp` is fed from `resp:`/`RespTs`, a raw 1 Hz
       // respiration-ADC channel — but the WHOOP 4 R24 record has no such
       // channel (an early candidate field was dropped as constant/mirror
@@ -1116,7 +1116,7 @@ class AdvancedSleepStager {
     final mean = respRaw.reduce((a, b) => a + b) / respRaw.length;
     final x = [for (final v in respRaw) v - mean];
     if (x.every((v) => v.abs() < 1e-12)) return [double.nan, double.nan];
-    final std = _populationStd(x);
+    final std = stddevPop(x)!;
     if (std <= 0) return [double.nan, double.nan];
     final minDistance = math.max(2, (2.0 / dtS).round());
     final peaks = _findPeaks(x, minDistance, 0.0);
@@ -1127,8 +1127,8 @@ class AdvancedSleepStager {
       if (iv >= 1.5 && iv <= 12.0) intervals.add(iv);
     }
     if (intervals.length < 2) return [double.nan, double.nan];
-    final rate = 60 / _median(intervals)!;
-    final rrv = _populationStd(intervals);
+    final rate = 60 / median(intervals)!;
+    final rrv = stddevPop(intervals)!;
     return [rate, rrv];
   }
 
@@ -1151,7 +1151,7 @@ class AdvancedSleepStager {
     final mean = rrMs.reduce((a, b) => a + b) / rrMs.length;
     final x = [for (final v in rrMs) v - mean];
     if (x.every((v) => v.abs() < 1e-9)) return [double.nan, double.nan];
-    final std = _populationStd(x);
+    final std = stddevPop(x)!;
     if (std <= 0) return [double.nan, double.nan];
     // Peaks must be >=2 beats apart — a beat-to-beat RR series has ~1 sample
     // per beat, so a distance-1 peak would just be beat-to-beat noise, not a
@@ -1164,8 +1164,8 @@ class AdvancedSleepStager {
       if (iv >= 1.5 && iv <= 12.0) intervalsS.add(iv);
     }
     if (intervalsS.length < 2) return [double.nan, double.nan];
-    final rate = 60 / _median(intervalsS)!;
-    final rrv = _populationStd(intervalsS);
+    final rate = 60 / median(intervalsS)!;
+    final rrv = stddevPop(intervalsS)!;
     return [rate, rrv];
   }
 
@@ -1835,12 +1835,8 @@ class AdvancedSleepStager {
     double Function(double?) zfun(List<double?> vals) {
       final present = [for (final v in vals) if (v != null) v];
       if (present.isEmpty) return (_) => 0;
-      final m = present.reduce((a, b) => a + b) / present.length;
-      var sd0 = 0.0;
-      for (final v in present) {
-        sd0 += (v - m) * (v - m);
-      }
-      sd0 = math.sqrt(sd0 / present.length);
+      final m = mean(present)!;
+      final sd0 = stddevPop(present)!;
       final sd = sd0 == 0 ? 1.0 : sd0;
       return (v) => v == null ? 0 : (v - m) / sd;
     }
@@ -2013,34 +2009,6 @@ class AdvancedSleepStager {
       sumSq += d * d;
     }
     return math.sqrt(sumSq / (nn.length - 1));
-  }
-
-  static double? _sdnnRaw(List<double> nn) {
-    if (nn.length < 2) return null;
-    final mean = nn.reduce((a, b) => a + b) / nn.length;
-    var ss = 0.0;
-    for (final v in nn) {
-      ss += (v - mean) * (v - mean);
-    }
-    return math.sqrt(ss / (nn.length - 1));
-  }
-
-  static double? _median(List<double> values) {
-    if (values.isEmpty) return null;
-    final s = [...values]..sort();
-    final n = s.length;
-    if (n.isOdd) return s[n ~/ 2];
-    return (s[n ~/ 2 - 1] + s[n ~/ 2]) / 2.0;
-  }
-
-  static double _populationStd(List<double> xs) {
-    if (xs.isEmpty) return 0;
-    final m = xs.reduce((a, b) => a + b) / xs.length;
-    var ss = 0.0;
-    for (final v in xs) {
-      ss += (v - m) * (v - m);
-    }
-    return math.sqrt(ss / xs.length);
   }
 
   /// numpy-style linear-interp percentile of an ALREADY-SORTED list.

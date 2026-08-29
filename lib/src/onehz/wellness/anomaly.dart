@@ -46,7 +46,8 @@ const int multivariateAnomalyMinBaseline = 10;
 
 class AnomalyDay {
   final String date;
-  final double? mahalanobis; // robust Mahalanobis distance (null if no baseline)
+  final double?
+      mahalanobis; // robust Mahalanobis distance (null if no baseline)
   final bool flagged; // distance crossed gate AND persistence satisfied
   final bool candidate; // distance crossed gate THIS night (pre-persistence)
   final List<Driver> drivers; // per-feature signed contribution
@@ -59,8 +60,9 @@ class AnomalyDay {
   ///     standardize against and we abstain rather than invent one.
   /// Null when the night WAS evaluated.
   final String? need;
-  const AnomalyDay(this.date, this.mahalanobis, this.flagged, this.candidate,
-      this.drivers, {this.need});
+  const AnomalyDay(
+      this.date, this.mahalanobis, this.flagged, this.candidate, this.drivers,
+      {this.need});
   Map<String, dynamic> toJson() => {
         'date': date,
         if (mahalanobis != null) 'mahalanobis': round6(mahalanobis!),
@@ -133,7 +135,8 @@ List<AnomalyDay> multivariateAnomaly(
       String? need;
       var bestHave = -1;
       for (var f = 0; f < 4; f++) {
-        if (cur[f] != null && cols[f].length > bestHave) bestHave = cols[f].length;
+        if (cur[f] != null && cols[f].length > bestHave)
+          bestHave = cols[f].length;
       }
       if (bestHave >= 0) {
         need = needBaselineNote(have: bestHave, need: minBaseline);
@@ -161,7 +164,8 @@ List<AnomalyDay> multivariateAnomaly(
     for (final f in idx) {
       final m = mad(cols[f]) ?? 0;
       final sc = m > 0 ? m : (stddev(cols[f]) ?? 0);
-      if (!sc.isFinite || sc <= 0) continue; // no dispersion → not standardizable
+      if (!sc.isFinite || sc <= 0)
+        continue; // no dispersion → not standardizable
       keep.add(f);
       center.add(median(cols[f])!);
       scale.add(sc);
@@ -173,7 +177,10 @@ List<AnomalyDay> multivariateAnomaly(
       continue;
     }
     // Standardized current vector.
-    final zc = [for (var a = 0; a < keep.length; a++) (cur[keep[a]]! - center[a]) / scale[a]];
+    final zc = [
+      for (var a = 0; a < keep.length; a++)
+        (cur[keep[a]]! - center[a]) / scale[a]
+    ];
 
     // Robust correlation matrix from aligned rows (standardized), regularized.
     final cov = _robustCorr(rows, keep, center, scale, ridge);
@@ -199,7 +206,8 @@ List<AnomalyDay> multivariateAnomaly(
       drivers.add(Driver(_featLabels[keep[a]], roundTo(zc[a], 6),
           detail: 'standardized deviation'));
     }
-    drivers.sort((x, y) => y.contribution.abs().compareTo(x.contribution.abs()));
+    drivers
+        .sort((x, y) => y.contribution.abs().compareTo(x.contribution.abs()));
 
     // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows.
     if (day[i] - lastScoredDay > 1) run = 0;
@@ -328,7 +336,7 @@ List<List<double>> _robustCorr(
         final xa = [for (final s in std) s[a]];
         final xb = [for (final s in std) s[b]];
         final r = _corr(xa, xb);
-        final rc = clamp(r ?? 0.0, -0.95, 0.95);
+        final rc = (r ?? 0.0).clamp(-0.95, 0.95);
         m[a][b] = rc;
         m[b][a] = rc;
       }

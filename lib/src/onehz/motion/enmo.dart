@@ -290,7 +290,7 @@ EnmoResult enmoSeries(
   // count the unworn ends too.
   final spanMinutes = minutes.isEmpty ? 0 : keys.last - keys.first + 1;
   final denom = expectedMinutes ?? spanMinutes;
-  final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
+  final coverage = denom <= 0 ? 0.0 : (covered / denom).clamp(0.0, 1.0);
   return EnmoResult(ref, minutes, coverage);
 }
 
@@ -405,7 +405,7 @@ Metric<IntensityBands> relativeIntensityBands(
     percentile(moving, 75)!,
     percentile(moving, 90)!,
     // confidence scales with how much moving data anchors the percentiles.
-    clamp(moving.length / 60.0, 0.3, 0.8),
+    (moving.length / 60.0).clamp(0.3, 0.8),
     'RELATIVE within-user intensity (50/75/90th moving pct OF THIS INPUT — '
     'cut-points not frozen); NOT METs',
   );

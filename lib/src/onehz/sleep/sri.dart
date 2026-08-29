@@ -138,7 +138,7 @@ Metric<SriResult> phillipsSri(
   final sri = 200.0 * agreement / cases - 100.0;
   // Confidence: scales with the number of day-comparisons (more days, more
   // stable). Saturates around a typical 7-day record.
-  final conf = clamp((days - 1) / 7.0, 0.3, 0.95);
+  final conf = ((days - 1) / 7.0).clamp(0.3, 0.95);
   return Metric<SriResult>(
     value: SriResult(sri, days, cases, pairs),
     confidence: conf,

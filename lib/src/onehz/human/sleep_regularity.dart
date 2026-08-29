@@ -89,7 +89,7 @@ Metric<SleepDebt> sleepDebt(
   final debt = osd - habitual;
   return Metric<SleepDebt>(
     value: SleepDebt(osd, habitual, debt, true),
-    confidence: clamp(freeNightSleepH.length / 5.0, 0.3, 0.85),
+    confidence: (freeNightSleepH.length / 5.0).clamp(0.3, 0.85),
     tier: Tier.high,
     inputs_used: inputs,
     note: 'p75 of your unconstrained nights vs your habitual night — a '
