@@ -420,18 +420,6 @@ class StrainScorer {
   // its own 190 for the "did you work out?" prompt, which is not a published
   // number.
 
-  /// Linear-interpolated percentile of an ALREADY-SORTED sequence (numpy-style).
-  static double _percentileSorted(List<double> sortedValues, double pct) {
-    final n = sortedValues.length;
-    if (n == 0) return 0;
-    if (n == 1) return sortedValues[0];
-    final position = (pct / 100.0) * (n - 1);
-    final lower = position.toInt();
-    final upper = math.min(lower + 1, n - 1);
-    final frac = position - lower;
-    return sortedValues[lower] + frac * (sortedValues[upper] - sortedValues[lower]);
-  }
-
   /// Estimate a personalized HRmax from a trailing HR series.
   /// Returns (hrmax bpm, source ∈ {"observed","tanaka","unknown"}).
   static (double, String) estimateHRmax(List<double> hrHistory, double? age) {
@@ -440,7 +428,7 @@ class StrainScorer {
 
     if (n >= hrmaxMinSamples) {
       final sorted = [...hrHistory]..sort();
-      final observed = _percentileSorted(sorted, hrmaxPercentile);
+      final observed = percentileSorted(sorted, hrmaxPercentile)!;
       if (tanaka == null) return (observed, 'observed');
       return observed >= tanaka ? (observed, 'observed') : (tanaka, 'tanaka');
     }

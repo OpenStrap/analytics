@@ -66,6 +66,23 @@ void main() {
       }
     });
 
+    test('motion at both edges of a quiet middle still corroborates', () {
+      // 30s hold at 170 bpm: a couple seconds of arm swing at each end,
+      // quiet in between. Averaging motion over the whole window dilutes
+      // the edges away; corroboration has to find the burst.
+      final hr = <HrSample>[];
+      final accel = <AccelSample>[];
+      for (var i = 0; i < 30; i++) {
+        final t = i * 1000.0;
+        final edge = i < 3 || i >= 27;
+        hr.add(HrSample(t, 170));
+        accel.add(AccelSample(t, 0, 0, 1.0 + (edge ? 0.25 : 0.005)));
+      }
+      final m = sessionHrCeiling(hr, accel, deviceFamily: 'gen4');
+      expect(m.present, isTrue);
+      expect(m.value!.bpm, 170);
+    });
+
     test('a gap in the stream breaks the hold', () {
       final a = _run(0, 10, 180, 0.20);
       final b = _run(60000, 10, 180, 0.20); // 50 s later

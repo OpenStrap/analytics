@@ -113,6 +113,22 @@ dart test   # run from the repo root — some fixtures resolve paths relative to
 624 passed / 6 skipped (630 total), nothing mocked — pure functions, fixture in,
 assertion out.
 
+## Validation
+
+`tool/` has four harnesses that score shipped detectors against labelled corpora, not
+synthetic fixtures — run one before touching the logic it covers:
+
+- `dart run tool/oxwalk_validate.dart <path-to-OxWalk_Dec2022>` — the pedometer against
+  OxWalk (Oxford, CC BY): 39 subjects, camera-annotated heel strikes.
+- `dart run tool/stager_harness.dart <fixture.json>` — the sleep-staging decision layer
+  against a PSG-labelled corpus (e.g. DREAMT), reporting Cohen's kappa.
+- `dart run tool/nap_harness.dart <fixture.json>` — the nap detector against hand-labelled
+  days.
+- `dart run tool/whoop_proportions.dart <dir-of-night-json>` — sweeps sleep-stage cutoffs
+  against normative stage proportions on real device captures.
+
+Each file's header comment has the full usage, flags, and fixture schema.
+
 ## If you want to add a metric
 
 Write a function that takes the 1 Hz substrate (or a derived series like an RR stream)
