@@ -298,7 +298,7 @@ Metric<HrRecovery> hrRecovery(
   }
   final pct = peak > 0 ? 100.0 * drop / peak : 0.0;
   // Confidence from DATA QUALITY, not from the answer. This used to be
-  // `clamp(drop / 30, 0.3, 0.9)` — confidence derived from the metric's own
+  // `(drop / 30).clamp(0.3, 0.9)` — confidence derived from the metric's own
   // magnitude, so a motion-artifact spike inflated `peak`, inflated `drop`, and
   // RAISED the confidence: the least trustworthy readings scored highest.
   var seen = 0, valid = 0;
@@ -315,11 +315,9 @@ Metric<HrRecovery> hrRecovery(
   // we have no way to know the recovery sample is really 60 s later. A
   // timestamped tail too sparse to fill the peak window doesn't earn it either
   // — the timestamps proved the window was short rather than fixing it.
-  final conf = clamp(
-    0.3 + 0.4 * validFrac + (times != null && peakWindowFull ? 0.2 : 0.0),
-    0.2,
-    0.9,
-  );
+  final conf =
+      (0.3 + 0.4 * validFrac + (times != null && peakWindowFull ? 0.2 : 0.0))
+          .clamp(0.2, 0.9);
 
   // TAU (CV-08). Same tail, same slice, no second pass over the substrate.
   // Timestamps are REQUIRED: a time constant fitted to array positions of

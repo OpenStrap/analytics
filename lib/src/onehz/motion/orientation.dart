@@ -41,7 +41,8 @@ const double _rad2deg = 180.0 / math.pi;
 class Tilt {
   final double pitchDeg; // forward(+)/back(−)
   final double rollDeg; // right(+)/left(−)
-  final String position; // supine|prone|lateral_left|lateral_right|upright|unknown
+  final String
+      position; // supine|prone|lateral_left|lateral_right|upright|unknown
   final int nSamples;
   final double stillness; // 0..1 (1 = perfectly still)
   const Tilt(
@@ -114,7 +115,8 @@ Metric<Tilt> staticTilt(
     final a = valid[i - 1], b = valid[i];
     final ma = mags[i - 1], mb = mags[i];
     if (ma <= 0 || mb <= 0) continue;
-    final cos = clamp((a.x * b.x + a.y * b.y + a.z * b.z) / (ma * mb), -1.0, 1.0);
+    final cos =
+        ((a.x * b.x + a.y * b.y + a.z * b.z) / (ma * mb)).clamp(-1.0, 1.0);
     rotSum += math.acos(cos) * _rad2deg;
     rotN++;
   }
@@ -137,11 +139,9 @@ Metric<Tilt> staticTilt(
   jitter = mags.length > 1 ? jitter / (mags.length - 1) : 0.0;
   // Stillness is the WORSE of the two — a posture is only as trustworthy as
   // the loosest thing that could have disturbed it.
-  final stillness = clamp(
-    math.min(1.0 - rotDeg / maxRotationDeg, 1.0 - jitter / maxJitterG),
-    0.0,
-    1.0,
-  );
+  final stillness =
+      (math.min(1.0 - rotDeg / maxRotationDeg, 1.0 - jitter / maxJitterG))
+          .clamp(0.0, 1.0);
   if (rotDeg > maxRotationDeg) {
     return Metric<Tilt>.absent(
       tier: Tier.high,
@@ -165,7 +165,8 @@ Metric<Tilt> staticTilt(
   final roll = math.atan2(my, mz) * _rad2deg;
   final pos = classifyPosition(pitch, roll);
   // confidence blends stillness with epoch length.
-  final conf = clamp(stillness * (valid.length / 30.0).clamp(0.3, 1.0), 0.0, 0.9);
+  final conf =
+      (stillness * (valid.length / 30.0).clamp(0.3, 1.0)).clamp(0.0, 0.9);
   return Metric<Tilt>(
     value: Tilt(pitch, roll, pos, valid.length, stillness),
     confidence: conf,

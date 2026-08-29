@@ -1,9 +1,9 @@
 /// openstrap_analytics — 1 Hz-native physiological analytics family.
 ///
-/// Independent of the minute-resolution library in
-/// `lib/openstrap_analytics.dart`. Operates on the always-on 1 Hz substrate
-/// (beat-to-beat RR, 1 Hz HR, 1 Hz tri-axial accel, relative-ADC channels) per
-/// docs/ALGORITHM_CATALOG_1HZ.md.
+/// The old minute-resolution library that used to live alongside this one has
+/// been removed; this is the only analytics library in the package now.
+/// Operates on the always-on 1 Hz substrate (beat-to-beat RR, 1 Hz HR, 1 Hz
+/// tri-axial accel, relative-ADC channels) per docs/ALGORITHM_CATALOG_1HZ.md.
 ///
 /// Honesty ceilings are enforced in code: PRV not ECG-HRV; relative signals
 /// carry no absolute %/°C; absent input => null + confidence 0 (never a

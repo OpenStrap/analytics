@@ -65,6 +65,22 @@ metric that needs 7 nights of baseline and only has 3 says so directly (`note:
 "need_baseline:have=3,need=7"`) instead of quietly computing something off 3 nights and
 hoping you don't notice.
 
+## Quick start
+
+```dart
+import 'package:openstrap_analytics/onehz.dart';
+
+// nnMs: cleaned beat-to-beat RR intervals in ms (see foundations/rr_correction.dart
+// for turning raw RR into this). nnTimesMs: elapsed ms per beat, same length.
+final Metric<HrvTime> hrv = hrvTime(nnMs, nnTimesMs: nnTimesMs, artifactFraction: 0.04);
+if (hrv.value != null) {
+  print('RMSSD ${hrv.value!.rmssd} ms (confidence ${hrv.confidence}, tier ${hrv.tier})');
+}
+```
+
+Every metric function in the package follows this shape: plain `List<double>` (or a
+small typed input class for the composite ones) in, `Metric<T>` out.
+
 ## What's actually in here
 
 Eight families, each its own subdirectory with its own sub-barrel, built on two shared

@@ -200,7 +200,7 @@ Metric<SettledSkinTemp> nightlySkinTemp(
   }
   return Metric<SettledSkinTemp>(
     value: SettledSkinTemp(mean(kept)!, frac, cal.unit),
-    confidence: clamp(frac, 0.0, 1.0),
+    confidence: frac.clamp(0.0, 1.0),
     tier: Tier.relative,
     inputs_used: inputs,
     note: 'RELATIVE nightly skin-temp mean over the SETTLED portion only '
@@ -289,7 +289,7 @@ Metric<TempCircadian> tempCircadian(
   }
 
   // Confidence: tie to cosinor R² when present, else a modest np-only value.
-  final conf = cos.value != null ? clamp(cos.value!.r2, 0.1, 0.9) : 0.3;
+  final conf = cos.value != null ? (cos.value!.r2).clamp(0.1, 0.9) : 0.3;
   return Metric<TempCircadian>(
     value: TempCircadian(cos.value, np, cal.unit),
     confidence: conf,
@@ -387,7 +387,7 @@ CircadianNonparam? _nonparam(
     }
     profVar /= profile.length;
   }
-  final is_ = varTot > 0 ? clamp(profVar / (varTot / p), 0, 1) : 0.0;
+  final double is_ = varTot > 0 ? (profVar / (varTot / p)).clamp(0, 1) : 0.0;
 
   // M10 / L5 / RA are DELIBERATELY NOT COMPUTED. See the file header: the temp
   // series that survives retention is median-centred, so it is signed, and

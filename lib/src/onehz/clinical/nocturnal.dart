@@ -128,7 +128,7 @@ Metric<NocturnalRhr> nocturnalRhr(List<double> hr,
   // Confidence is COVERAGE IN SECONDS, not a sample count — 480 samples of a
   // 60 s band is the same 8 h of night as 28,800 samples at 1 Hz.
   final conf =
-      clamp(valid.length * cadence / 7200.0, 0.4, 0.95); // ~2 h => high
+      (valid.length * cadence / 7200.0).clamp(0.4, 0.95); // ~2 h => high
   return Metric<NocturnalRhr>(
     value: NocturnalRhr(best, p1, valid.length),
     confidence: conf,
@@ -189,7 +189,7 @@ Metric<HrDip> hrDip(List<double> dayHr, List<double> nightHr,
   }
   final dip = (dm - nm) / dm * 100;
   final band = dip >= 10 ? 'dipper' : (dip >= 0 ? 'non_dipper' : 'riser');
-  final conf = clamp((dv.length + nv.length) / 14400.0, 0.4, 0.9);
+  final conf = ((dv.length + nv.length) / 14400.0).clamp(0.4, 0.9);
   return Metric<HrDip>(
     value: HrDip(dip, dm, nm, band),
     confidence: conf,

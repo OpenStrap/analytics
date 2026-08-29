@@ -126,7 +126,10 @@ Metric<RelativeOdiResult> relativeOdi(
   // normalized perfusion ratio's inverse mapping. A 1 Hz-honest self-
   // referential surrogate: oxy ∝ -R. We track dips as RISES in R relative to a
   // rolling baseline (equiv. to drops in oxygenation), thresholded at dipPct.
-  final validR = [for (final v in relR) if (!v.isNaN) v];
+  final validR = [
+    for (final v in relR)
+      if (!v.isNaN) v
+  ];
   // HONEST-BY-TYPE: if EVERY ratio sample is NaN (no channel passed the DC/IR
   // guards) there is no self-referential trend to report — a fabricated 0.0
   // would read as a real (and impossibly stable) relative-R. Return absent
@@ -202,7 +205,7 @@ Metric<RelativeOdiResult> relativeOdi(
     }
   }
   final nanCount = relR.where((v) => v.isNaN).length;
-  final conf = clamp(0.5 * validFraction, 0.1, 0.5);
+  final conf = (0.5 * validFraction).clamp(0.1, 0.5);
   return Metric<RelativeOdiResult>(
     value: RelativeOdiResult(
       meanRelR: meanRelR,

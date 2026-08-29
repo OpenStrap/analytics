@@ -252,8 +252,9 @@ double strainScore(
       trimp - baselineTrimp(wakeMinutes, quietHrr: quietHrr, female: female);
   if (net <= 0) return 0.0;
   final u = math.min(1.0, net / maximalNetTrimp);
-  final s =
-      21.0 * math.log(1 + u * (strainCurvature - 1)) / math.log(strainCurvature);
+  final s = 21.0 *
+      math.log(1 + u * (strainCurvature - 1)) /
+      math.log(strainCurvature);
   return math.min(21.0, math.max(0.0, s));
 }
 
@@ -490,7 +491,8 @@ class StrainScorer {
 
   /// Banister exponential TRIMP: Σ duration(min) × x × y(x), y per [banisterY].
   static double banisterTRIMP(List<double> bpm, double restingHR,
-      double hrReserve, List<double> durationsMin, {bool female = false}) {
+      double hrReserve, List<double> durationsMin,
+      {bool female = false}) {
     var acc = 0.0;
     for (var i = 0; i < bpm.length; i++) {
       final dur = i < durationsMin.length
@@ -508,7 +510,8 @@ class StrainScorer {
   /// TRIMP ≤ 0 → 0; above the D−1 ceiling the score is CLAMPED at [maxStrain]
   /// (it used to run off the top of its own documented range: TRIMP 14400 →
   /// 107.8, while the sibling [strainScore] clamped correctly).
-  static double trimpToStrain(double trimp, {double denominator = strainDenominator}) {
+  static double trimpToStrain(double trimp,
+      {double denominator = strainDenominator}) {
     if (trimp <= 0) return 0;
     final value = maxStrain * math.log(trimp + 1.0) / math.log(denominator);
     final clamped = math.min(maxStrain, math.max(0.0, value));
@@ -609,7 +612,8 @@ Metric<double> trimpStrain(
     return const Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'strain needs ≥600 HR samples (or ≥20 spanning ≥600 s) and HRmax>RHR',
+      note:
+          'strain needs ≥600 HR samples (or ≥20 spanning ≥600 s) and HRmax>RHR',
     );
   }
   return Metric<double>(
@@ -675,13 +679,14 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     ctl = ctl + lc * (dailyTrimp[i] - ctl);
     atl = atl + la * (dailyTrimp[i] - atl);
   }
-  final conf = clamp(dailyTrimp.length / 42.0, 0.3, 0.85);
+  final conf = (dailyTrimp.length / 42.0).clamp(0.3, 0.85);
   return Metric<LoadState>(
     value: LoadState(ctl, atl, ctl - atl),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $prime observed '
+    note:
+        'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $prime observed '
         'days; descriptive load, not injury risk',
   );
 }

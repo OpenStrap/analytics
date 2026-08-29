@@ -280,13 +280,14 @@ Metric<Readiness> readinessComposite(
       Driver(d.label, roundTo(d.contribution / weightSum, 6), detail: d.detail)
   ];
   // Rank by |contribution| (the deterministic-narrative driver ordering).
-  normDrivers.sort((a, b) => b.contribution.abs().compareTo(a.contribution.abs()));
+  normDrivers
+      .sort((a, b) => b.contribution.abs().compareTo(a.contribution.abs()));
 
   // Map composite z -> 0..100 via logistic; ~50 at z=0, scale so ±2 z ~ 12/88.
   final score = 100 / (1 + math.exp(-composite));
 
   // Confidence scales with how many inputs were available (more = better).
-  final conf = clamp(0.3 + 0.15 * used.length, 0.3, 0.9);
+  final conf = (0.3 + 0.15 * used.length).clamp(0.3, 0.9);
 
   return Metric<Readiness>(
     value: Readiness(score, composite),
@@ -294,7 +295,8 @@ Metric<Readiness> readinessComposite(
     tier: Tier.estimate,
     inputs_used: used,
     drivers: normDrivers,
-    note: 'GLASS-BOX readiness: disclosed weights HRV>RHR>RR>temp, renormalized '
+    note:
+        'GLASS-BOX readiness: disclosed weights HRV>RHR>RR>temp, renormalized '
         'over present inputs. Drivers are definitional within the formula '
         '(correction, not inferred cause).$suffix',
   );

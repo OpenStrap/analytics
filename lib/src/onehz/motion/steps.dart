@@ -90,8 +90,7 @@ class PedometerResult {
     this.confidence,
   );
 
-  static const PedometerResult none =
-      PedometerResult(0, 0, 0, 0, 0);
+  static const PedometerResult none = PedometerResult(0, 0, 0, 0, 0);
 
   Map<String, dynamic> toJson() => {
         'steps': steps,
@@ -235,7 +234,8 @@ int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) {
   var stateMax = true; // 'max' → looking for a max; else looking for a min
   var curMax = 0.0;
   var curMaxIdx = -1;
-  var lastStepIdx = -1; // peak index of the last credited pair (interval anchor)
+  var lastStepIdx =
+      -1; // peak index of the last credited pair (interval anchor)
   for (var k = 0; k < candI.length; k++) {
     final ci = candI[k], cMax = candMax[k], cv = candV[k];
     if (stateMax) {
@@ -260,7 +260,8 @@ int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) {
         continue;
       }
       final mx = curMax, mn = cv;
-      if (mx > dynVal + StepParams.sens / 2 && mn < dynVal - StepParams.sens / 2) {
+      if (mx > dynVal + StepParams.sens / 2 &&
+          mn < dynVal - StepParams.sens / 2) {
         // Step-interval bound (AN-2554). The interval between two steps is the
         // gap between their peaks; outside 0.2–2.0 s no human produced both, so
         // this pair cannot CONTINUE the run — it can only start a new one.
@@ -352,7 +353,7 @@ PedometerResult livePedometer(
     if (v < mn) mn = v;
     if (v > mx) mx = v;
   }
-  final conf = clamp(cadence >= 60 && cadence <= 200 ? 0.85 : 0.5, 0.0, 1.0);
+  final conf = (cadence >= 60 && cadence <= 200 ? 0.85 : 0.5).clamp(0.0, 1.0);
   return PedometerResult(steps, durationS, cadence, mx - mn, conf);
 }
 
@@ -424,7 +425,6 @@ StepCalibration? calibrateCadence(
     n: math.min(prior.n + 1, 200),
   );
 }
-
 
 // ───────────────────────── TIER B: 1 Hz daily estimate ──────────────────────
 //
@@ -515,7 +515,7 @@ double? personalDynFloor(
       if (v.isFinite && v >= 0) v
   ];
   if (xs.length < minMinutes) return null;
-  final q = percentile(xs, clamp(quantile, 0.0, 1.0) * 100.0);
+  final q = percentile(xs, quantile.clamp(0.0, 1.0) * 100.0);
   if (q == null || !q.isFinite || q <= 0) return null;
   return q;
 }
@@ -619,11 +619,13 @@ double? dailyDynSummary(
 }) {
   final xs = [
     for (final m in motion)
-      if (m.nSamples >= minSamplesPerMinute && m.dynAmp.isFinite && m.dynAmp >= 0)
+      if (m.nSamples >= minSamplesPerMinute &&
+          m.dynAmp.isFinite &&
+          m.dynAmp >= 0)
         m.dynAmp
   ];
   if (xs.length < minCoveredMinutes) return null;
-  final q = percentile(xs, clamp(quantile, 0.0, 1.0) * 100.0);
+  final q = percentile(xs, quantile.clamp(0.0, 1.0) * 100.0);
   if (q == null || !q.isFinite || q <= 0) return null;
   return q;
 }
@@ -785,9 +787,10 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   // coverage 1.0 here while enmoSeries(expectedMinutes: 1440) read 0.167 on the
   // identical substrate. Pass [expectedMinutes] to count the ends too.
   final spanMinutes =
-      ((motion.last.tsMinStartMs - motion.first.tsMinStartMs) / 60000).round() + 1;
+      ((motion.last.tsMinStartMs - motion.first.tsMinStartMs) / 60000).round() +
+          1;
   final denom = expectedMinutes ?? spanMinutes;
-  final coverage = denom <= 0 ? 0.0 : clamp(covered / denom, 0.0, 1.0);
+  final coverage = denom <= 0 ? 0.0 : (covered / denom).clamp(0.0, 1.0);
   if (covered < dailyStepMinCoveredMinutes) {
     return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
@@ -866,7 +869,7 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   // Upper bound is 0.30, which is what the expression can actually reach —
   // the inner clamp caps at 1.0, so `0.30 * 1.0` is the ceiling. Writing a
   // larger outer bound would imply a confidence this metric never claims.
-  final conf = clamp(0.30 * clamp(coverage / 0.6, 0.3, 1.0), 0.1, 0.30);
+  final conf = (0.30 * (coverage / 0.6).clamp(0.3, 1.0)).clamp(0.1, 0.30);
 
   return Metric<DailyMovementEstimate>(
     value: DailyMovementEstimate(
@@ -878,7 +881,8 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'ESTIMATE: minutes of sustained wrist movement, measured against your '
+    note:
+        'ESTIMATE: minutes of sustained wrist movement, measured against your '
         'personal movement floor. This is activity volume, NOT walking — at the '
         'wrist, arm work (cooking, dishes, driving) registers as strongly as '
         'walking does. It is deliberately not converted to a step count',

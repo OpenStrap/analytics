@@ -63,6 +63,7 @@ class NightSignature {
 class EventState {
   /// 'normal' | 'mildly_off' | 'autonomically_stressed' — the STATE we will say.
   final String state;
+
   /// Dose-graded HYPOTHESIS band IF the user later tags alcohol: 'none' |
   /// 'light' | 'moderate' | 'heavy'. This is NOT an assertion that they drank.
   final String alcoholHypothesisBand;
@@ -212,7 +213,8 @@ Metric<EventState> alcoholNightFlag(
   // AMBIGUITY: a confident STATE with NO disambiguating second axis (temp/resp
   // info absent) means alcohol vs illness vs hot-room can't be separated — we
   // surface the state but mark the hypothesis ambiguous.
-  final hasDisambiguator = tonight.skinTempZ != null || tonight.respRate != null;
+  final hasDisambiguator =
+      tonight.skinTempZ != null || tonight.respRate != null;
   final ambiguous = state == 'autonomically_stressed' && !hasDisambiguator;
 
   final note = state == 'normal'
@@ -232,7 +234,7 @@ Metric<EventState> alcoholNightFlag(
       signsPresent: signs,
       ambiguous: ambiguous,
     ),
-    confidence: clamp(signs / 4.0, 0.2, 0.85),
+    confidence: (signs / 4.0).clamp(0.2, 0.85),
     tier: Tier.high,
     inputs_used: inputs,
     note: note,
@@ -267,7 +269,7 @@ Metric<RoughNight> roughNight(EventState ev) {
           : 'a typical night for you');
   return Metric<RoughNight>(
     value: RoughNight(rough, ev.signsPresent, descriptor),
-    confidence: clamp(ev.signsPresent / 4.0, 0.2, 0.8),
+    confidence: (ev.signsPresent / 4.0).clamp(0.2, 0.8),
     tier: Tier.relative,
     inputs_used: inputs,
     note: 'neutral state descriptor — never attributes a cause',

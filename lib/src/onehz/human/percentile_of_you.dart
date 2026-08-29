@@ -71,7 +71,7 @@ Metric<PercentileOfYou> percentileOfYou(
   final pct = 100.0 * (below + 0.5 * equal) / history.length;
   final label = _bandLabel(pct, better);
   // Confidence grows with history depth (more of your own data => sturdier CDF).
-  final conf = clamp(history.length / 60.0, 0.3, 0.95);
+  final conf = (history.length / 60.0).clamp(0.3, 0.95);
   return Metric<PercentileOfYou>(
     value: PercentileOfYou(value, pct, history.length, label),
     confidence: conf,
@@ -170,7 +170,7 @@ Metric<RecordCheck> personalRecord(
       margin: beats,
       mdc: gate,
     ),
-    confidence: clamp(history.length / 60.0, 0.3, 0.9),
+    confidence: (history.length / 60.0).clamp(0.3, 0.9),
     tier: Tier.relative,
     inputs_used: inputs,
     note: 'record only if it beats your prior extreme by > MDC',

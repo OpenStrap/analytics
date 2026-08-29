@@ -143,8 +143,8 @@ Metric<SocialJetlag> socialJetlag(
     );
   }
   final sjl = _circDiffH(msf, msw); // signed shortest arc, (−12, +12]
-  final conf = clamp(
-      (freeMidSleepH.length + workMidSleepH.length) / 14.0, 0.3, 0.9);
+  final conf =
+      ((freeMidSleepH.length + workMidSleepH.length) / 14.0).clamp(0.3, 0.9);
   return Metric<SocialJetlag>(
     value: SocialJetlag(
         sjl, sjl.abs(), msf, msw, freeMidSleepH.length, workMidSleepH.length),
@@ -260,7 +260,7 @@ Metric<Chronotype> chronotype(
 
   return Metric<Chronotype>(
     value: Chronotype(msfSc, label, stability),
-    confidence: clamp(totalDaysObserved / 28.0, 0.3, 0.9),
+    confidence: (totalDaysObserved / 28.0).clamp(0.3, 0.9),
     tier: Tier.high,
     inputs_used: inputs,
     note: 'MSFsc chronotype label (direction only, no absolute minutes)',

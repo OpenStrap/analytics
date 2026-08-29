@@ -76,7 +76,7 @@ double? nnDiffAcf1(List<List<double>> diffRuns) {
 /// falling linearly to 0 at [kNnDiffAcf1Floor] so confidence bottoms out
 /// exactly where RMSSD is refused. 1.0 when ACF1 could not be measured.
 double _acf1Quality(double? acf1) =>
-    acf1 == null ? 1.0 : clamp(1 - acf1 / kNnDiffAcf1Floor, 0.0, 1.0);
+    acf1 == null ? 1.0 : (1 - acf1 / kNnDiffAcf1Floor).clamp(0.0, 1.0);
 
 String _jitterNote(double acf1) =>
     'rmssd_refused:acf1=${acf1.toStringAsFixed(3)} — the NN successive '
@@ -200,14 +200,11 @@ Metric<HrvTime> hrvTime(
   // were ~pure noise. The beat-count term is capped BEFORE the quality terms
   // multiply it; multiplying first let an all-night beat count (n/250 ≈ 100)
   // swallow any penalty and re-clamp to 0.95 regardless.
-  final conf = clamp(
-    clamp(nnMs.length / 250.0, 0.0, 1.0) // ~250 beats ≈ 5 min
-        *
-        _acf1Quality(acf1) *
-        (1 - artifactFraction),
-    0.3,
-    0.95,
-  );
+  final conf = ((nnMs.length / 250.0).clamp(0.0, 1.0) // ~250 beats ≈ 5 min
+          *
+          _acf1Quality(acf1) *
+          (1 - artifactFraction))
+      .clamp(0.3, 0.95);
   return Metric<HrvTime>(
     value: HrvTime(
       rmssd: rmssd,
@@ -341,11 +338,11 @@ Metric<double> nocturnalRmssd(
   final robust = median(rmssds)!;
   // Confidence scales with how many windows we could median over, and with the
   // measured jitter level (see [kNnDiffAcf1Floor]).
-  final conf = clamp(
-    clamp(rmssds.length / 12.0, 0.0, 1.0) * _acf1Quality(acf1), // 12 ≈ 1 h
-    0.3,
-    0.95,
-  );
+  final conf =
+      ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1)).clamp(
+          // 12 ≈ 1 h
+          0.3,
+          0.95);
   return Metric<double>(
     value: robust,
     confidence: conf,
@@ -452,11 +449,8 @@ Metric<double> sleepSessionWindowedRmssd(
   }
 
   final meanRmssd = mean(rmssds)!;
-  final conf = clamp(
-    clamp(rmssds.length / 12.0, 0.0, 1.0) * _acf1Quality(acf1),
-    0.3,
-    0.95,
-  );
+  final conf = ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
+      .clamp(0.3, 0.95);
   return Metric<double>(
     value: meanRmssd,
     confidence: conf,

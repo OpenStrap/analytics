@@ -150,7 +150,7 @@ Metric<HrvFreq> hrvFreq(
       : [for (final b in resolved) bands[b]!].reduce((a, b) => a + b);
 
   // Confidence: penalize artifacts heavily; low-band-only reads still HIGH-ish.
-  final conf = clamp((1 - artifactFraction) * (hfGated ? 0.6 : 0.9), 0.2, 0.9);
+  final conf = ((1 - artifactFraction) * (hfGated ? 0.6 : 0.9)).clamp(0.2, 0.9);
   return Metric<HrvFreq>(
     value: HrvFreq(
       ulf: ulf,

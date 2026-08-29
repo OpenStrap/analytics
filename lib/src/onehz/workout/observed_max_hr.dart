@@ -216,7 +216,7 @@ Metric<HrCeiling> sessionHrCeiling(
   }
   return Metric<HrCeiling>(
     value: best,
-    confidence: clamp(best.heldSeconds / (holdSeconds * 2.0), 0.3, 0.8),
+    confidence: (best.heldSeconds / (holdSeconds * 2.0)).clamp(0.3, 0.8),
     tier: Tier.high,
     inputs_used: inputs,
     note: 'OBSERVED ceiling, not physiological HRmax — an underestimate if you '

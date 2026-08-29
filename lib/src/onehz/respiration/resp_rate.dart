@@ -304,7 +304,7 @@ Metric<RespEstimate> rsaRespRate(
   final bestPower = peakPwr[best];
   // Confidence: how much of the window agrees with itself, discounted by
   // artifacts. Cap below 1 (PRV ceiling).
-  final conf = clamp((1 - artifactFraction) * consensus, 0.2, 0.9);
+  final conf = ((1 - artifactFraction) * consensus).clamp(0.2, 0.9);
   return Metric<RespEstimate>(
     value: RespEstimate(brpm, bestPeakHz, bestPower, 'rsa'),
     confidence: conf,
@@ -399,7 +399,7 @@ Metric<RespEstimate> riivRespRate(
   final brpm = pk * 60.0;
   final pwr = _powerAt(ls, pk);
   // RIIV from 1 Hz green is MED/relative at best — never high confidence.
-  final conf = clamp(0.6 * validFraction, 0.15, 0.6);
+  final conf = (0.6 * validFraction).clamp(0.15, 0.6);
   return Metric<RespEstimate>(
     value: RespEstimate(brpm, pk, pwr, 'riiv'),
     confidence: conf,
@@ -416,7 +416,8 @@ class FusedResp {
   final double? rsaBrpm;
   final double? riivBrpm;
   final bool agreed; // passed the Karlen SD-gate
-  final String decision; // 'fused' | 'rsa_only' | 'riiv_only' | 'disagree' | 'none'
+  final String
+      decision; // 'fused' | 'rsa_only' | 'riiv_only' | 'disagree' | 'none'
   const FusedResp({
     required this.brpm,
     required this.rsaBrpm,
@@ -515,11 +516,8 @@ Metric<FusedResp> fuseRespRate(
   ]);
   final brpm = fused.value ?? rsaV;
   // Agreement boosts confidence above either alone (independent corroboration).
-  final conf = clamp(
-    math.max(rsa.confidence, riiv.confidence) + 0.1,
-    0.2,
-    0.95,
-  );
+  final conf =
+      (math.max(rsa.confidence, riiv.confidence) + 0.1).clamp(0.2, 0.95);
   return Metric<FusedResp>(
     value: FusedResp(
       brpm: brpm,
@@ -539,7 +537,7 @@ Metric<FusedResp> fuseRespRate(
 /// Map a 0..1 confidence to a positive variance for inverse-variance fusion.
 /// Higher confidence => lower variance. Floored so confidence 0 stays finite.
 double _confToVar(double conf) {
-  final c = clamp(conf, 0.05, 1.0);
+  final c = conf.clamp(0.05, 1.0);
   return 1.0 / (c * c);
 }
 
