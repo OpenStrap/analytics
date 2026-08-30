@@ -3,6 +3,7 @@
 [![test](https://github.com/OpenStrap/analytics/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/analytics/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![stars](https://img.shields.io/github/stars/OpenStrap/analytics?style=flat&color=e2825f)](https://github.com/OpenStrap/analytics/stargazers)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/dUXds5MWkd)
 [![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
 
 This is the math. Given the always-on 1 Hz substrate a WHOOP 4.0 actually hands over —
