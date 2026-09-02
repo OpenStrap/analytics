@@ -34,6 +34,7 @@
 // every score carries its drivers; never names a driver below its MDC.
 
 import 'dart:math' as math;
+import '../foundations/baseline.dart' show dispersionBelowQuantum;
 import '../types.dart';
 import '../util.dart';
 import 'temp_circadian.dart' show kMinSettledFraction;
@@ -217,8 +218,8 @@ Metric<Readiness> readinessComposite(
       // NOT a synthetic floor and NOT a clamp: nothing is substituted for the
       // missing dispersion. Scoped to the fallback on purpose — MAD > 0 on a
       // quantized series already means ≥ 1 step of spread.
-      final sd = stddev(base);
-      if (sd == null || sd < inp.quantum) {
+      if (dispersionBelowQuantum(base, inp.quantum)) {
+        final sd = stddev(base);
         refusals.add('${inp.label}: baseline_dispersion_below_quantum:'
             'sd=${sd == null ? 'null' : round6(sd)},'
             'quantum=${round6(inp.quantum)},n=${base.length}');
