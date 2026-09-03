@@ -17,6 +17,11 @@ void main() {
       expect(dispersionBelowQuantum([58, 59, 58, 60, 57], 1), isFalse);
     });
 
+    test('SD exactly equal to quantum does not refuse (strict sd < quantum)',
+        () {
+      expect(dispersionBelowQuantum([0, 1, 2], 1), isFalse);
+    });
+
     test('quantum 0 (an unquantized input) never refuses', () {
       expect(dispersionBelowQuantum([58, 58, 59], 0), isFalse);
       expect(dispersionBelowQuantum([], 0), isFalse);
@@ -41,8 +46,11 @@ void main() {
       final m = readinessComposite([rhrInput(52.0, base)],
           minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isFalse);
-      expect(m.note, contains('RHR: baseline_dispersion_below_quantum:'));
-      expect(m.note, contains('quantum=1'));
+      expect(
+          m.note,
+          equals('no readiness inputs present — "—" (never imputed). '
+              'Refused: RHR: baseline_dispersion_below_quantum:'
+              'sd=0.267261,quantum=1.0,n=14.'));
     });
   });
 }
