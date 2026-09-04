@@ -73,6 +73,23 @@ RobustBaseline robustBaseline(List<double> window, {int minValid = 3}) {
   );
 }
 
+/// Whether [base]'s dispersion is too coarse for the instrument that produced
+/// it. [quantum] is the input's own quantization step (1.0 for whole-bpm RHR,
+/// 1.0 for an integer skin-temp ADC count); 0 means "not quantized, no guard".
+/// TRUE = refuse; there is nothing to standardize against.
+///
+/// Extracted verbatim from `readiness_composite.dart`'s refusal (see that
+/// file's comment for why it is NOT gated on `robustZ == null`: MAD can
+/// collapse to zero on a quantized baseline whose SD is still nonzero-but-tiny
+/// — a 14-night whole-bpm baseline alternating 58/59 has MAD 0.5 (robustZ
+/// succeeds) but SD ~0.52, exactly the unresolvable-dispersion case this
+/// exists to catch).
+bool dispersionBelowQuantum(List<double> base, double quantum) {
+  if (quantum <= 0) return false;
+  final sd = stddev(base);
+  return sd == null || sd < quantum;
+}
+
 /// Minimal Detectable Change: MDC = 1.96 × √2 × typical-error.
 /// We approximate the typical error by the baseline scale unless a measured
 /// [typicalError] is supplied. Returns null if no dispersion is known.
