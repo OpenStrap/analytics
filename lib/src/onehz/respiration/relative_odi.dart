@@ -113,8 +113,16 @@ Metric<RelativeOdiResult> relativeOdi(
   // (well-established direction), but we keep it UNITLESS / relative.
   final relR = <double>[];
   for (var i = 0; i < n; i++) {
-    final rRed = dcRed[i] == 0 ? 0.0 : acRed[i] / dcRed[i];
-    final rIr = dcIr[i] == 0 ? 0.0 : acIr[i] / dcIr[i];
+    // A zero DC on EITHER channel means every raw sample in this window was
+    // literally zero — a contact-loss/dropout signature, not a real reading.
+    // That must become NaN immediately, same as the IR-side guard below, and
+    // never a fabricated 0.0 that flows into meanRelR/baseR as a real ratio.
+    if (dcRed[i] == 0 || dcIr[i] == 0) {
+      relR.add(double.nan);
+      continue;
+    }
+    final rRed = acRed[i] / dcRed[i];
+    final rIr = acIr[i] / dcIr[i];
     if (rIr <= 0) {
       relR.add(double.nan);
     } else {

@@ -438,6 +438,47 @@ void main() {
       expect(m.note, isNotNull);
     });
 
+    test(
+        'relativeOdi: red-channel dropout (all-zero red, IR fine) is '
+        'excluded, never a fabricated ratio of 0', () {
+      // 300 s. IR is pulsatile/normal throughout (never zero). Red is a
+      // normal small-amplitude pulsatile baseline EXCEPT for a sustained
+      // ~40 s all-zero run (a contact-loss/dropout signature) with no
+      // genuine desaturation event anywhere. Before the fix, the zero-DC
+      // window on red fabricated relR=0.0 (a real, non-NaN sample) whenever
+      // rIr>0; after the fix it must be NaN like the symmetric IR-zero case.
+      const n = 300;
+      const pulsHz = 0.3;
+      final rnd = math.Random(7);
+      final red = <double>[];
+      final ir = <double>[];
+      final ts = <double>[];
+      for (var s = 0; s < n; s++) {
+        final irPuls =
+            50 * math.sin(2 * math.pi * pulsHz * s) + rnd.nextDouble() * 5;
+        ir.add(20000 + irPuls);
+        final dropout = s >= 100 && s < 140;
+        if (dropout) {
+          red.add(0.0);
+        } else {
+          final redPuls =
+              60 * math.sin(2 * math.pi * pulsHz * s) + rnd.nextDouble() * 5;
+          red.add(18000 + redPuls);
+        }
+        ts.add(s.toDouble());
+      }
+      final m = relativeOdi(red, ir, ts, dipPct: 3.0);
+      expect(m.present, isTrue, reason: m.note);
+      final v = m.value!;
+      // The dropout window must have been excluded from the ratio series,
+      // not counted as trusted — this is the direct signature of the bug:
+      // a fabricated 0.0 would have been indistinguishable from a real
+      // sample and trustedCoverage would read 1.0 despite the dropout.
+      expect(v.trustedCoverage, lessThan(1.0),
+          reason: 'the all-zero-red window must be excluded, not fabricated');
+      expect(v.trustedCoverage, greaterThan(0.7));
+    });
+
     test('BRV: variable breathing rates -> CV>0 + Theil-Sen slope', () {
       final brpm = [14.0, 15.0, 13.0, 16.0, 12.0, 17.0, 11.0];
       final m = breathingRateVariability(brpm);
