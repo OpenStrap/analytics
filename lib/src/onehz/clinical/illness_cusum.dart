@@ -27,8 +27,14 @@
 // resp↑} + cycle-awareness before ever saying "illness".
 
 import 'dart:math' as math;
+import '../foundations/baseline.dart' show dispersionBelowQuantum;
 import '../types.dart' show needBaselineNote;
 import '../util.dart';
+
+/// Nightly RHR is read in whole bpm; a baseline whose SD sits below this
+/// quantum has no dispersion the instrument can actually resolve — see
+/// [dispersionBelowQuantum].
+const double _rhrQuantum = 1.0;
 
 enum IllnessState { green, yellow, red }
 
@@ -41,6 +47,13 @@ const int illnessCusumMinBaseline = 7;
 /// is held green and NOT accumulated rather than standardized against a
 /// fabricated scale.
 const String degenerateBaselineNote = 'degenerate_baseline:scale=0';
+
+/// Machine-readable note for a night whose baseline has SOME dispersion (MAD
+/// or SD nonzero) but that dispersion sits below the RHR's own whole-bpm
+/// quantization step — a 13-night baseline of 58s with one 59 has SD ~0.267,
+/// nonzero but too coarse to standardize a night against. See
+/// [dispersionBelowQuantum].
+const String belowQuantumNote = 'baseline_dispersion_below_quantum';
 
 class IllnessDay {
   final String date;
@@ -137,6 +150,18 @@ List<IllnessDay> illnessCusum(
       // green, do not accumulate, and say why.
       out.add(IllnessDay(dates[i], IllnessState.green, null, null,
           need: degenerateBaselineNote));
+      continue;
+    }
+    // A quantized-but-nonzero scale (SD strictly between 0 and the RHR's
+    // whole-bpm quantum) passed the check above but is still not a real
+    // dispersion estimate: a 13-night baseline of 58s + one 59 has SD ~0.267,
+    // and a perfectly ordinary 2 bpm night (60) standardizes to z ~= 7.2 —
+    // large enough to latch the CUSUM red off one unremarkable night. Same
+    // guard readiness_composite.dart uses for this exact input; abstain
+    // rather than fabricate a signal from quantization noise.
+    if (dispersionBelowQuantum(window, _rhrQuantum)) {
+      out.add(IllnessDay(dates[i], IllnessState.green, null, null,
+          need: belowQuantumNote));
       continue;
     }
     // A break in the calendar breaks every "N nights running" counter — the

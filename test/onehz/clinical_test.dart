@@ -418,16 +418,36 @@ void main() {
       expect(out[10].z, isNotNull);
       expect(out[10].cusum!, lessThan(4.0));
     });
-    test('a merely QUANTIZED baseline (MAD=0 but SD>0) still evaluates', () {
+    test(
+        'a merely QUANTIZED baseline (MAD=0 but SD>0) still evaluates once '
+        'SD clears the whole-bpm quantum', () {
       // MAD collapses on this baseline but SD does not — same convention as
-      // wellness/readiness_composite.dart: fall back to SD, only abstain when
-      // BOTH are zero.
-      final rhr = <double?>[...List<double>.filled(8, 55.0), 56.0, 60.0];
+      // wellness/readiness_composite.dart: fall back to SD. The window here
+      // (eight 55s + one 60) has SD ~1.67, above the 1 bpm quantum, so it is
+      // a real dispersion estimate and the night evaluates normally.
+      final rhr = <double?>[...List<double>.filled(8, 55.0), 60.0, 60.0];
       final dates = [for (var i = 0; i < rhr.length; i++) 'd$i'];
       final out = illnessCusum(dates, rhr);
       expect(out.last.z, isNotNull);
       expect(out.last.cusum, isNotNull);
       expect(out.last.need, isNull);
+    });
+    test(
+        'REGRESSION: a quantized-but-nonzero SD below the whole-bpm quantum '
+        'abstains instead of fabricating an extreme z from rounding noise',
+        () {
+      // 13 nights at 58 + one night at 59: MAD=0 (falls back to SD), SD is
+      // ~0.267 -- nonzero, but far below the 1 bpm quantum a whole-bpm RHR
+      // reading can actually resolve. Without the guard, an ordinary 2 bpm
+      // night (60) standardizes to z ~= 7.2, which alone crosses the CUSUM
+      // threshold (h=4.0) and would read as a same-night illness alarm.
+      final rhr = <double?>[...List<double>.filled(13, 58.0), 59.0, 60.0];
+      final dates = [for (var i = 0; i < rhr.length; i++) 'd$i'];
+      final out = illnessCusum(dates, rhr);
+      expect(out.last.z, isNull);
+      expect(out.last.cusum, isNull);
+      expect(out.last.state, IllnessState.green);
+      expect(out.last.need, belowQuantumNote);
     });
   });
 
@@ -1090,7 +1110,7 @@ void main() {
         () {
       final n = 12;
       final dates = [for (var i = 0; i < n; i++) 'd$i'];
-      final rhr = [for (var i = 0; i < n; i++) 55.0 + (i.isEven ? 0.0 : 1.0)];
+      final rhr = [for (var i = 0; i < n; i++) 55.0 + (i.isEven ? 0.0 : 4.0)];
       final days = illnessCusum(dates, rhr);
       // First night: have=0 baseline, need=7.
       expect(
@@ -1260,12 +1280,12 @@ void main() {
       final rhr = <double?>[];
       for (var i = 1; i <= 20; i++) {
         dates.add('2026-06-${i.toString().padLeft(2, '0')}');
-        rhr.add(55.0 + (i % 3));
+        rhr.add(55.0 + (i % 3) * 3); // spread clears the 1 bpm quantum
       }
       dates.add('2026-06-21');
-      rhr.add(75.0); // elevated
+      rhr.add(85.0); // elevated
       dates.add('2026-07-14');
-      rhr.add(75.0); // elevated, but 23 days later
+      rhr.add(85.0); // elevated, but 23 days later
 
       final out = illnessCusum(dates, rhr);
       expect(out[20].state, IllnessState.yellow);
