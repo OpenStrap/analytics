@@ -44,6 +44,12 @@ import '../types.dart';
 import '../util.dart';
 import '../foundations/baseline.dart';
 
+/// Nightly RHR is read in whole bpm; a baseline whose SD sits below this
+/// quantum has no dispersion the instrument can actually resolve — see
+/// [dispersionBelowQuantum]. Same convention as illness_cusum.dart and
+/// readiness_composite.dart's `rhrInput` (quantum: 1).
+const double _rhrQuantum = 1.0;
+
 /// One night's nocturnal summary vs the personal baseline window.
 class NightSignature {
   final double rhr; // nocturnal RHR tonight (bpm)
@@ -135,12 +141,21 @@ Metric<EventState> alcoholNightFlag(
   final rmsBase = robustBaseline(rmssdHistory, minValid: minNights);
   final rhrDelta = tonight.rhr - (rhrBase.center ?? tonight.rhr);
   final rmssdDelta = tonight.rmssd - (rmsBase.center ?? tonight.rmssd);
-  final rhrZ = rhrBase.modZ(tonight.rhr);
+
+  // Nightly RHR is read in whole bpm; a baseline whose SD sits below this
+  // quantum (quantized-but-nonzero, e.g. an alternating 54/55/56 baseline)
+  // has no dispersion the sensor can actually resolve. Standardizing against
+  // it fabricates an extreme z off ordinary rounding noise — the same guard
+  // illness_cusum.dart and readiness_composite.dart already apply to this
+  // exact channel. Abstain on the RHR axis only; RMSSD isn't quantized this
+  // way, so it keeps standardizing normally.
+  final rhrBelowQuantum = dispersionBelowQuantum(rhrHistory, _rhrQuantum);
+  final rhrZ = rhrBelowQuantum ? null : rhrBase.modZ(tonight.rhr);
   final rmssdZ = rmsBase.modZ(tonight.rmssd);
 
   // MDC gates: a sign only counts if it clears the metric's minimal detectable
   // change. When MDC is unavailable (degenerate scale) the sign cannot fire.
-  final rhrMdc = mdc(rhrBase);
+  final rhrMdc = rhrBelowQuantum ? null : mdc(rhrBase);
   final rmsMdc = mdc(rmsBase);
   final rhrUp = rhrMdc != null && rhrDelta > rhrMdc;
   final rmssdDown = rmsMdc != null && (-rmssdDelta) > rmsMdc;
@@ -217,11 +232,14 @@ Metric<EventState> alcoholNightFlag(
       tonight.skinTempZ != null || tonight.respRate != null;
   final ambiguous = state == 'autonomically_stressed' && !hasDisambiguator;
 
-  final note = state == 'normal'
-      ? 'no autonomic signature tonight'
-      : 'STATE = autonomic stress (confident). "Alcohol" is a tag-confirmable '
-          'hypothesis only — late meal / early illness / luteal / hot room '
-          'share this signature; disambiguate with temp + respiration, not HR.';
+  final note = (state == 'normal'
+          ? 'no autonomic signature tonight'
+          : 'STATE = autonomic stress (confident). "Alcohol" is a tag-confirmable '
+              'hypothesis only — late meal / early illness / luteal / hot room '
+              'share this signature; disambiguate with temp + respiration, not HR.') +
+      (rhrBelowQuantum
+          ? '; rhr baseline dispersion below whole-bpm quantum — RHR axis abstained'
+          : '');
 
   return Metric<EventState>(
     value: EventState(
