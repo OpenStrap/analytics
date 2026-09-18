@@ -107,8 +107,9 @@ void main() {
   });
 
   group('alcohol-night flag — fires at the right band, silent when normal', () {
-    // Personal baseline: RHR ~55 (tight), RMSSD ~60 (tight), dip ~12%, temp z ~0.
-    final rhrHist = [54.0, 55.0, 56.0, 55.0, 54.0, 55.0, 56.0, 55.0];
+    // Personal baseline: RHR ~55 (real dispersion, SD >= 1 whole-bpm quantum),
+    // RMSSD ~60 (tight), dip ~12%, temp z ~0.
+    final rhrHist = [52.0, 55.0, 58.0, 54.0, 56.0, 53.0, 57.0, 55.0];
     final rmsHist = [60.0, 61.0, 59.0, 60.0, 62.0, 58.0, 60.0, 61.0];
     final dipHist = [12.0, 11.5, 12.5, 12.0, 11.0, 13.0, 12.0, 12.0];
     final tempHist = [0.0, 0.1, -0.1, 0.0, 0.2, -0.2, 0.0, 0.1];
@@ -197,6 +198,30 @@ void main() {
       // used to be a plain sentence, not the machine-readable format every
       // other baseline-gated metric in this package uses.
       expect(m.note, 'need_baseline:have=2,need=7');
+    });
+
+    test(
+        'sub-quantum RHR baseline: ordinary +3 bpm night does not fabricate '
+        'the alcohol signature', () {
+      // Whole-bpm-quantized baseline (SD ~0.76, below the 1 bpm quantum) —
+      // the exact shape illness_cusum.dart's guard was written for. An
+      // ordinary +3 bpm night must not standardize against rounding noise.
+      final quantizedRhrHist = [54.0, 55.0, 56.0, 55.0, 54.0, 55.0, 56.0, 55.0];
+      final tonight = NightSignature(
+        rhr: 58, // +3 bpm vs median 55 — unremarkable
+        rmssd: 60, // no RMSSD move at all
+        hrDipPct: 12,
+        skinTempZ: 0.0,
+      );
+      final m = alcoholNightFlag(tonight,
+          rhrHistory: quantizedRhrHist,
+          rmssdHistory: rmsHist,
+          hrDipHistory: dipHist,
+          skinTempZHistory: tempHist);
+      final v = m.value!;
+      expect(v.alcoholHypothesisBand, isNot(anyOf('moderate', 'heavy')));
+      expect(v.rhrZ, isNull);
+      expect(m.note, contains('rhr baseline dispersion below whole-bpm quantum'));
     });
   });
 
