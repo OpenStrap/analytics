@@ -22,6 +22,31 @@ void main() {
       expect(m.confidence, lessThanOrEqualTo(0.6));
     });
 
+    test('a graded bout records grade in inputs_used', () {
+      final flat = vo2maxSubmaxEstimate(
+        speedMps: 2.78,
+        avgHrBpm: 150,
+        boutDurationSec: 600,
+        restingHrBpm: 55,
+        hrMaxBpm: 185,
+      );
+      expect(flat.inputs_used, isNot(contains('workout_grade')));
+
+      final graded = vo2maxSubmaxEstimate(
+        speedMps: 2.78,
+        avgHrBpm: 150,
+        boutDurationSec: 600,
+        restingHrBpm: 55,
+        hrMaxBpm: 185,
+        gradePercent: 4.0,
+      );
+      expect(graded.present, isTrue);
+      expect(graded.inputs_used, contains('workout_grade'));
+      // Uphill at the same pace/HR reads as a HIGHER VO2max: the same speed
+      // now costs more, so the extrapolation credits more fitness for it.
+      expect(graded.value, greaterThan(flat.value!));
+    });
+
     test('walking bout uses the walking equation and still resolves', () {
       final m = vo2maxSubmaxEstimate(
         speedMps: 1.4, // ~5 km/h, below the run threshold

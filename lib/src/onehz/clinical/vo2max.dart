@@ -120,7 +120,10 @@ Metric<double> vo2maxSubmaxEstimate({
     value: round6(vo2max),
     confidence: conf,
     tier: Tier.estimate,
-    inputs_used: inputs,
+    // Grade changes vo2Submax above whenever it's supplied, so it belongs in
+    // provenance too — only from here on, since the early abstentions above
+    // never reached the line that reads it.
+    inputs_used: gradePercent == null ? inputs : [...inputs, 'workout_grade'],
     note: 'submax VO2max via ACSM speed->VO2 + Swain %HRR~%VO2R '
         '(Swain & Leutholtz 1997); one steady bout, not a lab test',
   );
