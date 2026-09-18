@@ -243,7 +243,9 @@ void main() {
     final rng = math.Random(7);
 
     AnomalyFeatures normalNight() => AnomalyFeatures(
-          rhr: 55 + rng.nextDouble() * 2 - 1,
+          // ±3 (not ±1): keeps RHR's SD safely above its 1-bpm quantum so the
+          // dispersion-below-quantum guard doesn't drop it as sub-quantum noise.
+          rhr: 55 + rng.nextDouble() * 6 - 3,
           hrv: 4.0 + (rng.nextDouble() * 0.2 - 0.1), // lnRMSSD
           temp: 2000 + rng.nextDouble() * 4 - 2,
           resp: 14 + rng.nextDouble() * 1 - 0.5,
@@ -684,9 +686,11 @@ void main() {
       final feats = [
         for (var i = 0; i < n; i++)
           AnomalyFeatures(
-              rhr: 55.0 + (i % 2),
+              // *3: keeps RHR/temp SD above their 1-unit quantum (hrv/resp
+              // are exactly constant here and would be dropped regardless).
+              rhr: 55.0 + (i % 2) * 3,
               hrv: 3.5,
-              temp: 0.0 + (i % 2) * 0.1,
+              temp: 0.0 + (i % 2) * 3,
               resp: 14.0)
       ];
       final days = multivariateAnomaly(dates, feats);
@@ -748,7 +752,7 @@ void main() {
       final feats = <AnomalyFeatures>[
         for (var i = 0; i < 12; i++)
           AnomalyFeatures(
-              hrv: 40.0 + (i.isEven ? 1.0 : -1.0), temp: i.isEven ? 0.1 : -0.1),
+              hrv: 40.0 + (i.isEven ? 1.0 : -1.0), temp: i.isEven ? 2.0 : -2.0),
       ];
       final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
       final out =
@@ -756,6 +760,33 @@ void main() {
       expect(out[11].mahalanobis, isNotNull);
       expect(out[11].need, isNull);
       expect(out[11].drivers, hasLength(2));
+    });
+
+    test(
+        'a quantized-but-nonzero-SD RHR baseline (MAD=0 fallback) is dropped, '
+        'not standardized against its sub-bpm SD', () {
+      // 12 baseline nights of whole-bpm RHR: eleven at 58, one at 59. Median
+      // is 58 so MAD is exactly 0 => the mad==0 fallback path takes over and
+      // standardizes against stddev (~0.28) instead. A real HRV column keeps
+      // the vector at 2 features pre-fix.
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 12; i++)
+          AnomalyFeatures(
+              rhr: i == 5 ? 59 : 58,
+              hrv: 40.0 + (i.isEven ? 1.0 : -1.0)),
+        const AnomalyFeatures(rhr: 60, hrv: 40.0), // ordinary 2-bpm move
+      ];
+      final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
+      final out =
+          multivariateAnomaly(dates, feats, minBaseline: 10, persistDays: 1);
+
+      // RHR's dispersion (SD < its 1-bpm quantum) is below the sensor's own
+      // resolution, so it's dropped exactly like the degenerate case above —
+      // leaving only HRV, which alone can't produce a distance.
+      expect(out.last.mahalanobis, isNull,
+          reason: 'RHR dropped for sub-quantum dispersion => <2 features left');
+      expect(out.last.need, 'degenerate_baseline:no_dispersion');
+      expect(out.where((d) => d.flagged), isEmpty);
     });
   });
 
@@ -958,7 +989,10 @@ void main() {
         final feats = <AnomalyFeatures>[
           for (var i = 0; i < n + 1; i++)
             AnomalyFeatures(
-              rhr: 55 + noise(i),
+              // ×3: keeps RHR's SD safely above its 1-bpm quantum (bare
+              // noise(i) has SD ~0.7-0.9, which the dispersion-below-quantum
+              // guard would otherwise drop as sub-quantum noise).
+              rhr: 55 + 3 * noise(i),
               hrv: 4.0 + 0.1 * noise(i + 40),
               temp: 805 + 6 * noise(i + 80),
               resp: 15 + noise(i + 120),
@@ -985,7 +1019,8 @@ void main() {
         [for (var i = 0; i < 12; i++) 'd$i'],
         [
           for (var i = 0; i < 12; i++)
-            AnomalyFeatures(rhr: 55 + noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
+            AnomalyFeatures(
+                rhr: 55 + 3 * noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
         ],
         minBaseline: 10,
         chiSqGate: 0.0,
@@ -1001,7 +1036,8 @@ void main() {
       // under 13.82 x 13.23, which is where the measured 99.9 %ile actually is.
       final feats = <AnomalyFeatures>[
         for (var i = 0; i < 10; i++)
-          AnomalyFeatures(rhr: 55 + noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
+          AnomalyFeatures(
+              rhr: 55 + 3 * noise(i), hrv: 4.0 + 0.1 * noise(i + 40)),
         const AnomalyFeatures(rhr: 59.0, hrv: 3.65),
       ];
       final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];

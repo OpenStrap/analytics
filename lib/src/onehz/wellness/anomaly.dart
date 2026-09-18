@@ -24,6 +24,7 @@
 // contributions so a flag is explainable.
 
 import 'dart:math' as math;
+import '../foundations/baseline.dart' show dispersionBelowQuantum;
 import '../types.dart';
 import '../util.dart';
 
@@ -75,6 +76,11 @@ class AnomalyDay {
 
 /// Feature labels in canonical order.
 const _featLabels = ['RHR', 'HRV(↓)', 'temp', 'resp'];
+
+/// Per-feature quantization step, same canonical order as [_featLabels] and
+/// [readiness_composite.dart]'s equivalent inputs. RHR is whole bpm and temp
+/// is a raw ADC count; HRV and resp are continuous (quantum 0 = never gated).
+const _featQuantum = [1.0, 0.0, 1.0, 0.0];
 
 /// Run the robust multivariate anomaly detector over a nightly feature series.
 ///
@@ -158,6 +164,13 @@ List<AnomalyDay> multivariateAnomaly(
     // `robustZ(v, base) ?? z(v, base)` yields null when SD is also 0, and
     // changepoint guards zero variance — so we match them: DROP the degenerate
     // feature from the vector, and if fewer than 2 features survive, abstain.
+    //
+    // Same gap, one notch wider: a MAD == 0 baseline can still have a tiny but
+    // NONZERO SD (a 14-night whole-bpm RHR alternating 58/59 has MAD 0.5) —
+    // that fallback SD is real dispersion in name only, since it's finer than
+    // the sensor's own quantization step. Standardizing against it produces an
+    // inflated z for an ordinary 1-2-unit quantization step. readiness_composite
+    // already refuses this via `dispersionBelowQuantum`; reuse it here.
     final keep = <int>[];
     final center = <double>[];
     final scale = <double>[];
@@ -166,6 +179,8 @@ List<AnomalyDay> multivariateAnomaly(
       final sc = m > 0 ? m : (stddev(cols[f]) ?? 0);
       if (!sc.isFinite || sc <= 0)
         continue; // no dispersion → not standardizable
+      if (dispersionBelowQuantum(cols[f], _featQuantum[f]))
+        continue; // dispersion finer than the sensor's own quantum → noise
       keep.add(f);
       center.add(median(cols[f])!);
       scale.add(sc);
