@@ -231,7 +231,12 @@ double? _welchBandPower(
       ts.add(tSec[i]);
       ys.add(y[i]);
     }
-    if (ts.length < minPointsPerSegment) continue;
+    // A segment has to be BOTH beat-dense and time-complete: a dropout in
+    // the middle leaves few beats spanning the full window, and its
+    // periodogram is a window function, not a spectrum.
+    if (ts.length < minPointsPerSegment || ts.last - ts.first < segSec * 0.8) {
+      continue;
+    }
     final ls = lombScargle(ts, ys, grid);
     if (ls == null) continue;
     final p = ls.bandPower(loHz, hiHz);

@@ -114,6 +114,49 @@ void main() {
       expect(m.value!.hf!, greaterThan(0));
     });
 
+    test(
+        'a mid-segment recording gap is rejected, not averaged in as a '
+        'window function', () {
+      // HF's segment is 10 cycles of its 0.15 Hz floor = ~66.7 s. Beats
+      // clustered in the first ~27 s of that window, then a 45 s gap (an
+      // off-wrist moment, a BLE reconnect mid-drain), still total >=16
+      // points — enough to pass a beat-COUNT-only guard — but the window is
+      // no longer time-complete, so its periodogram is a window function,
+      // not a spectrum. resp_rate.dart's identical Welch loop already
+      // guards this with `span < segSec * 0.8`; hrv_freq's copy must too.
+      final rr = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      for (var i = 0; i < 28; i++) {
+        final v = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000));
+        rr.add(v);
+        t += v;
+        times.add(t);
+      }
+      t += 45000; // the gap
+      for (var i = 0; i < 4; i++) {
+        rr.add(1000);
+        t += 1000;
+        times.add(t);
+      }
+      final gapped = hrvFreq(rr, times, artifactFraction: 0.0);
+      expect(gapped.value?.hf, isNull,
+          reason: 'the only segment spanning the record is gap-corrupted');
+
+      // Same span, no gap: the segment is beat-dense AND time-complete.
+      final rrControl = <double>[];
+      final timesControl = <double>[];
+      t = 0.0;
+      while (t < 90000) {
+        final v = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000));
+        rrControl.add(v);
+        t += v;
+        timesControl.add(t);
+      }
+      final control = hrvFreq(rrControl, timesControl, artifactFraction: 0.0);
+      expect(control.value!.hf, isNotNull);
+    });
+
     test('GATES HF when artifact fraction exceeds the threshold', () {
       // RE-PINNED 2026-08: 400 beats, not 64. Band powers are now Welch-
       // averaged over segments long enough to RESOLVE the band (10 cycles of
