@@ -107,7 +107,13 @@ Metric<OverreachingConjunction> overreachingConjunction({
   final base = robustBaseline(rhrBaselineWindow, minValid: minBaseline);
   final centre = base.center;
   final scale = base.scale;
-  final gate = (scale != null && scale > 0) ? 0.5 * scale : null;
+  // Nightly RHR is whole-bpm; an alternating baseline (e.g. 58/59) can carry
+  // a small nonzero MAD that is unresolvable rounding noise, not real
+  // dispersion — the same guard illness_cusum.dart and readiness_composite.dart
+  // already apply to this exact channel.
+  final rhrBelowQuantum = dispersionBelowQuantum(rhrBaselineWindow, 1.0);
+  final gate =
+      (!rhrBelowQuantum && scale != null && scale > 0) ? 0.5 * scale : null;
   if (centre == null || gate == null || !base.sufficient) {
     return Metric<OverreachingConjunction>.absent(
       tier: Tier.estimate,
