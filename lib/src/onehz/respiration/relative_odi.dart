@@ -75,6 +75,11 @@ class RelativeOdiResult {
 /// [acWindowSec] rolling window for the AC (variation) / DC (mean) estimate.
 /// [baselineSec] rolling baseline for the dip test (Hayano-style 120 s).
 /// [dipPct] relative drop threshold for a desaturation event (default 3%).
+/// [maxGapSec] splits the night at recording gaps (off-wrist/charging), same
+/// as `cvhr_apnea.dart`: each gap-free segment is windowed and scored on its
+/// own, so the AC/DC and baseline windows never blend samples across a hole,
+/// and `analyzedHours` sums only the segments' own OBSERVED spans instead of
+/// the raw first-to-last span (which lets a charging break dilute the index).
 Metric<RelativeOdiResult> relativeOdi(
   List<double> red,
   List<double> ir,
@@ -83,6 +88,7 @@ Metric<RelativeOdiResult> relativeOdi(
   int acWindowSec = 8,
   int baselineSec = 120,
   double dipPct = 3.0,
+  double maxGapSec = 30,
 }) {
   const inputs = ['spo2_red_raw', 'spo2_ir_raw', 'ts'];
   final n = red.length;
@@ -93,55 +99,118 @@ Metric<RelativeOdiResult> relativeOdi(
       note: 'too few red/IR samples for a relative-ODI screen (need ≥60 s)',
     );
   }
-  final spanSec = tsSec.last - tsSec.first;
-  final analyzedHours = spanSec / 3600.0;
+
+  // SEGMENT AT GAPS. A stretch more than maxGapSec apart is a separate
+  // recording, not a straight line to interpolate across or window through.
+  final segStart = <int>[0];
+  for (var i = 1; i < tsSec.length; i++) {
+    if (tsSec[i] - tsSec[i - 1] > maxGapSec) segStart.add(i);
+  }
+
+  final relR = List<double>.filled(n, double.nan);
+  var analyzedHours = 0.0;
+  var dipCount = 0;
+  final dipMags = <double>[];
+  var totalDipSec = 0; // sum of qualifying excursion seconds (for burden)
+  var longestDipSec = 0; // longest single excursion
+
+  for (var s = 0; s < segStart.length; s++) {
+    final lo = segStart[s];
+    final hi = (s + 1 < segStart.length ? segStart[s + 1] : n) - 1;
+    final segRed = red.sublist(lo, hi + 1);
+    final segIr = ir.sublist(lo, hi + 1);
+    final segTs = tsSec.sublist(lo, hi + 1);
+    final segSpanSec = segTs.last - segTs.first;
+    if (segTs.length < 2 || segSpanSec <= 0) continue; // nothing observable
+    analyzedHours += segSpanSec / 3600.0;
+
+    // Rolling AC (stddev) / DC (mean) per channel, scoped to this segment.
+    final acRed = _rollingStd(segRed, acWindowSec);
+    final dcRed = _rollingMean(segRed, acWindowSec);
+    final acIr = _rollingStd(segIr, acWindowSec);
+    final dcIr = _rollingMean(segIr, acWindowSec);
+
+    // Ratio-of-ratios R = (AC_red/DC_red)/(AC_ir/DC_ir). Higher R ⇒ lower
+    // SpO₂ (well-established direction), but we keep it UNITLESS / relative.
+    final segRelR = <double>[];
+    for (var i = 0; i < segRed.length; i++) {
+      // A zero DC on EITHER channel means every raw sample in this window was
+      // literally zero — a contact-loss/dropout signature, not a real
+      // reading. That must become NaN immediately, same as the IR-side guard
+      // below, and never a fabricated 0.0 flowing into meanRelR/baseR.
+      if (dcRed[i] == 0 || dcIr[i] == 0) {
+        segRelR.add(double.nan);
+        continue;
+      }
+      final rRed = acRed[i] / dcRed[i];
+      final rIr = acIr[i] / dcIr[i];
+      segRelR.add(rIr <= 0 ? double.nan : rRed / rIr);
+    }
+    for (var i = 0; i < segRelR.length; i++) {
+      relR[lo + i] = segRelR[i];
+    }
+
+    // Rolling baseline of R over baselineSec, scoped to this segment; a
+    // desaturation event = R rises ≥ dipPct above it for ≥minDipSec.
+    final baseR = _rollingMean(segRelR, baselineSec, skipNan: true);
+    final segLen = segRelR.length;
+    var i = 0;
+    const minDipSec = 8;
+    const refractorySec = 10; // min separation between distinct events
+    var lastEnd = -refractorySec - 1;
+    while (i < segLen) {
+      final b = baseR[i];
+      if (segRelR[i].isNaN || b <= 0) {
+        i++;
+        continue;
+      }
+      final risePct = 100.0 * (segRelR[i] - b) / b;
+      if (risePct < dipPct) {
+        i++;
+        continue;
+      }
+      final start = i;
+      var peakPct = 0.0;
+      while (i < segLen &&
+          !segRelR[i].isNaN &&
+          baseR[i] > 0 &&
+          100.0 * (segRelR[i] - baseR[i]) / baseR[i] >= dipPct) {
+        final p = 100.0 * (segRelR[i] - baseR[i]) / baseR[i];
+        if (p > peakPct) peakPct = p;
+        i++;
+      }
+      final widthSec = i - start;
+      if (widthSec >= minDipSec) {
+        totalDipSec += widthSec;
+        if (widthSec > longestDipSec) longestDipSec = widthSec;
+        // Refractory gate: merge events that start within refractorySec of
+        // the previous one's end (one physiological desaturation, not two).
+        if (start - lastEnd <= refractorySec && dipMags.isNotEmpty) {
+          if (peakPct > dipMags.last) dipMags[dipMags.length - 1] = peakPct;
+        } else {
+          dipCount++;
+          dipMags.add(peakPct);
+        }
+        lastEnd = i;
+      }
+    }
+  }
+
   if (analyzedHours <= 0) {
     return const Metric<RelativeOdiResult>.absent(
       tier: Tier.relative,
       inputs_used: inputs,
-      note: 'degenerate timestamps',
+      note: 'no gap-free stretch long enough for a relative-ODI screen',
     );
   }
 
-  // Rolling AC (stddev) / DC (mean) per channel over acWindowSec.
-  final acRed = _rollingStd(red, acWindowSec);
-  final dcRed = _rollingMean(red, acWindowSec);
-  final acIr = _rollingStd(ir, acWindowSec);
-  final dcIr = _rollingMean(ir, acWindowSec);
-
-  // Ratio-of-ratios R = (AC_red/DC_red)/(AC_ir/DC_ir). Higher R ⇒ lower SpO₂
-  // (well-established direction), but we keep it UNITLESS / relative.
-  final relR = <double>[];
-  for (var i = 0; i < n; i++) {
-    // A zero DC on EITHER channel means every raw sample in this window was
-    // literally zero — a contact-loss/dropout signature, not a real reading.
-    // That must become NaN immediately, same as the IR-side guard below, and
-    // never a fabricated 0.0 that flows into meanRelR/baseR as a real ratio.
-    if (dcRed[i] == 0 || dcIr[i] == 0) {
-      relR.add(double.nan);
-      continue;
-    }
-    final rRed = acRed[i] / dcRed[i];
-    final rIr = acIr[i] / dcIr[i];
-    if (rIr <= 0) {
-      relR.add(double.nan);
-    } else {
-      relR.add(rRed / rIr);
-    }
-  }
-
-  // Proxy oxygenation index: oxygenation falls as R rises, so use the IR DC-
-  // normalized perfusion ratio's inverse mapping. A 1 Hz-honest self-
-  // referential surrogate: oxy ∝ -R. We track dips as RISES in R relative to a
-  // rolling baseline (equiv. to drops in oxygenation), thresholded at dipPct.
+  // HONEST-BY-TYPE: if EVERY ratio sample is NaN (no channel passed the
+  // DC/IR guards) there is no self-referential trend to report — a
+  // fabricated 0.0 would read as a real (and impossibly stable) relative-R.
   final validR = [
     for (final v in relR)
       if (!v.isNaN) v
   ];
-  // HONEST-BY-TYPE: if EVERY ratio sample is NaN (no channel passed the DC/IR
-  // guards) there is no self-referential trend to report — a fabricated 0.0
-  // would read as a real (and impossibly stable) relative-R. Return absent
-  // rather than a manufactured zero.
   if (validR.isEmpty) {
     return const Metric<RelativeOdiResult>.absent(
       tier: Tier.relative,
@@ -152,55 +221,7 @@ Metric<RelativeOdiResult> relativeOdi(
   }
   final meanRelR = mean(validR)!;
 
-  // Rolling baseline of R over baselineSec; a desaturation event = R rises
-  // ≥ dipPct above its rolling baseline for a sustained (≥10 s) excursion.
-  final baseR = _rollingMean(relR, baselineSec, skipNan: true);
-  var dipCount = 0;
-  final dipMags = <double>[];
-  var totalDipSec = 0; // sum of qualifying excursion seconds (for burden)
-  var longestDipSec = 0; // longest single excursion
-  var i = 0;
-  const minDipSec = 8;
-  const refractorySec = 10; // min separation between distinct events
-  var lastEnd = -refractorySec - 1;
-  while (i < n) {
-    final b = baseR[i];
-    if (relR[i].isNaN || b <= 0) {
-      i++;
-      continue;
-    }
-    final risePct = 100.0 * (relR[i] - b) / b;
-    if (risePct < dipPct) {
-      i++;
-      continue;
-    }
-    final start = i;
-    var peakPct = 0.0;
-    while (i < n &&
-        !relR[i].isNaN &&
-        baseR[i] > 0 &&
-        100.0 * (relR[i] - baseR[i]) / baseR[i] >= dipPct) {
-      final p = 100.0 * (relR[i] - baseR[i]) / baseR[i];
-      if (p > peakPct) peakPct = p;
-      i++;
-    }
-    final widthSec = i - start;
-    if (widthSec >= minDipSec) {
-      totalDipSec += widthSec;
-      if (widthSec > longestDipSec) longestDipSec = widthSec;
-      // Refractory gate: merge events that start within refractorySec of the
-      // previous one's end (one physiological desaturation, not two).
-      if (start - lastEnd <= refractorySec && dipMags.isNotEmpty) {
-        if (peakPct > dipMags.last) dipMags[dipMags.length - 1] = peakPct;
-      } else {
-        dipCount++;
-        dipMags.add(peakPct);
-      }
-      lastEnd = i;
-    }
-  }
-
-  final odiPerHour = analyzedHours > 0 ? dipCount / analyzedHours : 0.0;
+  final odiPerHour = dipCount / analyzedHours;
   // Severity buckets by RELATIVE drop magnitude (% rise in R vs baseline).
   var mild = 0, moderate = 0, severe = 0;
   for (final m in dipMags) {
@@ -223,7 +244,9 @@ Metric<RelativeOdiResult> relativeOdi(
       meanDipPct: dipMags.isEmpty ? 0 : mean(dipMags)!,
       maxDipPct: dipMags.isEmpty ? 0 : dipMags.reduce((a, b) => a > b ? a : b),
       longestDipSec: longestDipSec,
-      burdenPct: spanSec > 0 ? 100.0 * totalDipSec / spanSec : 0.0,
+      // OBSERVED-time denominator (analyzedHours), not the raw span — same
+      // fix as cvhr_apnea.dart's burden accounting.
+      burdenPct: 100.0 * totalDipSec / (analyzedHours * 3600.0),
       signalCoverage: validFraction.clamp(0.0, 1.0),
       trustedCoverage: n > 0 ? (n - nanCount) / n : 0.0,
       rejectCounts: {'low_signal': nanCount},
