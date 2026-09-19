@@ -393,11 +393,13 @@ Metric<double> sleepSessionWindowedRmssd(
   }
 
   final buckets = <int, List<double>>{};
+  final bucketsTs = <int, List<double>>{};
   for (var i = 0; i < rrMs.length; i++) {
     final tsSec = (rrTsMs[i] / 1000.0).round();
     if (tsSec < startSec || tsSec >= endSec) continue;
     final idx = ((tsSec - startSec) ~/ windowSec);
     (buckets[idx] ??= <double>[]).add(rrMs[i]);
+    (bucketsTs[idx] ??= <double>[]).add(rrTsMs[i]);
   }
 
   if (buckets.isEmpty) {
@@ -413,7 +415,7 @@ Metric<double> sleepSessionWindowedRmssd(
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     final diffRuns = [
-      for (final r in _cleanWindowRuns(buckets[idx]!))
+      for (final r in _cleanWindowRuns(buckets[idx]!, bucketsTs[idx]!))
         if (r.length >= 2) [for (var i = 1; i < r.length; i++) r[i] - r[i - 1]]
     ];
     var ssd = 0.0;
@@ -488,27 +490,42 @@ List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
 /// Runs, not one compacted list: differencing straight down a compacted list
 /// manufactures exactly one difference per rejected beat, spanning it — the same
 /// defect `hrvTime` refuses at dropped runs and `irregularBeatScreen` refuses
-/// with its keep-mask. This was the last producer in the file still doing it,
-/// and it is the one feeding the nightly headline. MEASURED over the 13-night
-/// audit corpus: it inflated the headline by 2–13 % on gen4 (57.2 → 52.3 ms at
-/// worst) and by 51–102 % on MG (87.7 → 58.2, 82.9 → 40.9, 76.9 → 40.2 ms) —
-/// i.e. most of the "gen5 reads 2× gen4" gap was this, not physiology.
-List<List<double>> _cleanWindowRuns(List<double> rr) {
+/// with its keep-mask. MEASURED over the 13-night audit corpus: it inflated
+/// the headline by 2–13 % on gen4 (57.2 → 52.3 ms at worst) and by 51–102 % on
+/// MG (87.7 → 58.2, 82.9 → 40.9, 76.9 → 40.2 ms) — i.e. most of the "gen5
+/// reads 2× gen4" gap was this, not physiology.
+///
+/// [ts] are [rr]'s beat-end epoch times (ms), same length/order as [rr]. Also
+/// breaks a run across a real sensor gap between two beats that BOTH survive
+/// the range/median filter — the same seam check `nocturnalRmssd` applies via
+/// `nnTimesMs`, needed here too since two beats either side of a dropout can
+/// individually pass and land adjacent in the compacted survivor list.
+///
+/// The real caller (`_sessionAvgHRV`) quantizes [ts] to whole seconds
+/// (`RrTs.ts` is `(rrTsMs / 1000.0).round()`), so two independent roundings
+/// can disagree with the true interval by up to ~1000 ms with no dropout at
+/// all — the tolerance is `nn[i] + 1000.0`, not `nocturnalRmssd`'s `+ 0.5`
+/// (which assumes sub-second beat times), so quantization alone never trips
+/// it while an actual multi-second-or-longer dropout still does.
+List<List<double>> _cleanWindowRuns(List<double> rr, List<double> ts) {
   const radius = 2;
   const threshold = 0.20;
   // Range filter first, keeping each survivor's position in [rr] — BOTH filters
   // break a run, so neither one's compaction can manufacture a difference.
   final nn = <double>[];
   final at = <int>[];
+  final nnTs = <double>[];
   for (var i = 0; i < rr.length; i++) {
     if (rr[i] >= 300 && rr[i] <= 2000) {
       nn.add(rr[i]);
       at.add(i);
+      nnTs.add(ts[i]);
     }
   }
   final runs = <List<double>>[];
   var run = <double>[];
   var lastKept = -2;
+  var lastTs = 0.0;
   for (var i = 0; i < nn.length; i++) {
     var keep = true;
     if (nn.length > radius) {
@@ -528,12 +545,14 @@ List<List<double>> _cleanWindowRuns(List<double> rr) {
       }
       continue;
     }
-    if (run.isNotEmpty && at[i] != lastKept + 1) {
+    if (run.isNotEmpty &&
+        (at[i] != lastKept + 1 || nnTs[i] - lastTs > nn[i] + 1000.0)) {
       runs.add(run);
       run = <double>[];
     }
     run.add(nn[i]);
     lastKept = at[i];
+    lastTs = nnTs[i];
   }
   if (run.isNotEmpty) runs.add(run);
   return runs;
