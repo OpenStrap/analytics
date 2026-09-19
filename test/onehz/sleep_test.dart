@@ -133,6 +133,85 @@ void main() {
       expect(m.present, isFalse);
       expect(m.confidence, 0);
     });
+
+    test('offset sample unstamped (tsMs==0) → offsetMs null, onsetMs kept', () {
+      // Same day/night/day shape as above, but only the LAST sample of the
+      // still block (i.e. the actual offsetIdx sample) carries tsMs==0 while
+      // sample[0] is stamped — regression for the redundant hasTs check that
+      // only looked at accel.first.tsMs and could fabricate offsetMs=0.0.
+      final accel = <AccelSample>[];
+      var t = 1000.0;
+      for (var i = 0; i < 12 * 3600; i++) {
+        final phase = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+        t += 1000.0;
+      }
+      for (var i = 0; i < 7 * 3600; i++) {
+        accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+        t += 1000.0;
+      }
+      final nightEnd = accel.length; // last still index + 1
+      for (var i = 0; i < 5 * 3600; i++) {
+        final phase = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+        t += 1000.0;
+      }
+      // Zero out the timestamps of the still block's last 10 min — the
+      // detector's edge tolerance means bestEnd can land a bit before the
+      // true boundary (mirrors the ±10min tolerance the square-wave test
+      // above already accepts), so cover a window instead of one index.
+      final zeroWindowStart = nightEnd - 600;
+      for (var idx = zeroWindowStart; idx < nightEnd; idx++) {
+        accel[idx] = AccelSample(0, accel[idx].x, accel[idx].y, accel[idx].z);
+      }
+
+      final m = vanHeesSleepWindow(accel);
+      expect(m.present, isTrue);
+      final w = m.value!;
+      // Sanity: the detector actually landed inside the zeroed window, or
+      // this test proves nothing.
+      expect(w.offsetIdx, inInclusiveRange(zeroWindowStart, nightEnd),
+          reason: 'test setup must target the sample the code actually reads');
+      expect(w.onsetMs, isNotNull);
+      expect(w.offsetMs, isNull,
+          reason: 'unstamped offset sample must not fabricate epoch 0');
+    });
+
+    test('onset sample unstamped (tsMs==0) → onsetMs null, offsetMs kept', () {
+      final accel = <AccelSample>[];
+      var t = 1000.0;
+      for (var i = 0; i < 12 * 3600; i++) {
+        final phase = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+        t += 1000.0;
+      }
+      final nightStart = accel.length;
+      for (var i = 0; i < 7 * 3600; i++) {
+        accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+        t += 1000.0;
+      }
+      for (var i = 0; i < 5 * 3600; i++) {
+        final phase = math.sin(i * 0.5);
+        accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+        t += 1000.0;
+      }
+      // Zero out only the first still-block sample's timestamp.
+      accel[nightStart] = AccelSample(
+        0,
+        accel[nightStart].x,
+        accel[nightStart].y,
+        accel[nightStart].z,
+      );
+
+      final m = vanHeesSleepWindow(accel);
+      expect(m.present, isTrue);
+      final w = m.value!;
+      expect(w.onsetIdx, nightStart,
+          reason: 'test setup must target the sample the code actually reads');
+      expect(w.onsetMs, isNull,
+          reason: 'unstamped onset sample must not fabricate epoch 0');
+      expect(w.offsetMs, isNotNull);
+    });
   });
 
   // ---------------------------------------------------------------------- SRI

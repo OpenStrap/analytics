@@ -398,9 +398,10 @@ Metric<SleepWindow> vanHeesSleepWindow(
     );
   }
 
-  final hasTs = accel.every((a) => a.tsMs != 0) || accel.first.tsMs != 0;
-  final onsetMs = hasTs ? accel[bestStart].tsMs : null;
-  final offsetMs = hasTs ? accel[math.min(bestEnd, n - 1)].tsMs : null;
+  final onsetSample = accel[bestStart];
+  final offsetSample = accel[math.min(bestEnd, n - 1)];
+  final onsetMs = onsetSample.tsMs != 0 ? onsetSample.tsMs : null;
+  final offsetMs = offsetSample.tsMs != 0 ? offsetSample.tsMs : null;
 
   var unresolved = 0;
   for (final u in immobileUnknown) {
