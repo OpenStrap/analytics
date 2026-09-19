@@ -157,6 +157,34 @@ void main() {
       expect(control.value!.hf, isNotNull);
     });
 
+    test(
+        'an INTERNAL gap with beats on both sides is rejected, not just an '
+        'endpoint-span shortfall', () {
+      // Beats near both edges of the ~66.7 s HF window, with a 40 s hole in
+      // the middle, can still clear the endpoint-span check (first-to-last
+      // beat still covers most of the window) while the window itself is
+      // half-empty. Guard on the single largest inter-beat gap too.
+      final rr = <double>[];
+      final times = <double>[];
+      var t = 0.0;
+      while (t < 20000) {
+        final v = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000));
+        rr.add(v);
+        t += v;
+        times.add(t);
+      }
+      t += 40000; // the internal gap
+      while (t < 66000) {
+        final v = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000));
+        rr.add(v);
+        t += v;
+        times.add(t);
+      }
+      final gapped = hrvFreq(rr, times, artifactFraction: 0.0);
+      expect(gapped.value?.hf, isNull,
+          reason: 'endpoints span the window but the middle is empty');
+    });
+
     test('GATES HF when artifact fraction exceeds the threshold', () {
       // RE-PINNED 2026-08: 400 beats, not 64. Band powers are now Welch-
       // averaged over segments long enough to RESOLVE the band (10 cycles of
