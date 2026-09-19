@@ -815,6 +815,38 @@ void main() {
       expect(m.present, isFalse);
       expect(m.note, contains('rmssd_refused:acf1='));
     });
+
+    test(
+        'HRV-gap: no difference is manufactured across a real sensor dropout',
+        () {
+      // Two flat runs of beats, individually passing the range/median filter,
+      // sitting on EITHER SIDE of a ~2 min skin-contact gap inside the same
+      // 5-min bucket. Both survive `_cleanWindowRuns`'s value-only filters and
+      // land back-to-back in the compacted survivor list, so without the
+      // timestamp gap check their genuinely-adjacent-in-time-but-not seam
+      // would be differenced as if the beats were 1 s apart.
+      final rr = <double>[900, 900, 900, 1000, 1000, 1000];
+      final ts = <double>[
+        1000, 2000, 3000, // flat run before the gap
+        123000, 124000, 125000, // flat run after a ~2 min dropout
+      ];
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      expect(m.present, isTrue);
+      expect(m.value, closeTo(0.0, 1e-9),
+          reason: 'two flat runs, no cross-gap difference manufactured');
+    });
+
+    test('HRV-gap: no gap means no change (control)', () {
+      // Same shape, but the second run starts right after the first (no real
+      // gap) — the fix must not shrink a window that has nothing to exclude.
+      final rr = <double>[900, 900, 900, 1000, 1000, 1000];
+      final ts = <double>[1000, 2000, 3000, 4000, 5000, 6000];
+      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      expect(m.present, isTrue);
+      // One real seam difference (900 -> 1000 = 100 ms) survives; RMSSD = 100
+      // over that single difference (the rest are 0).
+      expect(m.value, closeTo(math.sqrt(100.0 * 100.0 / 5.0), 1e-6));
+    });
   });
 
   // The CALIBRATION of this scale (what a rest / active / hard / maximal day
