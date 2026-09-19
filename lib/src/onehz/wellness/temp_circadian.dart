@@ -385,7 +385,13 @@ CircadianNonparam? _nonparam(
     for (final v in profile) {
       profVar += (v - grand) * (v - grand);
     }
-    profVar /= profile.length;
+    // Divide by the FIXED epochsPerDay, not profile.length (the count of
+    // hour-of-day bins that happen to have >=1 sample). A phase-locked gap
+    // (e.g. charging at the same hour every day, see file header) leaves a
+    // bin permanently unpopulated, shrinking profile.length below
+    // epochsPerDay and inflating IS by epochsPerDay/profile.length. Matches
+    // circadian_np.dart's `p = epochsPerDay` normalization.
+    profVar /= epochsPerDay;
   }
   final double is_ = varTot > 0 ? (profVar / (varTot / p)).clamp(0, 1) : 0.0;
 
