@@ -200,7 +200,17 @@ Metric<RelativeOdiResult> relativeOdi(
     }
   }
 
-  final odiPerHour = analyzedHours > 0 ? dipCount / analyzedHours : 0.0;
+  // Denominator must be time that actually produced a usable ratio-of-ratios
+  // sample, not the raw wall-clock span: a contact-loss dropout (arm tucked,
+  // band shifted) turns part of relR NaN via the dcRed/dcIr/rIr guards above,
+  // and charging that gap to analyzedHours dilutes odiPerHour/burdenPct
+  // downward instead of correctly reporting the rate over the monitored time
+  // (same fix as cvhr_apnea.dart's analyzedHours).
+  final nanCount = relR.where((v) => v.isNaN).length;
+  final trustedCoverage = n > 0 ? (n - nanCount) / n : 0.0;
+  final validSpanSec = spanSec * trustedCoverage;
+  final validHours = validSpanSec / 3600.0;
+  final odiPerHour = validHours > 0 ? dipCount / validHours : 0.0;
   // Severity buckets by RELATIVE drop magnitude (% rise in R vs baseline).
   var mild = 0, moderate = 0, severe = 0;
   for (final m in dipMags) {
@@ -212,20 +222,19 @@ Metric<RelativeOdiResult> relativeOdi(
       mild++;
     }
   }
-  final nanCount = relR.where((v) => v.isNaN).length;
   final conf = (0.5 * validFraction).clamp(0.1, 0.5);
   return Metric<RelativeOdiResult>(
     value: RelativeOdiResult(
       meanRelR: meanRelR,
       dipCount: dipCount,
       odiPerHour: odiPerHour,
-      analyzedHours: analyzedHours,
+      analyzedHours: validHours,
       meanDipPct: dipMags.isEmpty ? 0 : mean(dipMags)!,
       maxDipPct: dipMags.isEmpty ? 0 : dipMags.reduce((a, b) => a > b ? a : b),
       longestDipSec: longestDipSec,
-      burdenPct: spanSec > 0 ? 100.0 * totalDipSec / spanSec : 0.0,
+      burdenPct: validSpanSec > 0 ? 100.0 * totalDipSec / validSpanSec : 0.0,
       signalCoverage: validFraction.clamp(0.0, 1.0),
-      trustedCoverage: n > 0 ? (n - nanCount) / n : 0.0,
+      trustedCoverage: trustedCoverage,
       rejectCounts: {'low_signal': nanCount},
       severityCounts: {'mild': mild, 'moderate': moderate, 'severe': severe},
     ),
