@@ -231,7 +231,20 @@ double? _welchBandPower(
       ts.add(tSec[i]);
       ys.add(y[i]);
     }
-    if (ts.length < minPointsPerSegment) continue;
+    // A segment has to be BOTH beat-dense and time-complete: a dropout in
+    // the middle leaves few beats spanning the full window, and its
+    // periodogram is a window function, not a spectrum. Endpoint span alone
+    // misses an internal dropout that still leaves beats near both edges, so
+    // also reject on the single largest gap between consecutive beats.
+    if (ts.length < minPointsPerSegment || ts.last - ts.first < segSec * 0.8) {
+      continue;
+    }
+    var maxGap = 0.0;
+    for (var i = 1; i < ts.length; i++) {
+      final g = ts[i] - ts[i - 1];
+      if (g > maxGap) maxGap = g;
+    }
+    if (maxGap > segSec * 0.2) continue;
     final ls = lombScargle(ts, ys, grid);
     if (ls == null) continue;
     final p = ls.bandPower(loHz, hiHz);
