@@ -1181,6 +1181,49 @@ void main() {
       ]);
       expect(ok.present, isTrue);
     });
+
+    test(
+        'nnTimesMs segments at gaps — a charging hole spliced into one array '
+        'no longer straddles the sliding window', () {
+      // Two clean, near-stationary 300-beat segments at DIFFERENT RR levels
+      // (mirrors two different autonomic states either side of a real
+      // off-wrist/charging hole), spliced into one nn array with a >30s
+      // gap in nnTimesMs between them.
+      List<double> segment(double baseMs) =>
+          [for (var i = 0; i < 300; i++) baseMs + 15.0 * math.sin(i.toDouble())];
+      final seg1 = segment(800.0);
+      final seg2 = segment(1100.0);
+      final nn = [...seg1, ...seg2];
+
+      var t = 0.0;
+      final times1 = <double>[for (final v in seg1) t += v];
+      t += 120000; // 2-minute gap, far past maxGapSec
+      final times2 = <double>[for (final v in seg2) t += v];
+      final nnTimes = [...times1, ...times2];
+
+      final gapAware = baevskyStressIndex(nn, nnTimesMs: nnTimes);
+      final untimed = baevskyStressIndex(nn);
+      final seg1Only = baevskyStressIndex(seg1);
+      final seg2Only = baevskyStressIndex(seg2);
+
+      expect(gapAware.present, isTrue);
+      expect(seg1Only.present, isTrue);
+      expect(seg2Only.present, isTrue);
+
+      // Gap-aware SI is the median across each segment's OWN windows, so it
+      // must land within the range spanned by the two segments' own SI —
+      // never distorted by a straddling window's inflated MxDMn.
+      final lo = math.min(seg1Only.value!.si, seg2Only.value!.si);
+      final hi = math.max(seg1Only.value!.si, seg2Only.value!.si);
+      expect(gapAware.value!.si, greaterThanOrEqualTo(lo - 1e-6));
+      expect(gapAware.value!.si, lessThanOrEqualTo(hi + 1e-6));
+
+      // The old no-times call path is untouched (regression guard) and, on
+      // this fixture, differs from the gap-aware result because it lets
+      // straddling windows see the cross-segment jump as MxDMn.
+      expect(untimed.present, isTrue);
+      expect(untimed.value!.si, isNot(closeTo(gapAware.value!.si, 1e-6)));
+    });
   });
 
   group('cardiac coherence (McCraty & Zayas 2014)', () {

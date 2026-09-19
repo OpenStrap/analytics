@@ -52,10 +52,30 @@ class StressIndex {
 /// QUANTIZATION, not physiology, and 1/MxDMn then explodes (300 beats
 /// alternating 1000/1001 ms → SI ≈ 48 780, reported as 'high'). Windows below
 /// the guard are dropped; if no window survives, the metric is ABSENT.
-Metric<StressIndex> baevskyStressIndex(List<double> nnMs,
-    {double minRangeMs = 20.0}) {
+///
+/// [nnTimesMs] (optional, cumulative beat times) lets a caller pass one
+/// unsegmented block (e.g. a whole sleep window) even when it contains a
+/// charging/off-wrist hole: beats more than [maxGapSec] apart are treated as
+/// two recordings, exactly like `cvhrApneaScreen`, so a sliding window never
+/// straddles the gap and reads the discontinuity as within-segment MxDMn.
+/// Without [nnTimesMs] the whole array is one implicit segment (unchanged
+/// behavior).
+Metric<StressIndex> baevskyStressIndex(
+  List<double> nnMs, {
+  List<double>? nnTimesMs,
+  double minRangeMs = 20.0,
+  double maxGapSec = 30,
+}) {
   const inputs = ['rr_cleaned'];
-  final nn = nnMs.where((v) => v >= 300 && v <= 2000).toList();
+  final useTimes = nnTimesMs != null && nnTimesMs.length == nnMs.length;
+  final nn = <double>[];
+  final nnT = <double>[];
+  for (var i = 0; i < nnMs.length; i++) {
+    final v = nnMs[i];
+    if (v < 300 || v > 2000) continue;
+    nn.add(v);
+    if (useTimes) nnT.add(nnTimesMs[i]);
+  }
   if (nn.length < 30) {
     return const Metric<StressIndex>.absent(
       tier: Tier.estimate,
@@ -64,21 +84,37 @@ Metric<StressIndex> baevskyStressIndex(List<double> nnMs,
     );
   }
 
+  // Segment at gaps (same rule as cvhrApneaScreen) so a charging/off-wrist
+  // hole spliced into one `nn` array never lets a window's MxDMn pick up the
+  // jump between pre-gap and post-gap RR levels as if it were within-segment
+  // variability. No times supplied → one implicit segment, unchanged output.
+  final segStart = <int>[0];
+  if (useTimes) {
+    for (var i = 1; i < nnT.length; i++) {
+      if ((nnT[i] - nnT[i - 1]) / 1000.0 > maxGapSec) segStart.add(i);
+    }
+  }
+
   // Window ~5 min of beats (256), 50% overlap; compute SI per window.
   const win = 256, step = 128;
   final sis = <double>[];
   final modes = <double>[], amos = <double>[], ranges = <double>[];
-  for (var start = 0; start + 30 <= nn.length; start += step) {
-    final seg = nn.sublist(start, math.min(start + win, nn.length));
-    if (seg.length < 30) break;
-    final r = _siOfSegment(seg, minRangeMs);
-    if (r != null) {
-      sis.add(r[0]);
-      modes.add(r[1]);
-      amos.add(r[2]);
-      ranges.add(r[3]);
+  for (var s = 0; s < segStart.length; s++) {
+    final lo = segStart[s];
+    final hi = (s + 1 < segStart.length ? segStart[s + 1] : nn.length);
+    final seg = nn.sublist(lo, hi);
+    for (var start = 0; start + 30 <= seg.length; start += step) {
+      final segWin = seg.sublist(start, math.min(start + win, seg.length));
+      if (segWin.length < 30) break;
+      final r = _siOfSegment(segWin, minRangeMs);
+      if (r != null) {
+        sis.add(r[0]);
+        modes.add(r[1]);
+        amos.add(r[2]);
+        ranges.add(r[3]);
+      }
+      if (start + win >= seg.length) break;
     }
-    if (start + win >= nn.length) break;
   }
   if (sis.isEmpty) {
     return const Metric<StressIndex>.absent(
