@@ -479,6 +479,128 @@ void main() {
       expect(v.trustedCoverage, greaterThan(0.7));
     });
 
+    test(
+        'relativeOdi: a mid-night gap (charging break) does not dilute '
+        'odiPerHour/burdenPct — observed-hours denominator, not raw span',
+        () {
+      // Two clean 300 s segments with 5 dips each, separated by a 2 h gap
+      // (charging break) in ts. Same shape as cvhr_apnea's regression case.
+      const pulsHz = 0.3;
+      List<double> buildSegment(int startSec, math.Random rnd,
+          List<int> events, List<double> red, List<double> ir,
+          List<double> ts) {
+        for (var s = 0; s < 300; s++) {
+          final t = (startSec + s).toDouble();
+          final inEvent = events.any((e) => s >= e && s < e + 20);
+          final irPuls =
+              50 * math.sin(2 * math.pi * pulsHz * s) + rnd.nextDouble() * 5;
+          ir.add(20000 + irPuls);
+          final redAmp = inEvent ? 400.0 : 60.0;
+          final redPuls = redAmp * math.sin(2 * math.pi * pulsHz * s) +
+              rnd.nextDouble() * 5;
+          red.add(18000 + redPuls);
+          ts.add(t);
+        }
+        return ts;
+      }
+
+      final events = [80, 200];
+      const gapSec = 2 * 3600; // 2 h charging break
+
+      // No-gap reference: same two segments back-to-back in TIME too, so the
+      // per-segment dip pattern is identical and only the gap differs.
+      final redNoGap = <double>[], irNoGap = <double>[], tsNoGap = <double>[];
+      buildSegment(0, math.Random(1), events, redNoGap, irNoGap, tsNoGap);
+      buildSegment(300, math.Random(2), events, redNoGap, irNoGap, tsNoGap);
+      final noGap = relativeOdi(redNoGap, irNoGap, tsNoGap, dipPct: 3.0);
+      expect(noGap.present, isTrue, reason: noGap.note);
+
+      final redGap = <double>[], irGap = <double>[], tsGap = <double>[];
+      buildSegment(0, math.Random(1), events, redGap, irGap, tsGap);
+      buildSegment(300 + gapSec, math.Random(2), events, redGap, irGap, tsGap);
+      final gapped = relativeOdi(redGap, irGap, tsGap, dipPct: 3.0);
+      expect(gapped.present, isTrue, reason: gapped.note);
+
+      // Observed hours must equal the summed segment spans (≈ 2 * 300 s),
+      // NOT the raw first-to-last span (≈ 2h + 600s).
+      expect(gapped.value!.analyzedHours,
+          closeTo(noGap.value!.analyzedHours, 0.01),
+          reason: 'gap must not inflate the observed-hours denominator');
+
+      // Same dip pattern per segment ⇒ the same dip count and (within
+      // rounding) the same rate — a diluted denominator would read LOWER.
+      expect(gapped.value!.dipCount, noGap.value!.dipCount);
+      expect(gapped.value!.odiPerHour,
+          closeTo(noGap.value!.odiPerHour, noGap.value!.odiPerHour * 0.15));
+      expect(gapped.value!.burdenPct,
+          closeTo(noGap.value!.burdenPct, noGap.value!.burdenPct * 0.15));
+    });
+
+    test(
+        'relativeOdi: a DC/perfusion-baseline jump across a gap does not '
+        'fabricate a spurious dip at the boundary', () {
+      // Two flat, dip-free segments at DIFFERENT DC baselines (a perfusion
+      // shift after re-donning the band), separated by a gap. If the rolling
+      // AC/DC or baseline window ever blended across the gap, the jump would
+      // be scored as a desaturation right at the boundary.
+      const pulsHz = 0.3;
+      final red = <double>[], ir = <double>[], ts = <double>[];
+      // No noise here on purpose: this isolates the boundary-blending bug
+      // from ordinary sample noise, which can itself cross a tight 3%
+      // threshold and would make the assertion flaky for the wrong reason.
+      for (var s = 0; s < 300; s++) {
+        final irPuls = 50 * math.sin(2 * math.pi * pulsHz * s);
+        ir.add(20000 + irPuls);
+        final redPuls = 60 * math.sin(2 * math.pi * pulsHz * s);
+        red.add(18000 + redPuls); // low DC baseline
+        ts.add(s.toDouble());
+      }
+      const gapSec = 3600;
+      for (var s = 0; s < 300; s++) {
+        final t = (300 + gapSec + s).toDouble();
+        final irPuls = 50 * math.sin(2 * math.pi * pulsHz * s);
+        ir.add(20000 + irPuls);
+        final redPuls = 60 * math.sin(2 * math.pi * pulsHz * s);
+        red.add(30000 + redPuls); // DC baseline jumps ~67% higher
+        ts.add(t);
+      }
+      final m = relativeOdi(red, ir, ts, dipPct: 3.0);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.dipCount, 0,
+          reason: 'a DC baseline jump across a gap must never be scored as '
+              'a desaturation at the segment boundary');
+    });
+
+    test('relativeOdi: default maxGapSec is a no-op on gap-free input '
+        '(regression guard)', () {
+      const totalSec = 600;
+      final red = <double>[];
+      final ir = <double>[];
+      final ts = <double>[];
+      final rnd = math.Random(42);
+      final events = [80, 200, 320, 440, 540];
+      const pulsHz = 0.3;
+      for (var s = 0; s < totalSec; s++) {
+        final inEvent = events.any((e) => s >= e && s < e + 20);
+        final irPuls =
+            50 * math.sin(2 * math.pi * pulsHz * s) + rnd.nextDouble() * 5;
+        ir.add(20000 + irPuls);
+        final redAmp = inEvent ? 400.0 : 60.0;
+        final redPuls =
+            redAmp * math.sin(2 * math.pi * pulsHz * s) + rnd.nextDouble() * 5;
+        red.add(18000 + redPuls);
+        ts.add(s.toDouble());
+      }
+      final m = relativeOdi(red, ir, ts, dipPct: 3.0);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.dipCount, inInclusiveRange(3, 7));
+      // span is (totalSec-1) seconds (ts runs 0..totalSec-1 inclusive) —
+      // same first-to-last-span semantics as before this fix, just now
+      // computed as a single observed segment instead of the raw ts delta.
+      expect(m.value!.analyzedHours,
+          closeTo((totalSec - 1) / 3600.0, 1e-9));
+    });
+
     test('BRV: variable breathing rates -> CV>0 + Theil-Sen slope', () {
       final brpm = [14.0, 15.0, 13.0, 16.0, 12.0, 17.0, 11.0];
       final m = breathingRateVariability(brpm);
