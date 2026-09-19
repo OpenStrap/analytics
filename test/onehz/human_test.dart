@@ -352,6 +352,27 @@ void main() {
       expect(v.narrative.toLowerCase(), isNot(contains('noise')));
     });
 
+    test('a whole-bpm quantized baseline is not named a driver even past 0.5*scale',
+        () {
+      // Alternating 58/59 bpm: MAD=0.5 -> scaled MAD ~0.74, so 0.5*scale ~0.37
+      // is cleared by essentially every night -- but that's 1-bpm rounding
+      // noise, not real physiology. quantum:1 must suppress it.
+      final rhr = List<double>.generate(14, (i) => i.isEven ? 58.0 : 59.0);
+      final inputs = [
+        GlassBoxInput(
+            label: 'rhr',
+            value: 58.0,
+            history: rhr,
+            weight: wRhr,
+            lowerIsBetter: true,
+            quantum: 1),
+      ];
+      // ignore: deprecated_member_use_from_same_package
+      final m = glassBoxReadiness(inputs);
+      expect(m.value!.breakdown.single.beyondUsualSpread, isFalse);
+      expect(m.value!.drivers, isEmpty);
+    });
+
     test('a mover inside the usual spread is never named as a driver', () {
       // All inputs essentially at their median => nothing clears the SWC.
       final hist = List<double>.generate(20, (i) => 50.0 + (i % 5) * 0.1);
