@@ -73,6 +73,34 @@ void main() {
       expect(np.interdailyStability, closeTo(0.5582, 0.0005));
     });
 
+    test(
+        'IS divisor is epochsPerDay, not the count of populated hour-of-day '
+        'bins (phase-locked charging-gap regression)', () {
+      // Hour-of-day 3 is NEVER sampled across the whole window (e.g. the band
+      // charges at the same time every day) -> profile.length == 23 while
+      // epochsPerDay == 24. Dividing profVar by profile.length instead of
+      // epochsPerDay inflates IS by 24/23.
+      final samples = <AdcSample>[];
+      for (var day = 0; day < 14; day++) {
+        for (var h = 0; h < 24; h++) {
+          if (h == 3) continue;
+          for (var k = 0; k < 6; k++) {
+            final tHours = day * 24.0 + h + k / 6.0;
+            final adc =
+                2000 + 150 * math.cos(2 * math.pi / 24 * (tHours - 4));
+            samples.add(AdcSample(tHours * 3.6e6, adc));
+          }
+        }
+      }
+      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+          .value!
+          .nonparam!;
+      // Correct value with divisor = epochsPerDay; strictly less than the
+      // pre-fix value (which clamped to 1.0).
+      expect(np.interdailyStability, lessThan(0.999));
+      expect(np.interdailyStability, closeTo(0.9583, 0.001));
+    });
+
     test('M10/L5/RA are WITHHELD, not merely null (MT-09)', () {
       final samples = <AdcSample>[];
       for (var i = 0; i < 3 * 24 * 6; i++) {
