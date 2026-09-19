@@ -122,7 +122,6 @@ Metric<RelativeOdiResult> relativeOdi(
     final segTs = tsSec.sublist(lo, hi + 1);
     final segSpanSec = segTs.last - segTs.first;
     if (segTs.length < 2 || segSpanSec <= 0) continue; // nothing observable
-    analyzedHours += segSpanSec / 3600.0;
 
     // Rolling AC (stddev) / DC (mean) per channel, scoped to this segment.
     final acRed = _rollingStd(segRed, acWindowSec);
@@ -149,6 +148,19 @@ Metric<RelativeOdiResult> relativeOdi(
     for (var i = 0; i < segRelR.length; i++) {
       relR[lo + i] = segRelR[i];
     }
+
+    // This segment's own denominator must be time that actually produced a
+    // usable ratio-of-ratios sample, not its raw wall-clock span: a
+    // contact-loss dropout (arm tucked, band shifted) turns part of segRelR
+    // NaN via the dcRed/dcIr/rIr guards above, and charging that gap to
+    // analyzedHours dilutes odiPerHour/burdenPct downward instead of
+    // correctly reporting the rate over monitored time (same fix as
+    // cvhr_apnea.dart's analyzedHours, applied per-segment rather than once
+    // globally so a bad segment can't wash out a clean one, or vice versa).
+    final segNanCount = segRelR.where((v) => v.isNaN).length;
+    final segTrustedCoverage =
+        segRelR.isNotEmpty ? (segRelR.length - segNanCount) / segRelR.length : 0.0;
+    analyzedHours += (segSpanSec / 3600.0) * segTrustedCoverage;
 
     // Rolling baseline of R over baselineSec, scoped to this segment; a
     // desaturation event = R rises ≥ dipPct above it for ≥minDipSec.
@@ -221,7 +233,14 @@ Metric<RelativeOdiResult> relativeOdi(
   }
   final meanRelR = mean(validR)!;
 
-  final odiPerHour = dipCount / analyzedHours;
+  final odiPerHour = analyzedHours > 0 ? dipCount / analyzedHours : 0.0;
+
+  // Global sample-level coverage, reported for visibility only — it does NOT
+  // scale analyzedHours (each segment already scaled its own contribution by
+  // its own trustedCoverage in the loop above, so a gap-heavy segment can't
+  // wash out a clean one's rate, or vice versa).
+  final nanCount = relR.where((v) => v.isNaN).length;
+  final trustedCoverage = n > 0 ? (n - nanCount) / n : 0.0;
   // Severity buckets by RELATIVE drop magnitude (% rise in R vs baseline).
   var mild = 0, moderate = 0, severe = 0;
   for (final m in dipMags) {
@@ -233,7 +252,6 @@ Metric<RelativeOdiResult> relativeOdi(
       mild++;
     }
   }
-  final nanCount = relR.where((v) => v.isNaN).length;
   final conf = (0.5 * validFraction).clamp(0.1, 0.5);
   return Metric<RelativeOdiResult>(
     value: RelativeOdiResult(
@@ -244,11 +262,13 @@ Metric<RelativeOdiResult> relativeOdi(
       meanDipPct: dipMags.isEmpty ? 0 : mean(dipMags)!,
       maxDipPct: dipMags.isEmpty ? 0 : dipMags.reduce((a, b) => a > b ? a : b),
       longestDipSec: longestDipSec,
-      // OBSERVED-time denominator (analyzedHours), not the raw span — same
-      // fix as cvhr_apnea.dart's burden accounting.
-      burdenPct: 100.0 * totalDipSec / (analyzedHours * 3600.0),
+      // OBSERVED+trusted-time denominator (analyzedHours, already scaled per
+      // segment by its own trustedCoverage) — same fix as cvhr_apnea.dart's
+      // burden accounting, composed with the gap-segmentation split.
+      burdenPct:
+          analyzedHours > 0 ? 100.0 * totalDipSec / (analyzedHours * 3600.0) : 0.0,
       signalCoverage: validFraction.clamp(0.0, 1.0),
-      trustedCoverage: n > 0 ? (n - nanCount) / n : 0.0,
+      trustedCoverage: trustedCoverage,
       rejectCounts: {'low_signal': nanCount},
       severityCounts: {'mild': mild, 'moderate': moderate, 'severe': severe},
     ),
