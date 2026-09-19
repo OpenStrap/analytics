@@ -29,7 +29,7 @@
 
 import '../types.dart';
 import '../util.dart';
-import '../foundations/baseline.dart';
+import '../foundations/baseline.dart' show robustBaseline, dispersionBelowQuantum;
 
 /// One readiness input the caller supplies.
 class GlassBoxInput {
@@ -39,12 +39,16 @@ class GlassBoxInput {
   final double weight; // relative weight (HRV>RHR>RR>temp)
   /// If true, a LOWER value is better-for-you (e.g. RHR, resp, temp deviation).
   final bool lowerIsBetter;
+  /// The input's own measurement quantum (e.g. 1 whole bpm, 1 ADC count).
+  /// 0 = continuous/not quantized, no guard. See the SWC gate below.
+  final double quantum;
   const GlassBoxInput({
     required this.label,
     required this.value,
     required this.history,
     required this.weight,
     this.lowerIsBetter = false,
+    this.quantum = 0,
   });
 }
 
@@ -190,7 +194,15 @@ Metric<GlassBoxReadiness> glassBoxReadiness(
     final base = robustBaseline(inp.history, minValid: minHistory);
     final scale = base.scale;
     final delta = (base.center == null) ? 0.0 : (inp.value - base.center!);
-    final beyond = scale != null && scale > 0 && delta.abs() >= 0.5 * scale;
+    // A whole-bpm RHR (or integer skin-temp ADC) baseline alternating between
+    // two adjacent values can carry a nonzero-but-unresolvable MAD that is
+    // really quantization noise, not physiology (the same 58/59-bpm case
+    // readiness_composite.dart and overreaching_conjunction.dart guard against
+    // on this exact channel). If the baseline's dispersion doesn't clear the
+    // input's own measurement quantum, don't name it as "beyond usual spread".
+    final quantized = dispersionBelowQuantum(inp.history, inp.quantum);
+    final beyond =
+        !quantized && scale != null && scale > 0 && delta.abs() >= 0.5 * scale;
 
     final contribution = inp.weight * (oriented - 50.0);
     items.add(ReadinessBreakdownItem(
