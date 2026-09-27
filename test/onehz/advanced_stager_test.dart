@@ -97,6 +97,48 @@ void main() {
       // The single 17h run exceeds maxMainSleepSpanS and is dropped (not truncated).
       expect(sessions, isEmpty);
     });
+
+    test('a recording gap cannot merge a short rest into the next night', () {
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      void still(int start, int duration) {
+        for (var i = 0; i < duration; i++) {
+          final ts = start + i;
+          grav.add(GravTs(ts, 0.001 * math.sin(i * 0.01), 0, 1));
+          hr.add(HrTs(ts, 52));
+        }
+      }
+
+      still(0, 10 * 60);
+      const nextNight = 18 * 3600;
+      still(nextNight, 6 * 3600);
+
+      final sessions = AdvancedSleepStager.detectSleep(grav, hr);
+      expect(sessions, hasLength(1));
+      expect(sessions.single.start, greaterThanOrEqualTo(nextNight));
+      expect(sessions.single.end - sessions.single.start,
+          inInclusiveRange(5 * 3600, 7 * 3600));
+    });
+
+    test('endpoint HR alone cannot corroborate a sparse motion gap', () {
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      void still(int start, int duration) {
+        for (var i = 0; i < duration; i++) {
+          final ts = start + i;
+          grav.add(GravTs(ts, 0.001 * math.sin(i * 0.01), 0, 1));
+          hr.add(HrTs(ts, 52));
+        }
+      }
+
+      still(0, 2 * 3600);
+      still(2 * 3600 + 45 * 60, 6 * 3600);
+
+      final sessions = AdvancedSleepStager.detectSleep(grav, hr);
+      expect(sessions, hasLength(2));
+      expect(sessions.first.end, lessThan(2 * 3600 + 45 * 60));
+      expect(sessions.last.start, greaterThanOrEqualTo(2 * 3600 + 45 * 60));
+    });
   });
 
   group('Realistic cycled fixture — deep/REM regression (2026-07)', () {

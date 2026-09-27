@@ -551,11 +551,25 @@ class AdvancedSleepStager {
     return median([for (final h in hr) h.bpm]);
   }
 
-  static bool _hrSleepBandAcross(int a, int b, List<HrTs> hr, double? baseline) {
-    if (baseline == null) return false;
-    final seg = [for (final h in hr) if (h.ts > a && h.ts <= b) h.bpm];
-    if (seg.isEmpty) return false;
-    final meanHr = seg.reduce((x, y) => x + y) / seg.length;
+  static bool _hrSleepBandAcross(
+      int a, int b, List<HrTs> hr, double? baseline) {
+    if (baseline == null || b <= a || b - a > sparseBridgeGapMin * 60) {
+      return false;
+    }
+    final seg = [
+      for (final h in hr)
+        if (h.ts >= a && h.ts <= b) h
+    ];
+    // One HR sample at the far edge of an unrecorded interval is not evidence
+    // that the wrist was worn throughout it. Require cardiac coverage across
+    // the entire gravity gap before joining the sleep runs.
+    if (seg.length < 2 ||
+        seg.first.ts - a > hrDenseSpacingS ||
+        b - seg.last.ts > hrDenseSpacingS) return false;
+    for (var i = 1; i < seg.length; i++) {
+      if (seg[i].ts - seg[i - 1].ts > hrDenseSpacingS) return false;
+    }
+    final meanHr = seg.map((h) => h.bpm).reduce((x, y) => x + y) / seg.length;
     return meanHr <= baseline * hrSleepBandMult;
   }
 
@@ -628,6 +642,7 @@ class AdvancedSleepStager {
 
   static List<_Period> _mergePeriods(List<_Period> periods, int mergeMinutes) {
     final thresholdS = mergeMinutes * 60;
+    const maxObservedGapS = maxGapMin * 60;
     final pending = [...periods];
     final merged = <_Period>[];
     var i = 0;
@@ -639,10 +654,15 @@ class AdvancedSleepStager {
         i += 1;
         continue;
       }
-      final hasPrev = i > 0 && merged.isNotEmpty;
-      final hasNext = i + 1 < pending.length;
+      // _buildRuns splits on a recording gap. Smoothing a short period must
+      // never undo that split: otherwise a few minutes before a long outage
+      // can stretch the next night's sleep across hours with no samples.
+      final hasPrev = merged.isNotEmpty &&
+          current.start - merged.last.end <= maxObservedGapS;
+      final hasNext = i + 1 < pending.length &&
+          pending[i + 1].start - current.end <= maxObservedGapS;
       final bridgesSame =
-          hasPrev && hasNext && pending[i - 1].stage == pending[i + 1].stage;
+          hasPrev && hasNext && merged.last.stage == pending[i + 1].stage;
       if (bridgesSame) {
         final prev = merged.removeLast();
         merged.add(_Period(prev.stage, prev.start, pending[i + 1].end));
@@ -656,6 +676,7 @@ class AdvancedSleepStager {
         merged.add(_Period(prev.stage, prev.start, current.end));
         i += 1;
       } else {
+        merged.add(current);
         i += 1;
       }
     }
