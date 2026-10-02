@@ -555,18 +555,12 @@ class AdvancedSleepStager {
     if (baseline == null || b <= a || b - a > sparseBridgeGapMin * 60) {
       return false;
     }
-    final seg = [
-      for (final h in hr)
-        if (h.ts >= a && h.ts <= b) h
-    ];
-    // HR has to cover the whole gravity gap, not just one edge of it.
-    if (seg.length < 2 ||
-        seg.first.ts - a > hrDenseSpacingS ||
-        b - seg.last.ts > hrDenseSpacingS) return false;
-    for (var i = 1; i < seg.length; i++) {
-      if (seg[i].ts - seg[i - 1].ts > hrDenseSpacingS) return false;
-    }
-    final meanHr = seg.map((h) => h.bpm).reduce((x, y) => x + y) / seg.length;
+    // No interior-coverage requirement: segmentSleep only has HR on accel rows,
+    // so a real hole has HR at its two edges and nothing inside. segmentSleep
+    // stamps those seconds 'unobserved'; the 90-min cap above bounds the bridge.
+    final seg = [for (final h in hr) if (h.ts >= a && h.ts <= b) h.bpm];
+    if (seg.isEmpty) return false;
+    final meanHr = seg.reduce((x, y) => x + y) / seg.length;
     return meanHr <= baseline * hrSleepBandMult;
   }
 

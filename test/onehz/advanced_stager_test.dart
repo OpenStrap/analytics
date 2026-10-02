@@ -122,12 +122,14 @@ void main() {
           inInclusiveRange(5 * 3600, 7 * 3600));
     });
 
-    test('endpoint HR alone cannot corroborate a sparse motion gap', () {
+    // segmentSleep only has HR on accel rows, so a hole carries edge HR only.
+    // Under the 90-min cap it bridges; segmentSleep marks it unobserved.
+    test('a sub-90-min hole with sleep-band edge HR stays one session', () {
       final d = stillBlocks([(0, 2 * 3600), (2 * 3600 + 45 * 60, 6 * 3600)]);
       final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
-      expect(sessions, hasLength(2));
-      expect(sessions.first.end, lessThan(2 * 3600 + 45 * 60));
-      expect(sessions.last.start, greaterThanOrEqualTo(2 * 3600 + 45 * 60));
+      expect(sessions, hasLength(1));
+      expect(sessions.single.start, lessThan(60));
+      expect(sessions.single.end, greaterThan(8 * 3600 + 40 * 60));
     });
   });
 
