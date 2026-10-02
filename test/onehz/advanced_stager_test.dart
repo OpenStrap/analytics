@@ -44,6 +44,20 @@ void main() {
     return (grav: grav, hr: hr, rr: rr, nightStart: nightStart, nightEnd: nightEnd);
   }
 
+  // Still wrist at a sleeping HR over each (start, secs) block, nothing
+  // recorded between blocks.
+  ({List<GravTs> grav, List<HrTs> hr}) stillBlocks(List<(int, int)> blocks) {
+    final grav = <GravTs>[];
+    final hr = <HrTs>[];
+    for (final (start, secs) in blocks) {
+      for (var i = 0; i < secs; i++) {
+        grav.add(GravTs(start + i, 0.001 * math.sin(i * 0.01), 0, 1));
+        hr.add(HrTs(start + i, 52));
+      }
+    }
+    return (grav: grav, hr: hr);
+  }
+
   group('AdvancedSleepStager detection + 4-class staging (default: cardio)', () {
     test('still low-HR night → one session with a 4-class hypnogram', () {
       final d = build(2, 7, 1);
@@ -99,21 +113,9 @@ void main() {
     });
 
     test('a recording gap cannot merge a short rest into the next night', () {
-      final grav = <GravTs>[];
-      final hr = <HrTs>[];
-      void still(int start, int duration) {
-        for (var i = 0; i < duration; i++) {
-          final ts = start + i;
-          grav.add(GravTs(ts, 0.001 * math.sin(i * 0.01), 0, 1));
-          hr.add(HrTs(ts, 52));
-        }
-      }
-
-      still(0, 10 * 60);
       const nextNight = 18 * 3600;
-      still(nextNight, 6 * 3600);
-
-      final sessions = AdvancedSleepStager.detectSleep(grav, hr);
+      final d = stillBlocks([(0, 10 * 60), (nextNight, 6 * 3600)]);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
       expect(sessions, hasLength(1));
       expect(sessions.single.start, greaterThanOrEqualTo(nextNight));
       expect(sessions.single.end - sessions.single.start,
@@ -121,20 +123,8 @@ void main() {
     });
 
     test('endpoint HR alone cannot corroborate a sparse motion gap', () {
-      final grav = <GravTs>[];
-      final hr = <HrTs>[];
-      void still(int start, int duration) {
-        for (var i = 0; i < duration; i++) {
-          final ts = start + i;
-          grav.add(GravTs(ts, 0.001 * math.sin(i * 0.01), 0, 1));
-          hr.add(HrTs(ts, 52));
-        }
-      }
-
-      still(0, 2 * 3600);
-      still(2 * 3600 + 45 * 60, 6 * 3600);
-
-      final sessions = AdvancedSleepStager.detectSleep(grav, hr);
+      final d = stillBlocks([(0, 2 * 3600), (2 * 3600 + 45 * 60, 6 * 3600)]);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
       expect(sessions, hasLength(2));
       expect(sessions.first.end, lessThan(2 * 3600 + 45 * 60));
       expect(sessions.last.start, greaterThanOrEqualTo(2 * 3600 + 45 * 60));

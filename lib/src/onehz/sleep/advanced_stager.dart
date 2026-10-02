@@ -551,8 +551,7 @@ class AdvancedSleepStager {
     return median([for (final h in hr) h.bpm]);
   }
 
-  static bool _hrSleepBandAcross(
-      int a, int b, List<HrTs> hr, double? baseline) {
+  static bool _hrSleepBandAcross(int a, int b, List<HrTs> hr, double? baseline) {
     if (baseline == null || b <= a || b - a > sparseBridgeGapMin * 60) {
       return false;
     }
@@ -560,9 +559,7 @@ class AdvancedSleepStager {
       for (final h in hr)
         if (h.ts >= a && h.ts <= b) h
     ];
-    // One HR sample at the far edge of an unrecorded interval is not evidence
-    // that the wrist was worn throughout it. Require cardiac coverage across
-    // the entire gravity gap before joining the sleep runs.
+    // HR has to cover the whole gravity gap, not just one edge of it.
     if (seg.length < 2 ||
         seg.first.ts - a > hrDenseSpacingS ||
         b - seg.last.ts > hrDenseSpacingS) return false;
@@ -654,9 +651,7 @@ class AdvancedSleepStager {
         i += 1;
         continue;
       }
-      // _buildRuns splits on a recording gap. Smoothing a short period must
-      // never undo that split: otherwise a few minutes before a long outage
-      // can stretch the next night's sleep across hours with no samples.
+      // never smooth across a recording gap _buildRuns split on.
       final hasPrev = merged.isNotEmpty &&
           current.start - merged.last.end <= maxObservedGapS;
       final hasNext = i + 1 < pending.length &&

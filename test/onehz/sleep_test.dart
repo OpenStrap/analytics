@@ -684,9 +684,8 @@ void main() {
         hr.add(72 + (i % 5).toDouble());
         t += 1000.0;
       }
-      final s =
-          segmentSleep(accel, hr,
-              hrBaseline: List<double>.filled(60, 72), tzOffsetSec: 0);
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(60, 72), tzOffsetSec: 0);
       expect(s.present, isTrue);
       // The 30-min block (1800 s) must be counted as wake/WASO, not bridged.
       // Allow epoch/HR-dip edge trimming but require most of the 30-min block
