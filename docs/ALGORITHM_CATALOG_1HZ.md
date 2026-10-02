@@ -3,8 +3,24 @@
 Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian, respiration/SpO₂, motion, temp/fusion-anomaly). Every method is **deterministic / statistical / signal-processing / clinical — no ML**. Each is tagged by the signal it needs, whether it runs **24/7** (flash 1 Hz substrate) or **FG** (foreground high-rate only), and a confidence tier.
 
 ## The substrate (what feeds these)
-**24/7 @ 1 Hz** (always, incl. overnight): HR; **beat-to-beat RR (0–4/s, ms)**; tri-axial accel (one vector/s); PPG green/red/IR ADC; relative SpO₂ red/IR ADC; relative skin-temp ADC; ambient light; skin-contact quality.
-**Foreground only** (high rate, app streaming): accel ~100 Hz; gyro ~100 Hz (±2000 dps); optical PPG waveform ~419 Hz.
+Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart`, `README.md`). Status: **verified** = checked against a real worn band / corpus; **layout** = a real decode of bytes at a known offset for the v24/v12 record layout, meaning not independently validated (`histVersion` is a layout marker, not a firmware build or sensor identity); **derived** = computed from verified inputs; **unsupported** = no usable input today. Field names are not evidence of what a signal measures.
+
+| Input | Rate / source | Status |
+|---|---|---|
+| HR | 1 Hz, R24 v24/v12 (other versions at a per-version offset, behind a plausibility gate; 0 on v25) | verified |
+| Beat-to-beat RR (0–4/s, ms) | 1 Hz, R24 v24/v12 only (absent on every other version) | verified |
+| Tri-axial accel (one vector/s) | 1 Hz, R24 v24/v12 + other versions that pass the plausibility gate (absent on v25) | layout; relative, not calibrated to 1 g |
+| Green PPG ADC (`ppgGreen`) | 1 Hz, R24 v24/v12 | layout; raw relative |
+| Red/IR ADC (`spo2RedRaw`/`spo2IrRaw`) | 1 Hz, R24 v24/v12 | layout; relative SpO₂ only, never a %. The two bytes move as one signal, so a red/IR ratio is low confidence |
+| "Ambient" ADC (`ambientRaw`) | 1 Hz, R24 v24/v12 | layout; raw counts, not validated as light |
+| Skin temperature (`skinTempRaw`) | 1 Hz, R24 v24/v12 | layout; raw ADC counts, not verified as temperature (the protocol deprecates the field: it moves 5–10 counts/s). Used only relative to personal baseline, never °C. Gated on the night's settled fraction by `nightlySkinTemp` (default) and the readiness composite |
+| Skin contact / wear | none | **unsupported**: `skinContact` is deprecated (a float's exponent byte) |
+| `ppgRedIr` | none | **unsupported**: deprecated, straddles a float32, noise |
+| v25 record | ~24 Hz PPG bursts (13–27 s, ~every 20 min) in history | timestamp only; no HR/accel/optical decode |
+| Accel + gyro (±2000 dps) | ~100 Hz, live R10 (foreground) | layout |
+| R11 | two ~50 Hz int32 channels, live | **unsupported**: meaning unconfirmed |
+| High-rate optical PPG waveform | none | **unsupported**: no decoded foreground PPG stream |
+| HRV, RSA respiration, sleep window, motion index | computed from the rows above | derived (inherits the weakest input's status) |
 
 ## The structural edge
 **Continuous 24/7 beat-to-beat RR.** Most wearables only get RR in brief spot-checks; we have it all night, every night. This alone unlocks an entire class of Holter-grade methods (24-h SDNN, ULF/VLF spectra, PRSA deceleration capacity, autonomic cosinor) that spot-check devices physically cannot compute.
@@ -13,7 +29,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 1. **PRV, not ECG-HRV** — pulse-rate variability; validate before any clinical claim.
 2. **1 Hz timing quantization** biases successive-difference metrics (RMSSD, pNNx) and the HF band most → lead with long-window/averaging metrics.
 3. **1 Hz accel can't do steps/cadence/gait/frequency-classification** (Nyquist: gait is 1.4–2.5 Hz > 0.5 Hz limit). Only an amplitude index + static orientation survive 24/7.
-4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline.
+4. **Relative signals**: no absolute SpO₂ %, no absolute °C / fever — only deviations, dips, trends vs personal baseline. On WHOOP 4 the only temperature input is the raw `skinTempRaw` ADC (layout, see substrate table): temp-based items below run on it relative-only, never as °C. Only `nightlySkinTemp` (by default) and the readiness composite apply the settled-fraction gate; the rest score whatever nightly series they are given. SpO₂ is supported as a relative signal only.
 5. **Sleep staging** from wrist is at best a 3-class autonomic *estimate*, never PSG 4-stage.
 6. **ACWR** is descriptive ("load vs your norm") only — not injury prediction (Lolli 2019 / Impellizzeri 2020).
 
@@ -26,7 +42,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 | **RR artifact correction** | Lipponen & Tarvainen 2019 dRR detector (Kubios auto). Cubic-spline isolated beats; **flag-and-drop multi-beat runs, never interpolate** (Peltola 2012). | All HRV/RR, CVHR, PRSA, RSA-respiration |
 | **PPG signal-quality gate** | Elgendi 2016 skewness-SQI (cheap, 1 Hz-OK) + Orphanidou 2015 physiological-range rules. Template-matching = FG only. | All PPG/SpO₂/resp |
 | **Robust personal baseline** | median + MAD (Leys 2013; Iglewicz-Hoaglin mod-z, flag |M|>3.5); clamped, gap-aware **EWMA** (Roberts 1959, λ↔half-life); coverage-gate ≥3/7 valid (Plews 2014); surface change only beyond **SWC & TE** (Hopkins 2000). Guard MAD=0 on quantized data. | Every anomaly/readiness/trend |
-| **Honest fusion / uncertainty** | Inverse-variance fusion (Aitken 1935) weighted by the **contact-quality/SNR channel**; GUM uncertainty propagation for confidence bands. **Gate biased PPG motion artifact OUT, don't just down-weight.** | Readiness, any multi-signal index |
+| **Honest fusion / uncertainty** | Inverse-variance fusion (Aitken 1935) weighted by a per-input quality/SNR estimate (there is no contact-quality field on WHOOP 4); GUM uncertainty propagation for confidence bands. **Gate biased PPG motion artifact OUT, don't just down-weight.** | Readiness, any multi-signal index |
 
 ---
 
@@ -42,7 +58,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 - **NightSignal FSM + CUSUM/EWMA on RHR** — Alavi 2022 / Mishra 2020 (28-day baseline, designed ARL, yellow→red persistence). Best wearable-validated deterministic illness alarm. `24/7 · HIGH`
 - **TRIMP (Banister) + CTL/ATL/TSB** — Banister; Morton 1990. Needs measured HRmax + RHR. Guard non-wear gaps. `24/7 · HIGH`
 
-### Sleep & circadian (accel + HR + RR + temp + light)
+### Sleep & circadian (accel + HR + RR; temp and ambient are layout-only on WHOOP 4)
 - **van Hees / GGIR angle sleep-window** — 2015/2018. Count-FREE, gravity-orientation @1 Hz is ample. **THE sleep/wake spine** (sidesteps the Cole-Kripke count-calibration trap). `24/7 · HIGH`
 - **True Phillips SRI** — epoch-by-epoch 24-h concordance (Phillips 2017), NOT SD-of-midsleep. `24/7 · HIGH`
 - **Cardiopulmonary Coupling (CPC)** — Thomas 2005; RR + RSA/RIIV respiration surrogate (substitute for EDR). Sleep-stability spectrogram + apnea-risk; plays to continuous RR. `24/7 · MED-HIGH`
@@ -51,9 +67,9 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 
 ### Respiration & SpO₂ (PPG + RR)
 - **RSA respiratory rate from RR** — Lomb-Scargle HF-peak; Pimentel 2017 AR-order robustness. *Primary 24/7 respiration source.* `24/7 · HIGH`
-- **RIIV respiratory rate** — band-pass 0.1–0.5 Hz on 1 Hz green ADC; fuse with RSA via Karlen SD-gate. `24/7 · MED`
+- **RIIV respiratory rate** — band-pass 0.1–0.5 Hz on 1 Hz green ADC; fuse with RSA via Karlen SD-gate. `24/7 · MED (layout-dependent: v24/v12 only)`
 - **CVHR / ACAT apnea screen** — Hayano 2011. RR-only, r≈0.84 vs AHI, zero calibration. Screen, not diagnosis; report night-to-night variability. `24/7 (run on RR) · HIGH for screening`
-- **Relative-R index + relative ODI** — ratio-of-ratios as rolling AC/DC (TI SLAA655); self-referential dip-count desaturation event rate. **Never display %SpO₂.** `24/7 · MED (relative only)`
+- **Relative-R index + relative ODI** — ratio-of-ratios as rolling AC/DC (TI SLAA655); self-referential dip-count desaturation event rate. **Never display %SpO₂.** `24/7 · LOW (relative only)`: on WHOOP 4 the red/IR bytes move as one signal.
 - **Breathing-rate variability (BRV)** trend. `24/7 · MED`
 
 ### Motion / energy (1 Hz accel + HR)
@@ -62,10 +78,12 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 - **Branched HR-accel energy fusion** — Brage 2004 (we have both inputs @1 Hz). Quantitative only with per-user HR calibration, else strong relative EE curve. `24/7 · MED`
 
 ### Temperature / multi-signal
-- **Wrist circadian-temp: cosinor + IS/IV/RA/L5/M10** — Sarabia/Madrid 2008. Best-matched to our relative single-site sensor; no calibration. **Antiphase to core** — de-mask with activity/ambient. `24/7 · MED-HIGH (phase only)`
+> **WHOOP 4: temperature is the raw `skinTempRaw` ADC** (layout; not verified as temperature). The temp items below run on it in ADC counts vs personal baseline, per-device calibrated (`temp_circadian.dart`); never °C. `nightlySkinTemp` returns absent (`unsettled_skin_temp`) when the night's settled fraction is below `kMinSettledFraction` (0.80) by default, so with defaults it gives a settled mean or null. Edge passes `minSettledFraction: 0` to keep the fraction and gates it in the readiness composite's `tempInput` instead. The illness flag, coverline, anomaly and glass-box readiness take a plain nightly series and apply no settled gate themselves.
+
+- **Wrist circadian-temp: cosinor + IS/IV** (RA/L5/M10 withheld: the series is median-centred, so the RA denominator can cross zero) — Sarabia/Madrid 2008. Per-sample cosinor with a motion de-mask, no settled gate; not wired in the app yet. Best-matched to our relative single-site sensor; no calibration. **Antiphase to core** — de-mask with activity/ambient. `24/7 · MED-HIGH (phase only)`
 - **Skin-temp z-score illness flag** — Smarr 2020 (relative, personal baseline). **Must be cycle-aware** (luteal +0.3 °C ≈ fever). Fuse, don't trust alone. `24/7 · MED`
 - **Menstrual 3-over-6 / coverline** on nightly-mean temp — Shilaih 2018 (wrist, ~0.33 °C). Retrospective ovulation *confirmation* only, never forward prediction. `24/7 · MED`
-- **Honest readiness composite** — per-metric percentile/z to personal baseline → sign-orient → weighted sum (HRV>RHR>RR>temp) → SWC/TE gate. Reweight on missing inputs, don't zero. `24/7 · MED`
+- **Honest readiness composite** — per-metric percentile/z to personal baseline → sign-orient → weighted sum (HRV>RHR>RR>temp; on WHOOP 4 temp is refused below 0.80 settled fraction) → SWC/TE gate. Reweight on missing inputs, don't zero. `24/7 · MED`
 - **Change-point**: PELT-MBIC weekly retro review (Killick 2012, min-seg ≥7 d) + BOCPD online with heavy-tailed predictive (Adams-MacKay 2007). `24/7 · MED`
 
 ### Shared cross-cutting engines (implement once, reuse everywhere)
@@ -76,19 +94,20 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 
 ---
 
-## LAYER 2 — Foreground-only (live spot-check tier, high-rate accel/gyro/PPG)
-- **Karlen Smart-Fusion RR** (RIIV+RIAV+RIFV, 419 Hz PPG) — reference-grade spot breathing rate.
+## LAYER 2 — Foreground-only (live spot-check tier, ~100 Hz accel/gyro + live RR)
+- **Karlen Smart-Fusion RR** (RIIV+RIAV+RIFV) — needs a high-rate PPG waveform. `UNSUPPORTED on WHOOP 4` (no decoded foreground PPG).
 - **Autocorrelation cadence + step/stride regularity & symmetry** (Moe-Nilssen 2004) — robust gait.
 - **AN-2554 / windowed peak-detection step counter** (100 Hz accel) — gate to ambulation; wrist over/under-count caveats (Tudor-Locke).
 - **Madgwick / Mahony quaternion orientation** — limb tracking during workouts.
 - **Frequency-domain activity typing** (dominant freq + spectral entropy, Wang 2009) — walk/run/cycle.
 - **DFA-α1 aerobic threshold** (Rogers 2020) — needs RR at <3% artifact; best on clean foreground/rest reads.
-- **Lázaro pulse-decomposition RR / pulse-width** (419 Hz) — spot breathing-pattern.
+- **Lázaro pulse-decomposition RR / pulse-width** — needs a high-rate PPG waveform. `UNSUPPORTED on WHOOP 4`.
 
 ---
 
 ## DO NOT SHIP (infeasible or refuted on our data)
 - Absolute SpO₂ % / absolute °C fever (relative signals).
+- Anything built on `skinContact`, `ppgRedIr`, or R11 channels (see substrate table). `skinTempRaw` only relative to personal baseline: never °C.
 - 1 Hz step counts / cadence / gait / frequency activity classification (Nyquist).
 - Cole-Kripke / Sadeh / Oakley raw coefficients on 1 Hz as a STANDALONE sleep/wake SCORE (count-calibration invalid; ZCM aliased away) — use van Hees + recalibrated ENMO surrogate. NOTE / documented exception: `advanced_stager.dart` (see the `ckWeights` comment block) does run the classic Cole-Kripke weights, but ONLY as an internal within-window onset/final-wake + sleep-epoch-subset SPINE, never as a final stage label; the hypnogram is produced by the Stage 1-3 HR/HRV/RR feature classifier + physiology reimposition, which corrects it. That deviation is deliberate and bounded — it does not violate this rule, which forbids shipping raw CK as the actual sleep/wake output.
 - ACWR/EWMA-ACWR as injury prediction (Lolli/Impellizzeri) — descriptive only.
@@ -99,7 +118,7 @@ Synthesized from 6 independent literature reviews (HRV, cardiac, sleep/circadian
 2. Nocturnal RHR → NightSignal/CUSUM illness; van Hees sleep window → SRI/WASO.
 3. lnRMSSD readiness stack + PRSA-DC + Lomb-Scargle 24-h spectrum (the RR structural edge).
 4. ENMO motion index + gravity-tilt sleep position; RSA + RIIV respiration; CVHR apnea screen.
-5. Cosinor/IS-IV-RA circadian (HR/activity/temp); relative-ODI; menstrual coverline; readiness composite; TRIMP/CTL-ATL-TSB.
+5. Cosinor/IS-IV-RA circadian (HR/activity); relative-ODI; readiness composite; TRIMP/CTL-ATL-TSB. (Temp circadian, menstrual coverline: relative ADC counts on WHOOP 4, no settled gate of their own.)
 
 ---
 
@@ -122,15 +141,15 @@ The clinical core computes *metrics*; this layer turns them into things a regula
 - **Sleep debt vs personal need** [PUB, Kitamura 2016] — OSD from rebound on unconstrained nights; replaces the "8 hours" trope; honest when no free night yet.
 - **Nap detection + quality** [HEUR detect; PUB length guidance] — HR-floor + sustained immobility *together* (kill false positives — stillness ≠ sleep); 10–26 min good, >30 min inertia, late/long erodes tonight.
 - **"Your best hours"** [PUB two-process structure; HEUR personalization] — peak ≈ wake+4–7 h, dip ≈ wake+8–9 h; present as ranges, don't over-claim cognition.
-- **"You went to bed too late" / wind-down** [PUB Kräuchi DPG→onset; HEUR single-site wrist temp] — body-ready time (HR drop + HRV rise + distal-temp rise) vs actual onset. *Preachiness landmine — frame as "runway left," suppress after social nights.*
+- **"You went to bed too late" / wind-down** [PUB Kräuchi DPG→onset; HEUR single-site wrist temp] — body-ready time (HR drop + HRV rise; distal-temp rise needs an evening temp trend the gated nightly WHOOP 4 ADC can't give) vs actual onset. *Preachiness landmine — frame as "runway left," suppress after social nights.*
 - **Jet-lag tracker** [PUB re-entrainment rates ~1 h/day E, ~1.5 h/day W; HEUR acrophase-drift meter] — progress bar + soft ETA; noisy first 2 days.
-- **Light hygiene** [PUB targets Brown 2022; HEUR wrist] — **timing/direction only** ("got morning light? evening much brighter than baseline?"), never absolute lux (photopic wrist ≠ melanopic eye).
+- **Light hygiene** [PUB targets Brown 2022; HEUR wrist] — **timing/direction only** ("got morning light? evening much brighter than baseline?"), never absolute lux (photopic wrist ≠ melanopic eye). WHOOP 4 `ambientRaw` is layout: raw counts not validated as light, so direction only.
 
 ## B. Acute-event / substance detection (24/7) — state confident, cause soft
 - **Alcohol-night flag** [PUB, Pietilä 2018 dose-graded: HR +1.4/+4.0/+8.7 bpm, RMSSD −2/−5.7/−12.9 ms, recovery −9/−24/−39 pts] — *strongest detector.* Single-night signature; report state confidently, "alcohol" as tag-confirmable. *Ship.*
-- **Illness onset / "take it easy"** [PUB, Mishra/Snyder 2020 RHRAD+CUSUM, 63% pre-symptom] — gate behind **multi-night persistence + ≥2 of {RHR↑,temp↑,resp↑} + cycle-awareness.** Dangerous if ungated.
+- **Illness onset / "take it easy"** [PUB, Mishra/Snyder 2020 RHRAD+CUSUM, 63% pre-symptom] — gate behind **multi-night persistence + ≥2 of {RHR↑,temp↑,resp↑} + cycle-awareness** (the temp flag applies no settled gate itself, so the caller must pass a settled nightly series). Dangerous if ungated.
 - **Daytime stress load via aHR** [PUB, aHR = HR − accel-predicted HR, adj R²=0.76] — ship the **daily aggregate/longest-stretch trend**, never pinpoint minutes (episode precision ~0.31). Valence (stress vs excitement) NOT recoverable — never assert.
-- **Sauna / cold-plunge** [PUB physiology; HEUR detect] — HR↑ + temp↑ + motion≈0 (sauna) / abrupt temp↓ (plunge); sharp edges separate from fever. Label "thermal exposure," relative temp.
+- **Sauna / cold-plunge** [PUB physiology; HEUR detect] — HR↑ + temp↑ + motion≈0 (sauna) / abrupt temp↓ (plunge); sharp edges separate from fever. Label "thermal exposure," relative temp. `UNSUPPORTED on WHOOP 4` (needs a temp edge within minutes; the raw ADC is only usable as a gated nightly mean).
 - **Orthostatic stand-ΔHR trend** [PUB POTS ≥30 bpm as outlier flag] — stand transition from accel; ship as personal trend nudge (hydration/recovery), never diagnosis.
 - **Caffeine / late-meal** [PUB mechanism; HEUR detect] — **tag-only / low-confidence** (confound with everything; weak objective wearable effect).
 - **"Rough night" descriptor** [HEUR] — the safe fallback whenever attribution fails; describes, never diagnoses.
@@ -138,7 +157,7 @@ The clinical core computes *metrics*; this layer turns them into things a regula
 
 ## C. Real-time interactive (foreground) — motion-gated, within-user only
 - **Resonance-frequency breathing biofeedback** [PUB, Lehrer/Vaschillo 2000] — RF assessment (4.5–6.5 br/min) + live peak-valley RSA bar. *Grade A, daily-habit hook. Ship first of this group.*
-- **Morning spot-HRV / readiness check** [PUB ultra-short RMSSD, Munoz 2015] — deliberate 60–180 s seated 419 Hz read; the device's *best* HRV (beats passive overnight); within-device trend only.
+- **Morning spot-HRV / readiness check** [PUB ultra-short RMSSD, Munoz 2015] — deliberate 60–180 s seated read on live RR; the device's *best* HRV (beats passive overnight); within-device trend only.
 - **Honest "coherence" game** [PUB signal] — reframe HeartMath as resonance RSA ("your heart is following your breath"); strip the heart-brain-coherence mysticism (Billman 2013).
 - **Meditation effectiveness delta** [PUB physiology; HEUR composite] — paired pre/post RMSSD/HR on matched windows.
 - **Live workout: cadence + zones + HRR** [PUB autocorr cadence RRACE; ACSM zones; HRR] — motion-based → PPG-robust; flag PPG-HR unreliability under hard motion.
@@ -149,7 +168,7 @@ The clinical core computes *metrics*; this layer turns them into things a regula
 ## D. Self-quantification / narrative (24/7) — glass-box only
 - **Percentile-of-you + records + streaks** [PUB order-statistics] — n-of-1, no validity exposure, instantly motivating. Gate records by MDC; prefer aggregates over single-night bests. *Ship first of this group.*
 - **MDC-gated nudging** [PUB reliability] — the credibility backbone; silence budget; suppress during illness/travel.
-- **Glass-box Readiness 0–100** [PUB HRV centrality; HEUR weighting] — personal-percentile inputs (HRV>RHR>RR>temp) → always show the per-input breakdown + "why."
+- **Glass-box Readiness 0–100** [PUB HRV centrality; HEUR weighting] — personal-percentile inputs (HRV>RHR>RR>temp; no settled-fraction gate on temp here, unlike the readiness composite) → always show the per-input breakdown + "why."
 - **Deterministic narrative (NOT LLM)** [HEUR, standard decomposition] — rank drivers by standardized deviation `|w_i·z_i|`; "why" is *definitional within the formula you control* (correct for the score, not an inferred cause). Only name a driver past its MDC.
 - **Trend + change-point** [PUB Theil-Sen + Mann-Kendall + CUSUM/PELT] — on smoothed aggregates only; require significance (don't celebrate regression-to-mean).
 - **Fitness age** [PUB norms: VO₂max Uth/Tanaka, HRV Nunan 2010] — **VO₂max-based only, ± band, name the driver**; never a clinical vascular-age claim (no lipids/BP).
