@@ -552,8 +552,13 @@ class AdvancedSleepStager {
   }
 
   static bool _hrSleepBandAcross(int a, int b, List<HrTs> hr, double? baseline) {
-    if (baseline == null) return false;
-    final seg = [for (final h in hr) if (h.ts > a && h.ts <= b) h.bpm];
+    if (baseline == null || b <= a || b - a > sparseBridgeGapMin * 60) {
+      return false;
+    }
+    // No interior-coverage requirement: segmentSleep only has HR on accel rows,
+    // so a real hole has HR at its two edges and nothing inside. segmentSleep
+    // stamps those seconds 'unobserved'; the 90-min cap above bounds the bridge.
+    final seg = [for (final h in hr) if (h.ts >= a && h.ts <= b) h.bpm];
     if (seg.isEmpty) return false;
     final meanHr = seg.reduce((x, y) => x + y) / seg.length;
     return meanHr <= baseline * hrSleepBandMult;
@@ -628,6 +633,7 @@ class AdvancedSleepStager {
 
   static List<_Period> _mergePeriods(List<_Period> periods, int mergeMinutes) {
     final thresholdS = mergeMinutes * 60;
+    const maxObservedGapS = maxGapMin * 60;
     final pending = [...periods];
     final merged = <_Period>[];
     var i = 0;
@@ -639,10 +645,13 @@ class AdvancedSleepStager {
         i += 1;
         continue;
       }
-      final hasPrev = i > 0 && merged.isNotEmpty;
-      final hasNext = i + 1 < pending.length;
+      // never smooth across a recording gap _buildRuns split on.
+      final hasPrev = merged.isNotEmpty &&
+          current.start - merged.last.end <= maxObservedGapS;
+      final hasNext = i + 1 < pending.length &&
+          pending[i + 1].start - current.end <= maxObservedGapS;
       final bridgesSame =
-          hasPrev && hasNext && pending[i - 1].stage == pending[i + 1].stage;
+          hasPrev && hasNext && merged.last.stage == pending[i + 1].stage;
       if (bridgesSame) {
         final prev = merged.removeLast();
         merged.add(_Period(prev.stage, prev.start, pending[i + 1].end));
@@ -656,6 +665,7 @@ class AdvancedSleepStager {
         merged.add(_Period(prev.stage, prev.start, current.end));
         i += 1;
       } else {
+        merged.add(current);
         i += 1;
       }
     }
