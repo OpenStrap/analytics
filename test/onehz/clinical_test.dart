@@ -52,6 +52,65 @@ void main() {
       expect(clean.value!.pnn50, isNotNull);
     });
 
+    test('HRV-02: slow-heart RSA near Nyquist is not jitter', () {
+      // HR 45, breathing every 2.5 beats (18 br/min) — diff-ACF1 ≈ cos(0.8π)
+      // ≈ −0.8, under the floor, yet the high band is one respiratory line.
+      final rnd = math.Random(3);
+      final rr = <double>[
+        for (var i = 0; i < 4800; i++)
+          1333 + 30 * math.sin(2 * math.pi * i / 2.5) + (rnd.nextDouble() - 0.5) * 10
+      ];
+      final ts = <double>[];
+      var t = 0.0;
+      for (final v in rr) {
+        t += v;
+        ts.add(t);
+      }
+      final h = hrvTime(rr, nnTimesMs: ts);
+      expect(h.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+      expect(h.value!.rmssd, isNotNull);
+      expect(nocturnalRmssd(rr, ts).present, isTrue);
+      final ss = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: (t / 1000).floor());
+      expect(ss.present, isTrue);
+      expect(ss.value, closeTo(40.3, 2), reason: '√2·30·sin(0.4π)');
+    });
+
+    test('HRV-02: long jitter stays refused through the spectral check', () {
+      final rnd = math.Random(5);
+      final white = <double>[
+        for (var i = 0; i < 4800; i++) 1000 + (rnd.nextDouble() - 0.5) * 120
+      ];
+      // Beat-TIME jitter: RR = base + e[i] − e[i−1], ACF1 ≈ −2/3, high-band
+      // power rising to Nyquist rather than flat.
+      final e = [for (var i = 0; i <= 4800; i++) (rnd.nextDouble() - 0.5) * 60];
+      final timing = [for (var i = 1; i <= 4800; i++) 1333 + e[i] - e[i - 1]];
+      // Strict alternation is a line AT Nyquist — refused, not called RSA.
+      final alt = [for (var i = 0; i < 4800; i++) 1333.0 + (i.isEven ? 30 : -30)];
+      for (final s in [white, timing, alt]) {
+        final m = hrvTime(s);
+        expect(m.value!.diffAcf1!, lessThan(kNnDiffAcf1Floor));
+        expect(m.value!.rmssd, isNull);
+        expect(m.note, contains('rmssd_refused:acf1='));
+      }
+      expect(nnDiffNoiseShare([
+        [for (var i = 1; i < white.length; i++) white[i] - white[i - 1]]
+      ])!, greaterThan(kNnDiffNoiseShareCeiling));
+    });
+
+    test('HRV-02: normal-HR RSA is untouched by the jitter gate', () {
+      // HR 60, 15 br/min = 4 beats/breath: ACF1 ≈ 0, never reaches the
+      // spectral check.
+      final rnd = math.Random(9);
+      final rr = <double>[
+        for (var i = 0; i < 2400; i++)
+          1000 + 30 * math.sin(2 * math.pi * i / 4) + (rnd.nextDouble() - 0.5) * 10
+      ];
+      final m = hrvTime(rr);
+      expect(m.value!.diffAcf1!, greaterThan(kNnDiffAcf1Floor));
+      expect(m.value!.rmssd, closeTo(30, 2), reason: '√2·30·sin(π/4)');
+    });
+
     test('HRV-02: confidence carries jitter and artifact, not beat count alone',
         () {
       // It used to be clamp(n/250, .3, .95), which published 0.95 on all 13

@@ -72,6 +72,83 @@ double? nnDiffAcf1(List<List<double>> diffRuns) {
   return varSum > 0 ? cov / varSum : null;
 }
 
+/// White-noise share of the mean squared successive difference above which a
+/// night that failed [kNnDiffAcf1Floor] stays refused. Same line as the floor:
+/// with acf-neutral physiology, ACF1 ≈ −0.5 × share, so −0.35 ↔ 0.7.
+const double kNnDiffNoiseShareCeiling = 0.7;
+
+/// Share of the mean squared successive difference that a FLAT (white) RR noise
+/// floor accounts for: 2σ² / mean(d²), with σ² read as the median of the
+/// beat-indexed Welch spectrum (64-beat Hann, 50 % overlap, Welch 1967) over
+/// 0.15–0.5 cycles/beat. ~1 for white or differenced-white timing jitter; well
+/// below 1 when the high band is a respiratory line on a low floor.
+///
+/// Why ACF1 alone is not enough: RSA is a line at (breaths/min ÷ HR) cycles per
+/// beat, and differencing a line at f gives ACF1 = cos 2πf. At a resting HR
+/// in the 40s and 18–20 breaths/min that is ~0.4 cycles/beat, ACF1 ≈ −0.8 —
+/// below the floor on a clean night, so the floor locked out slow hearts.
+/// Ceiling: a line AT Nyquist (breathing at exactly half the heart rate) is an
+/// alternation, indistinguishable from detector alternation, and stays refused.
+///
+/// Null (no verdict) on fewer than 20 segments or a peak at Nyquist.
+double? nnDiffNoiseShare(List<List<double>> diffRuns) {
+  const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
+  final w = [
+    for (var i = 0; i < n; i++) 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
+  ];
+  var w2 = 0.0;
+  for (final x in w) {
+    w2 += x * x;
+  }
+  final psd = List<double>.filled(kHi + 1, 0.0);
+  var segs = 0, nd = 0;
+  var ssd = 0.0;
+  for (final r in diffRuns) {
+    // Integrate the run back to RR levels (up to a constant the mean removes).
+    final x = List<double>.filled(r.length + 1, 0.0);
+    for (var i = 0; i < r.length; i++) {
+      x[i + 1] = x[i] + r[i];
+      ssd += r[i] * r[i];
+      nd++;
+    }
+    for (var s = 0; s + n <= x.length; s += n ~/ 2) {
+      var m = 0.0;
+      for (var i = 0; i < n; i++) {
+        m += x[s + i];
+      }
+      m /= n;
+      for (var k = kLo; k <= kHi; k++) {
+        var re = 0.0, im = 0.0;
+        for (var i = 0; i < n; i++) {
+          final v = (x[s + i] - m) * w[i];
+          final a = 2 * math.pi * k * i / n;
+          re += v * math.cos(a);
+          im -= v * math.sin(a);
+        }
+        psd[k] += re * re + im * im;
+      }
+      segs++;
+    }
+  }
+  if (segs < 20 || ssd == 0) return null;
+  final band = psd.sublist(kLo);
+  var peak = 0;
+  for (var k = 1; k < band.length; k++) {
+    if (band[k] > band[peak]) peak = k;
+  }
+  if (peak + kLo >= kHi - 1) return null; // Nyquist alternation, see above
+  final floor = median(band)! / segs / w2;
+  return 2 * floor / (ssd / nd);
+}
+
+/// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND
+/// the spectrum does not show a respiratory line on a low white floor.
+bool _jitterRefused(double? acf1, List<List<double>> runs) {
+  if (acf1 == null || acf1 >= kNnDiffAcf1Floor) return false;
+  final share = nnDiffNoiseShare(runs);
+  return share == null || share >= kNnDiffNoiseShareCeiling;
+}
+
 /// Confidence multiplier for a measured [acf1]: 1.0 on a smooth tachogram,
 /// falling linearly to 0 at [kNnDiffAcf1Floor] so confidence bottoms out
 /// exactly where RMSSD is refused. 1.0 when ACF1 could not be measured.
@@ -177,7 +254,7 @@ Metric<HrvTime> hrvTime(
   // the audit corpus) — they keep publishing, which is what the header has
   // always advised.
   final acf1 = nnDiffAcf1(runs);
-  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
+  final jittery = _jitterRefused(acf1, runs);
   final rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
   final pnn50 = (pairs > 0 && !jittery) ? 100.0 * nn50 / pairs : null;
   final sdnn = stddev(nnMs);
@@ -219,7 +296,7 @@ Metric<HrvTime> hrvTime(
     tier: Tier.high,
     inputs_used: inputs,
     note: jittery
-        ? '${_jitterNote(acf1)}. SDNN/SDANN survive it and are the lead here. '
+        ? '${_jitterNote(acf1!)}. SDNN/SDANN survive it and are the lead here. '
             'PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
             '— lead with SDNN/SDANN',
@@ -321,11 +398,11 @@ Metric<double> nocturnalRmssd(
     rmssds.add(math.sqrt(ssd / nd));
   }
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
+  if (_jitterRefused(acf1, runs)) {
     return Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: _jitterNote(acf1),
+      note: _jitterNote(acf1!),
     );
   }
   if (rmssds.isEmpty) {
@@ -435,11 +512,11 @@ Metric<double> sleepSessionWindowedRmssd(
   // are noise, the honest output is no headline, not a plausible one — the
   // readiness composite already treats a null HRV driver as absent.
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
+  if (_jitterRefused(acf1, runs)) {
     return Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: _jitterNote(acf1),
+      note: _jitterNote(acf1!),
     );
   }
   if (rmssds.isEmpty) {
