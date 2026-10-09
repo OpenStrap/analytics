@@ -3,6 +3,36 @@ import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+/// Respiratory sinus arrhythmia: NN sampled at its own beat times, so the
+/// breathing phase advances by the beat's real duration. Noise-free.
+List<double> rsaNn({
+  required double hrBpm,
+  required double respBrpm,
+  required double ampMs,
+  int beats = 3000,
+}) {
+  final base = 60000.0 / hrBpm, f = respBrpm / 60.0;
+  final out = <double>[];
+  var tSec = 0.0;
+  for (var i = 0; i < beats; i++) {
+    final v = base + ampMs * math.sin(2 * math.pi * f * tSec);
+    out.add(v);
+    tSec += v / 1000.0;
+  }
+  return out;
+}
+
+/// Cumulative beat-END times (ms) for [nn], starting at [t0Ms].
+List<double> beatEnds(List<double> nn, {double t0Ms = 0}) {
+  final out = <double>[];
+  var t = t0Ms;
+  for (final v in nn) {
+    t += v;
+    out.add(t);
+  }
+  return out;
+}
+
 void main() {
   group('time-domain HRV (hand-computed)', () {
     test('RMSSD/SDNN/pNN50 on a constant-then-stepped NN series', () {
@@ -466,6 +496,253 @@ void main() {
       expect(clean.pnn50, 0.0);
       // SDNN is a dispersion of levels, not of differences — unaffected.
       expect(clean.sdnn, closeTo(seamed.sdnn!, 1e-12));
+    });
+  });
+
+  group('RR over-count gate (Σ RR ÷ wall span)', () {
+    test('one beat per second reads 1.0; every beat duplicated reads 2.0', () {
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0]; // 20 min
+      final ts = [for (var i = 0; i < 1200; i++) 1e12 + (i + 1) * 1000.0];
+      final c = rrCoverage(rr, ts)!;
+      expect(c.coverage, closeTo(1.0, 1e-9));
+      expect(c.overCounted, isFalse);
+      expect(c.beats, 1200);
+      expect(c.duplicateBeats, 0);
+      final rr2 = [for (final v in rr) ...[v, v]];
+      final ts2 = [for (final t in ts) ...[t, t]];
+      final d = rrCoverage(rr2, ts2)!;
+      expect(d.coverage, closeTo(2.0, 1e-9));
+      expect(d.overCounted, isTrue);
+      expect(d.duplicateBeats, 1200);
+      expect(d.toJson()['rr_coverage'], closeTo(2.0, 1e-9));
+    });
+
+    test('under 10 min, mismatched or too few beats: null', () {
+      final rr = [for (var i = 0; i < 500; i++) 1000.0];
+      final ts = [for (var i = 0; i < 500; i++) (i + 1) * 1000.0];
+      expect(rrCoverage(rr, ts), isNull);
+      expect(rrCoverage([1000.0], [1000.0]), isNull);
+      expect(rrCoverage(rr, ts.sublist(1)), isNull);
+    });
+
+    test('an implausible interval is counted, never summed', () {
+      // One 65 535 ms glitch would otherwise fake an over-count.
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0]..[600] = 65535.0;
+      final ts = [for (var i = 0; i < 1200; i++) (i + 1) * 1000.0];
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.coverage, closeTo(1199 / 1200, 1e-9));
+      expect(c.overCounted, isFalse);
+    });
+
+    test('an implausible FIRST interval cannot widen the span', () {
+      // Every 8th beat duplicated reads 1.125 and is refused. A 65 535 ms
+      // glitch as the first interval used to stretch the span by 64.5 s while
+      // never being summed, and the same stream read ~1.07 and passed.
+      final rr = <double>[], ts = <double>[];
+      for (var i = 0; i < 1200; i++) {
+        final t = 1e12 + (i + 1) * 1000.0;
+        rr.add(1000.0);
+        ts.add(t);
+        if (i % 8 == 7) {
+          rr.add(1000.0);
+          ts.add(t);
+        }
+      }
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(1.125, 1e-3));
+      expect(rrCoverage(rr, ts)!.overCounted, isTrue);
+      rr[0] = 65535.0;
+      final c = rrCoverage(rr, ts)!;
+      expect(c.implausibleBeats, 1);
+      expect(c.overCounted, isTrue, reason: 'coverage ${c.coverage}');
+    });
+
+    test('a gappy night reads well under 1 and is never refused for it', () {
+      final rr = [for (var i = 0; i < 1200; i++) 1000.0];
+      final ts = [
+        for (var i = 0; i < 1200; i++) (i + 1) * 1000.0 + (i >= 600 ? 1.2e6 : 0)
+      ];
+      expect(rrCoverage(rr, ts)!.coverage, closeTo(0.5, 1e-9));
+    });
+
+    test('the headline refuses an over-counted session', () {
+      // HR 60 / 12 br/min: the jitter screen keeps it, so the over-count is
+      // the only thing under test.
+      final rr = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 25200);
+      final ts = beatEnds(rr, t0Ms: 1e12);
+      final startSec = (ts.first / 1000).floor();
+      final endSec = (ts.last / 1000).ceil() + 1;
+      final ok = sleepSessionRmssdDetail(rr, ts,
+          startSec: startSec, endSec: endSec);
+      expect(ok.present, isTrue, reason: ok.note);
+      expect(ok.value!.rmssd,
+          sleepSessionWindowedRmssd(rr, ts, startSec: startSec, endSec: endSec)
+              .value);
+      expect(ok.value!.rrCoverage!, closeTo(1.0, 0.01));
+      expect(ok.value!.windows, greaterThan(80));
+      expect(ok.value!.toJson()['rr_coverage'], closeTo(1.0, 0.01));
+
+      final rr2 = [for (final v in rr) ...[v, v]];
+      final ts2 = [for (final t in ts) ...[t, t]];
+      final dup = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: startSec, endSec: endSec);
+      expect(dup.present, isFalse);
+      expect(dup.note, startsWith('rr_overcount:coverage='));
+      expect(
+          sleepSessionWindowedRmssd(rr2, ts2,
+                  startSec: startSec, endSec: endSec)
+              .present,
+          isFalse);
+
+      final c = rrCoverage(rr2, ts2)!;
+      final h = hrvTime(rr2, coverage: c);
+      expect(h.value!.rmssd, isNull);
+      expect(h.value!.pnn50, isNull);
+      expect(h.value!.sdnn, isNotNull, reason: 'SDNN survives');
+      expect(h.note, startsWith('rr_overcount:coverage='));
+      final n = nocturnalRmssd(rr2, ts2, coverage: c);
+      expect(n.present, isFalse);
+      expect(n.note, startsWith('rr_overcount:coverage='));
+    });
+
+    test('an over-counted stream is not rescued by the breathing fallback',
+        () {
+      // A slow heart drifting 50 ± 8 bpm over a 3 h cycle, breathing steady at
+      // 18 br/min, beat-time jitter 20 ms: the pooled jitter gate refuses it
+      // and hrvTime keeps it through its breathing-line fallback. If the raw
+      // RR it was cleaned from banks more beat-time than elapsed, the stream
+      // is not one heart's beats: no fallback either.
+      final rnd = math.Random(0);
+      final nn = <double>[], t = <double>[];
+      var ms = 0.0, e0 = 0.0;
+      while (ms < 6 * 3600e3) {
+        final base = 60000 / (50 + 8 * math.sin(2 * math.pi * ms / 10800e3));
+        final e1 = (rnd.nextDouble() - 0.5) * 20;
+        final v = base + 10 * math.sin(2 * math.pi * 0.3 * ms / 1000) + e1 - e0;
+        e0 = e1;
+        ms += v;
+        nn.add(v);
+        t.add(ms);
+      }
+      final rescued = hrvTime(nn, nnTimesMs: t);
+      expect(rescued.value!.rmssd, isNotNull);
+      expect(rescued.note, contains('steady in Hz'),
+          reason: 'the fallback path is what is under test');
+      final raw2 = [for (final v in nn) ...[v, v]];
+      final t2 = [for (final x in t) ...[x, x]];
+      final c = rrCoverage(raw2, t2)!;
+      expect(c.overCounted, isTrue);
+      final h = hrvTime(nn, nnTimesMs: t, coverage: c);
+      expect(h.value!.rmssd, isNull);
+      expect(h.value!.sdnn, isNotNull);
+      expect(h.confidence, 0.3);
+      expect(h.note, startsWith('rr_overcount:coverage='));
+    });
+
+    test('a duplicated stretch is caught per window even when a gap dilutes '
+        'the night', () {
+      // 4 h of honest beats, a 2 h strap-off gap, then 2 h with every beat
+      // stored twice: Σ RR equals the 8 h span, so the night-wide ratio reads
+      // ≈ 1.0 and passes. Each 5-min window of the duplicated stretch banks
+      // ~600 s in 300 s and is dropped. A window straddling the start of the
+      // stretch banks ≤ 110 % and may stay — the ceiling's own tolerance.
+      final clean = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 14400);
+      final ts = beatEnds(clean, t0Ms: 1e12);
+      final dupNn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 7200);
+      final dupTs = beatEnds(dupNn, t0Ms: ts.last + 2 * 3600e3);
+      final rr = [...clean, for (final v in dupNn) ...[v, v]];
+      final t = [...ts, for (final x in dupTs) ...[x, x]];
+      final startSec = (t.first / 1000).floor();
+      final endSec = (t.last / 1000).ceil() + 1;
+      expect(rrCoverage(rr, t)!.overCounted, isFalse,
+          reason: 'the gap dilutes the night-wide ratio');
+      final honest = sleepSessionRmssdDetail(clean, ts,
+          startSec: startSec, endSec: endSec);
+      final d = sleepSessionRmssdDetail(rr, t,
+          startSec: startSec, endSec: endSec);
+      expect(d.present, isTrue, reason: d.note);
+      expect(d.value!.overCountedWindows, greaterThanOrEqualTo(23));
+      expect(d.value!.toJson()['overcounted_windows'],
+          d.value!.overCountedWindows);
+      expect(d.value!.windows - honest.value!.windows, inInclusiveRange(0, 1));
+      expect(d.value!.rmssd, closeTo(honest.value!.rmssd, 0.02 * honest.value!.rmssd));
+      // Only the duplicated stretch: absent, and the note says why.
+      final only = sleepSessionRmssdDetail(
+          [for (final v in dupNn) ...[v, v]], [for (final x in dupTs) ...[x, x]],
+          startSec: (dupTs.first / 1000).floor(),
+          endSec: (dupTs.last / 1000).ceil() + 1);
+      expect(only.present, isFalse);
+      expect(only.note, startsWith('rr_overcount'));
+    });
+
+    test('a duplicated tail in the session\'s short last window is caught',
+        () {
+      // 4 h of honest beats, a 2 h gap, then 2 min with every beat stored
+      // twice, and the session ends 2 min into that last 5-min window. The
+      // tail banks ~240 s — under 110 % of a full window, but twice the time
+      // its window actually has.
+      final clean = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 14400);
+      final ts = beatEnds(clean, t0Ms: 1e12);
+      final startSec = (ts.first / 1000).floor();
+      final tailNn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 120);
+      final tailTs = beatEnds(tailNn, t0Ms: (startSec + 72 * 300 + 1) * 1000.0);
+      final rr = [...clean, for (final v in tailNn) ...[v, v]];
+      final t = [...ts, for (final x in tailTs) ...[x, x]];
+      final endSec = (t.last / 1000).ceil() + 1;
+      expect(endSec - (startSec + 72 * 300), lessThan(150));
+      expect(rrCoverage(rr, t)!.overCounted, isFalse,
+          reason: 'the gap dilutes the night-wide ratio');
+      final honest = sleepSessionRmssdDetail(clean, ts,
+          startSec: startSec, endSec: endSec);
+      final d = sleepSessionRmssdDetail(rr, t,
+          startSec: startSec, endSec: endSec);
+      expect(d.present, isTrue, reason: d.note);
+      expect(d.value!.overCountedWindows, 1);
+      expect(d.value!.windows, honest.value!.windows);
+      expect(d.value!.rmssd, honest.value!.rmssd);
+      // The same tail stored once is honest beat-time and stays in.
+      final once = sleepSessionRmssdDetail([...clean, ...tailNn], [...ts, ...tailTs],
+          startSec: startSec, endSec: endSec);
+      expect(once.value!.overCountedWindows, 0);
+      expect(once.value!.windows, honest.value!.windows + 1);
+    });
+
+    test('coverage does not depend on the order the beats arrive in', () {
+      final rr = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 1200);
+      final ts = beatEnds(rr, t0Ms: 1e12);
+      final sorted = rrCoverage(rr, ts)!;
+      final idx = [for (var i = 0; i < rr.length; i++) i]
+        ..shuffle(math.Random(1));
+      final shuffled = rrCoverage(
+          [for (final i in idx) rr[i]], [for (final i in idx) ts[i]])!;
+      expect(shuffled.coverage, closeTo(sorted.coverage, 1e-12));
+      expect(shuffled.spanSec, closeTo(sorted.spanSec, 1e-9));
+    });
+
+    test('the nightly HRV shape is absent on an over-counted stream', () {
+      final nn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 25200);
+      final t = beatEnds(nn, t0Ms: 1e12);
+      expect(nightHrvShape(nn, t).present, isTrue);
+      final c = rrCoverage(
+          [for (final v in nn) ...[v, v]], [for (final x in t) ...[x, x]])!;
+      final s = nightHrvShape(nn, t, coverage: c);
+      expect(s.present, isFalse);
+      expect(s.note, startsWith('rr_overcount:coverage='));
+      expect(nightHrvShape(nn, t, coverage: rrCoverage(nn, t)).present, isTrue);
+    });
+
+    test('no coverage handed over, or an honest one: no change', () {
+      final nn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30);
+      final t = beatEnds(nn, t0Ms: 1e12);
+      final c = rrCoverage(nn, t)!;
+      expect(c.overCounted, isFalse);
+      final a = hrvTime(nn, nnTimesMs: t);
+      final b = hrvTime(nn, nnTimesMs: t, coverage: c);
+      expect(b.value!.rmssd, a.value!.rmssd);
+      expect(b.confidence, a.confidence);
+      expect(b.note, a.note);
+      expect(nocturnalRmssd(nn, t, coverage: c).value,
+          nocturnalRmssd(nn, t).value);
     });
   });
 

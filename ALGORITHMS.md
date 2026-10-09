@@ -56,7 +56,8 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 |---|---|---|---|
 | `hrvTime` | `clinical/hrv_time.dart` | RMSSD/SDNN/pNNx | standard time-domain HRV |
 | `nocturnalRmssd` | `clinical/hrv_time.dart` | median-of-5-min-window nightly RMSSD | — |
-| `sleepSessionWindowedRmssd` | `clinical/hrv_time.dart` | mean-of-5-min-window RMSSD with Malik ectopic rejection | Malik et al. |
+| `sleepSessionWindowedRmssd` / `sleepSessionRmssdDetail` | `clinical/hrv_time.dart` | mean-of-5-min-window RMSSD with Malik ectopic rejection | Malik et al. |
+| `rrCoverage` | `clinical/hrv_time.dart` | Σ plausible RR ÷ wall-clock span; > 1.10 means duplicated or interleaved beats, and `hrvTime` / `nocturnalRmssd` / `nightHrvShape` / the sleep-session headline refuse RMSSD; the headline also drops any 5-min window holding more beat-time than its length | — (integrity check; contiguous runs measure 0.963–1.001) |
 | `hrvFreq` | `clinical/hrv_freq.dart` | LF/HF via Lomb-Scargle periodogram on native (unevenly-sampled) beat times | Laguna, Moody & Mark 1998; Bigger 1992 |
 | `decelerationCapacity` / `accelerationCapacity` | `clinical/prsa.dart` | Phase-rectified signal averaging (DC/AC) | Bauer et al. 2006 |
 | `nocturnalRhr` / `hrDip` | `clinical/nocturnal.dart` | nocturnal resting HR + dip classification | — |

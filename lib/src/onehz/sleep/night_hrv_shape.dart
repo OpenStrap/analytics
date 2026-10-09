@@ -110,13 +110,27 @@ const int kMinBeatsPerHrvBin = 300;
 /// [binMin] is the bin width; the IDEAS entry says to widen to 45–60 min if
 /// 30-min bins look wobbly on real nights, so it is a parameter, not a
 /// constant.
+///
+/// [coverage] is [rrCoverage] of the raw RR this NN was cleaned from; when it
+/// is [RrCoverage.overCounted] the shape is absent, as every RMSSD is.
 Metric<NightHrvShape> nightHrvShape(
   List<double> nnMs,
   List<double> nnTimesMs, {
   double binMin = 30,
   int minBeatsPerBin = kMinBeatsPerHrvBin,
+  RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
+  // Every bin is an RMSSD of the same stream: if its raw RR banks more
+  // beat-time than elapsed (duplicated or interleaved beats), no bin is one
+  // heart's variability, and a shape drawn from them is not either.
+  if (coverage != null && coverage.overCounted) {
+    return Metric<NightHrvShape>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: rrOvercountNote(coverage),
+    );
+  }
   if (nnMs.length != nnTimesMs.length || nnMs.length < minBeatsPerBin) {
     return Metric<NightHrvShape>.absent(
       tier: Tier.high,
