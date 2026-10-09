@@ -563,6 +563,23 @@ void main() {
         for (var i = 0; i < 1200; i++) (i + 1) * 1000.0 + (i >= 600 ? 1.2e6 : 0)
       ];
       expect(rrCoverage(rr, ts)!.coverage, closeTo(0.5, 1e-9));
+      // A real night with a 30-min strap-off gap: every estimator the
+      // coverage reaches still publishes.
+      final nn = rsaNn(hrBpm: 60, respBrpm: 12, ampMs: 30, beats: 3600);
+      final t0 = beatEnds(nn.sublist(0, 1800), t0Ms: 1e12);
+      final t1 = beatEnds(nn.sublist(1800), t0Ms: t0.last + 1800e3);
+      final t = [...t0, ...t1];
+      final c = rrCoverage(nn, t)!;
+      expect(c.coverage, lessThan(0.7));
+      final h = hrvTime(nn, nnTimesMs: t, coverage: c);
+      expect(h.value!.rmssd, isNotNull, reason: h.note);
+      final n = nocturnalRmssd(nn, t, coverage: c);
+      expect(n.present, isTrue, reason: n.note);
+      final d = sleepSessionRmssdDetail(nn, t,
+          startSec: (t.first / 1000).floor(),
+          endSec: (t.last / 1000).ceil() + 1);
+      expect(d.present, isTrue, reason: d.note);
+      expect(d.value!.rrCoverage!, lessThan(0.7));
     });
 
     test('the headline refuses an over-counted session', () {
@@ -717,6 +734,15 @@ void main() {
           [for (final i in idx) rr[i]], [for (final i in idx) ts[i]])!;
       expect(shuffled.coverage, closeTo(sorted.coverage, 1e-12));
       expect(shuffled.spanSec, closeTo(sorted.spanSec, 1e-9));
+      // Exact (ts, rr) repeats are counted wherever they sit.
+      final dupRr = [for (final v in rr) ...[v, v]];
+      final dupTs = [for (final x in ts) ...[x, x]];
+      final dIdx = [for (var i = 0; i < dupRr.length; i++) i]
+        ..shuffle(math.Random(2));
+      final dupShuffled = rrCoverage(
+          [for (final i in dIdx) dupRr[i]], [for (final i in dIdx) dupTs[i]])!;
+      expect(rrCoverage(dupRr, dupTs)!.duplicateBeats, 1200);
+      expect(dupShuffled.duplicateBeats, 1200);
     });
 
     test('the nightly HRV shape is absent on an over-counted stream', () {
@@ -1525,6 +1551,8 @@ void main() {
         startSec: 1,
         endSec: 601,
         windowSec: 300,
+        // mechanics test: window size is not what is under test
+        minDiffsPerWindow: 1,
       );
       expect(m.present, isTrue);
       expect(m.value,
@@ -1543,7 +1571,9 @@ void main() {
         for (var i = 0; i < 10; i++) 1000.0 + i * 1000.0,
         301000, 302000,
       ];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 601);
+      // The exclusion mechanics at a small floor; the default is tested below.
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 601, minDiffsPerWindow: 5);
       expect(m.present, isTrue);
       expect(m.value, closeTo(10.0, 1e-9));
     });
@@ -1551,7 +1581,9 @@ void main() {
     test('drops out-of-range and Malik-style ectopic beats before RMSSD', () {
       final rr = <double>[1000, 1000, 1000, 1000, 200, 1000, 1000, 1000];
       final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9));
     });
@@ -1565,7 +1597,9 @@ void main() {
       // (87.7 -> 58.2, 82.9 -> 53.0, 76.9 -> 48.4 ms) and 2-13 % on gen4.
       final rr = <double>[900, 900, 900, 900, 200, 1000, 1000, 1000];
       final ts = <double>[for (var i = 0; i < 8; i++) 1000.0 + i * 1000.0];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
           reason: '2 runs of flat beats, no seam difference');
@@ -1600,10 +1634,111 @@ void main() {
         1000, 2000, 3000, 4000, // flat run before the gap
         123000, 124000, 125000, // flat run after a ~2 min dropout
       ];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       expect(m.value, closeTo(0.0, 1e-9),
           reason: 'two flat runs, no cross-gap difference manufactured');
+    });
+
+    // Six full 5-min windows of a smooth oscillation (period 12 beats, ±16 ms;
+    // per-window RMSSD 2·16·sin(π/12)/√2 = 5.856 ms). 1800 beats are exactly
+    // 1 800 000 ms, so the last one ends at second 1800, alone in window 6.
+    const sixStart = 1000000000; // windows are (tsSec − sixStart) ~/ 300
+    final sixRr = [
+      for (var i = 0; i < 1800; i++) 1000.0 + 16.0 * math.sin(2 * math.pi * i / 12)
+    ];
+    final sixTs = beatEnds(sixRr, t0Ms: sixStart * 1000.0);
+
+    test('a 9-difference window with a 300 ms jump cannot move the headline',
+        () {
+      // Window 7 (seconds 2100–2399) holds 10 beats: five at 1000 ms, five at
+      // 1300 ms. Nine differences, one of them a 300 ms step across an
+      // arousal (window RMSSD 100 ms); every beat passes the range and Malik
+      // filters. Under a floor of 5 it counted as much as a full window.
+      final extra = [for (var i = 0; i < 10; i++) i < 5 ? 1000.0 : 1300.0];
+      final rr2 = [...sixRr, ...extra];
+      final ts2 = [...sixTs, ...beatEnds(extra, t0Ms: (sixStart + 2110) * 1000.0)];
+      final base = sleepSessionWindowedRmssd(sixRr, sixTs,
+          startSec: sixStart, endSec: sixStart + 1800);
+      final thin = sleepSessionWindowedRmssd(rr2, ts2,
+          startSec: sixStart, endSec: sixStart + 2400);
+      expect(base.present && thin.present, isTrue);
+      expect(base.value!, closeTo(5.86, 0.05));
+      expect(thin.value!, closeTo(base.value!, 1e-9),
+          reason: 'was (6 × 5.86 + 100) / 7 ≈ 19.3 under a floor of 5');
+      final old = sleepSessionWindowedRmssd(rr2, ts2,
+          startSec: sixStart, endSec: sixStart + 2400, minDiffsPerWindow: 5);
+      expect(old.present, isTrue, reason: old.note);
+      expect(old.value!, closeTo((6 * base.value! + 100) / 7, 0.01));
+      final d = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: sixStart, endSec: sixStart + 2400);
+      expect(d.value!.windows, 6);
+      // Window 7, and window 6, whose one stray beat has no difference at all.
+      expect(d.value!.thinWindows, 2);
+      expect(d.value!.minDiffsPerWindow, kMinDiffsPerRmssdWindow);
+      expect(d.value!.toJson()['thin_windows'], 2);
+      expect(d.value!.toJson()['min_diffs_per_window'], 20);
+      expect(d.note, contains('2 window(s) had fewer than 20'),
+          reason: 'a published headline says what it dropped');
+    });
+
+    test('a discarded thin window does not reach the pooled ACF1 verdict', () {
+      // The floor drops a thin window from the MEAN; it must drop it from the
+      // jitter screen's pooled differences too. A 20-beat window (19
+      // differences, under the floor) alternating 910/1090 ms carries far
+      // more difference power than the six clean windows: pooled, it would
+      // drag ACF1 from ~0.866 to ~−0.78 and refuse a night it is not part of.
+      final extra = [for (var i = 0; i < 20; i++) i.isEven ? 910.0 : 1090.0];
+      final rr2 = [...sixRr, ...extra];
+      final ts2 = [...sixTs, ...beatEnds(extra, t0Ms: (sixStart + 2110) * 1000.0)];
+      final base = sleepSessionRmssdDetail(sixRr, sixTs,
+          startSec: sixStart, endSec: sixStart + 2400);
+      final thin = sleepSessionRmssdDetail(rr2, ts2,
+          startSec: sixStart, endSec: sixStart + 2400);
+      expect(base.present && thin.present, isTrue, reason: thin.note);
+      expect(thin.value!.thinWindows, base.value!.thinWindows + 1);
+      expect(thin.value!.windows, base.value!.windows);
+      expect(thin.value!.rmssd, closeTo(base.value!.rmssd, 1e-9));
+      expect(thin.value!.diffAcf1!, closeTo(0.863, 0.01));
+      expect(thin.value!.diffAcf1!, closeTo(base.value!.diffAcf1!, 1e-12));
+      expect(thin.confidence, base.confidence);
+    });
+
+    test('19 differences do not count, 20 do', () {
+      ({List<double> rr, List<double> ts}) window(int beats) {
+        final rr = [
+          for (var i = 0; i < beats; i++)
+            1000.0 + 16.0 * math.sin(2 * math.pi * i / 12)
+        ];
+        return (rr: rr, ts: beatEnds(rr, t0Ms: 1000.0));
+      }
+
+      final a = window(21); // 20 Δ
+      final ma = sleepSessionRmssdDetail(a.rr, a.ts, startSec: 1, endSec: 301);
+      expect(ma.present, isTrue, reason: ma.note);
+      expect(ma.value!.windows, 1);
+      expect(ma.value!.thinWindows, 0);
+      final b = window(20); // 19 Δ
+      final mb = sleepSessionWindowedRmssd(b.rr, b.ts, startSec: 1, endSec: 301);
+      expect(mb.present, isFalse);
+      expect(mb.note, startsWith('no valid 5-min windows'));
+      expect(mb.note, contains('fewer than 20'));
+    });
+
+    test('the floor is a parameter', () {
+      final rr = [
+        for (var i = 0; i < 20; i++)
+          1000.0 + 16.0 * math.sin(2 * math.pi * i / 12)
+      ];
+      final m = sleepSessionWindowedRmssd(rr, beatEnds(rr, t0Ms: 1000.0),
+          startSec: 1, endSec: 301, minDiffsPerWindow: 19);
+      expect(m.present, isTrue);
+    });
+
+    test('kMinDiffsPerRmssdWindow is 20', () {
+      expect(kMinDiffsPerRmssdWindow, 20);
     });
 
     test('HRV-gap: no gap means no change (control)', () {
@@ -1611,7 +1746,9 @@ void main() {
       // gap) — the fix must not shrink a window that has nothing to exclude.
       final rr = <double>[900, 900, 900, 1000, 1000, 1000];
       final ts = <double>[1000, 2000, 3000, 4000, 5000, 6000];
-      final m = sleepSessionWindowedRmssd(rr, ts, startSec: 1, endSec: 301);
+      // mechanics test: window size is not what is under test
+      final m = sleepSessionWindowedRmssd(rr, ts,
+          startSec: 1, endSec: 301, minDiffsPerWindow: 1);
       expect(m.present, isTrue);
       // One real seam difference (900 -> 1000 = 100 ms) survives; RMSSD = 100
       // over that single difference (the rest are 0).
