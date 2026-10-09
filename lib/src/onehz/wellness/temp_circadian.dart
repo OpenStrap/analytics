@@ -83,13 +83,21 @@ class TempCircadian {
 /// and still be skin. All three are sensor properties, not physiology.
 class _TempCal {
   final String unit;
-  final double motionGate; // g of |‖a‖ − 1| above which an epoch is masked
+
+  /// g of |‖a‖ − 1| above which an epoch is masked. Null = the family sends
+  /// no accelerometer with its temperature (a ring), so nothing is masked.
+  final double? motionGate;
   /// One-sided settle band, in [unit]: a sample more than this far BELOW the
   /// night's median is not settled skin (see [nightlySkinTemp]). Null = this
   /// family has no measured band, so the settled mean REFUSES for it rather
   /// than borrow gen4's counts.
   final double? settleBandLow;
-  const _TempCal(this.unit, this.motionGate, this.settleBandLow);
+
+  /// True when [settleBandLow] was set on synthetic nights, not real ones:
+  /// the settled mean is then served at half confidence and says so.
+  final bool provisional;
+  const _TempCal(this.unit, this.motionGate, this.settleBandLow,
+      {this.provisional = false});
 }
 
 const Map<String, _TempCal> _tempCal = {
@@ -106,6 +114,18 @@ const Map<String, _TempCal> _tempCal = {
   // exactly what device.dart's contract forbids. Fill this in from gen5 nights,
   // not from arithmetic.
   'gen5': _TempCal('centi_c', 0.04, null),
+  // The rings (Ultrahuman, Colmi, Oura): finger skin temperature in centi-°C,
+  // one reading per 5-minute record (Colmi: per 30-minute slot; Oura: per
+  // temperature event), no accelerometer beside it. PROVISIONAL, set on synthetic nights because no real ring
+  // night exists yet (test/onehz/wellness_test.dart, "ring settle band"):
+  // a settled finger night sits within ~0.3 °C of its own median with a
+  // ~1.5 °C rise over the first half hour after onset, while a ring that is
+  // loose or just put on reads 2-5 °C low. 150 centi-°C keeps every clean
+  // synthetic night whole and trims every cold segment. Replace from real
+  // ring nights, the way gen4's 40 counts were measured.
+  'ultrahuman': _TempCal('centi_c', null, 150.0, provisional: true),
+  'colmi': _TempCal('centi_c', null, 150.0, provisional: true),
+  'oura': _TempCal('centi_c', null, 150.0, provisional: true),
 };
 
 /// A nightly skin-temp mean that knows how much of the night it is made of.
@@ -119,11 +139,16 @@ class SettledSkinTemp {
 
   /// `adc_counts` (gen4) or `centi_c` (gen5). Never °C on screen.
   final String unit;
-  const SettledSkinTemp(this.mean, this.settledFraction, this.unit);
+
+  /// The family's settle band was set on synthetic nights ([_TempCal]).
+  final bool provisional;
+  const SettledSkinTemp(this.mean, this.settledFraction, this.unit,
+      {this.provisional = false});
   Map<String, dynamic> toJson() => {
         'mean': round6(mean),
         'settled_fraction': round6(settledFraction),
         'unit': unit,
+        if (provisional) 'provisional': true,
       };
 }
 
@@ -199,14 +224,17 @@ Metric<SettledSkinTemp> nightlySkinTemp(
     );
   }
   return Metric<SettledSkinTemp>(
-    value: SettledSkinTemp(mean(kept)!, frac, cal.unit),
-    confidence: frac.clamp(0.0, 1.0),
+    value: SettledSkinTemp(mean(kept)!, frac, cal.unit,
+        provisional: cal.provisional),
+    confidence: frac.clamp(0.0, 1.0) * (cal.provisional ? 0.5 : 1.0),
     tier: Tier.relative,
     inputs_used: inputs,
     note: 'RELATIVE nightly skin-temp mean over the SETTLED portion only '
         '(${round6(frac)} of valid samples, band ${cal.settleBandLow} '
         '${cal.unit} below the night median; one-sided so a fever passes). '
-        'Unit is ${cal.unit} — never °C, never compared across families.',
+        'Unit is ${cal.unit} — never °C, never compared across families.'
+        '${cal.provisional ? ' PROVISIONAL band (synthetic nights, no real '
+            'night of this family yet): half confidence.' : ''}',
   );
 }
 
@@ -251,7 +279,7 @@ Metric<TempCircadian> tempCircadian(
   for (var i = 0; i < samples.length; i++) {
     final s = samples[i];
     if (!s.valid) continue;
-    if (accel != null && i < accel.length) {
+    if (gate != null && accel != null && i < accel.length) {
       final a = accel[i];
       if (a.valid) {
         final mag = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
@@ -297,8 +325,8 @@ Metric<TempCircadian> tempCircadian(
     inputs_used: accel == null ? inputs : [...inputs, 'accel'],
     note: 'RELATIVE skin-temp phase only (no °C/fever/core). Wrist temp is '
         'ANTIPHASE to core; activity-demasked epochs dropped=$deMasked '
-        '(gate=${gate}g). Amplitude is in ${cal.unit} — never compare it '
-        'across device families. M10/L5/RA are WITHHELD: the series is '
+        '(gate=${gate == null ? 'none, no accel' : '${gate}g'}). Amplitude '
+        'is in ${cal.unit} — never compare it across device families. M10/L5/RA are WITHHELD: the series is '
         'median-centred, so RA divides by a quantity that crosses zero.',
   );
 }

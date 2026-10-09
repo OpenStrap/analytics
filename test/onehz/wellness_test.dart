@@ -977,6 +977,133 @@ void main() {
     });
   });
 
+  // The rings' PROVISIONAL settle band (temp_circadian.dart `_tempCal`), set
+  // on synthetic nights since no real ring night exists yet. A night is 90
+  // five-minute records in centi-°C: a plateau with a slow drift and ±0.2 °C
+  // jitter, entered through a half-hour vasodilation ramp from 1.5 °C below.
+  group('ring settle band (synthetic, provisional)', () {
+    List<AdcSample> ringNight({
+      double plateau = 3520,
+      int coldFrom = 0,
+      int coldRecords = 0,
+      double coldDrop = 300,
+    }) =>
+        [
+          for (var i = 0; i < 90; i++)
+            AdcSample(
+              i * 300000.0,
+              (i >= coldFrom && i < coldFrom + coldRecords)
+                  ? plateau - coldDrop
+                  : plateau -
+                      (i < 6 ? 150.0 * (6 - i) / 6 : 0.0) + // onset ramp
+                      30.0 * math.sin(i / 90 * math.pi) + // slow drift
+                      (i % 3 - 1) * 20.0, // jitter
+            ),
+        ];
+
+    test('every clean night stays whole, at half confidence', () {
+      for (final fam in ['ultrahuman', 'colmi']) {
+        for (final plateau in [3350.0, 3520.0, 3600.0]) {
+          final m = nightlySkinTemp(ringNight(plateau: plateau),
+              deviceFamily: fam, minSamples: 12);
+          expect(m.present, isTrue, reason: m.note);
+          expect(m.value!.settledFraction, greaterThanOrEqualTo(0.95));
+          expect(m.value!.provisional, isTrue);
+          expect(m.confidence, lessThanOrEqualTo(0.5));
+          expect(m.value!.toJson()['provisional'], isTrue);
+        }
+      }
+    });
+
+    test('a cold segment 2 °C or more low is trimmed, 25 % of one refuses',
+        () {
+      for (final drop in [200.0, 300.0, 500.0]) {
+        final m = nightlySkinTemp(
+            ringNight(coldFrom: 30, coldRecords: 12, coldDrop: drop),
+            deviceFamily: 'ultrahuman',
+            minSamples: 12);
+        expect(m.present, isTrue, reason: m.note);
+        // All 12 cold records go; the coolest onset record may go with them.
+        expect(m.value!.settledFraction, inInclusiveRange(77 / 90, 78 / 90));
+        expect(m.value!.mean, greaterThan(3480));
+      }
+      final cold = nightlySkinTemp(
+          ringNight(coldFrom: 30, coldRecords: 23, coldDrop: 300),
+          deviceFamily: 'colmi',
+          minSamples: 12);
+      expect(cold.present, isFalse);
+      expect(cold.note, startsWith('unsettled_skin_temp:'));
+    });
+
+    // A cold record has to clear the band by a margin, and a settled one sit
+    // inside it by a margin: neither side rests on a value placed on the edge.
+    test('the band has room on both sides of a clean night', () {
+      for (final fam in ['ultrahuman', 'colmi']) {
+        // A gentler 1 °C onset keeps every record.
+        final soft = [
+          for (final s in ringNight())
+            AdcSample(
+                s.tsMs,
+                s.adc +
+                    (s.tsMs < 6 * 300000
+                        ? 50.0 * (6 - s.tsMs / 300000) / 6
+                        : 0.0))
+        ];
+        final m = nightlySkinTemp(soft, deviceFamily: fam, minSamples: 12);
+        expect(m.value!.settledFraction, 1.0, reason: fam);
+        // A ring 1.8 °C low for an hour (well past the band) is all trimmed.
+        final c = nightlySkinTemp(
+            ringNight(coldFrom: 40, coldRecords: 12, coldDrop: 180),
+            deviceFamily: fam,
+            minSamples: 12);
+        expect(c.value!.settledFraction, lessThanOrEqualTo(78 / 90));
+      }
+    });
+
+    // Colmi's real shape: one reading per 30-minute slot, repeated on each of
+    // the slot's six 5-minute HR rows, so one cold slot is six identical lows.
+    List<AdcSample> colmiNight({Set<int> coldSlots = const {}}) => [
+          for (var j = 0; j < 15; j++)
+            for (var k = 0; k < 6; k++)
+              AdcSample(
+                (j * 6 + k) * 300000.0,
+                coldSlots.contains(j)
+                    ? 3520.0 - 300
+                    : 3520.0 -
+                        (j == 0 ? 100.0 : 0.0) + // onset slot
+                        30.0 * math.sin(j / 15 * math.pi) +
+                        (j % 3 - 1) * 20.0,
+              ),
+        ];
+
+    test('Colmi slots: one cold slot drops its six rows, four refuse', () {
+      expect(
+          nightlySkinTemp(colmiNight(), deviceFamily: 'colmi', minSamples: 12)
+              .value!
+              .settledFraction,
+          1.0);
+      expect(
+          nightlySkinTemp(colmiNight(coldSlots: {7}),
+                  deviceFamily: 'colmi', minSamples: 12)
+              .value!
+              .settledFraction,
+          84 / 90);
+      final cold = nightlySkinTemp(colmiNight(coldSlots: {5, 6, 7, 8}),
+          deviceFamily: 'colmi', minSamples: 12);
+      expect(cold.present, isFalse);
+      expect(cold.note, startsWith('unsettled_skin_temp:'));
+    });
+
+    test('gen4 is not provisional and keeps its JSON', () {
+      final m = nightlySkinTemp(
+          [for (var i = 0; i < 100; i++) AdcSample(i * 1000.0, 805.0)],
+          deviceFamily: 'gen4');
+      expect(m.value!.provisional, isFalse);
+      expect(m.confidence, 1.0);
+      expect(m.value!.toJson().containsKey('provisional'), isFalse);
+    });
+  });
+
   group('tempInput settled gate (RD-05)', () {
     List<double> around(double c) =>
         [for (var i = 0; i < 14; i++) c + (i.isEven ? 1.0 : -1.0)];
