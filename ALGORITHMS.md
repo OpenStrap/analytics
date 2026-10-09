@@ -90,7 +90,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 ### `respiration/`
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `rsaRespRate` | `respiration/resp_rate.dart` | respiratory sinus arrhythmia — HF spectral peak of the RR series | — |
+| `rsaRespRate` | `respiration/resp_rate.dart` | respiratory sinus arrhythmia — HF spectral peak of the RR series: Lomb–Scargle on native beat times in 300 s Welch sub-windows (≥ 80 % covered by clean beats), median across them with an agreement gate; beat-rate Nyquist from the median NN | Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker & Strackee 1984 |
 | `riivRespRate` / `fuseRespRate` | `respiration/resp_rate.dart` | respiration-induced intensity variation, fused with the RSA estimate | Pimentel et al. (multi-grid RIIV fusion) |
 | `cvhrApnea` / `cvhrApneaScreen` | `respiration/cvhr_apnea.dart` | cyclic-variation-in-HR apnea screening | — |
 | `relativeOdi` | `respiration/relative_odi.dart` | ratio-of-ratios relative desaturation index — **never an absolute SpO2 claim** | — |

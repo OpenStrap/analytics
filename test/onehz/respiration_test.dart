@@ -62,6 +62,37 @@ import 'package:openstrap_protocol/openstrap_protocol.dart';
   return (adc: adc, ts: ts);
 }
 
+/// [hours] of RSA at [hrBpm], breathing drifting [resp0Brpm] → [resp1Brpm] on
+/// a random-walk baseline. Beats inside [dropouts] (hours) happen but are NOT
+/// recorded — the heart kept beating, the sensor did not see it.
+({List<double> rr, List<double> t}) gappyRsaNight(
+  int seed, {
+  double hrBpm = 55,
+  double hours = 7,
+  double resp0Brpm = 16,
+  double resp1Brpm = 14,
+  List<(double, double)> dropouts = const [],
+}) {
+  final rnd = math.Random(seed);
+  final rr = <double>[], t = <double>[];
+  final base = 60000.0 / hrBpm, totalSec = hours * 3600;
+  final f0 = resp0Brpm / 60, f1 = resp1Brpm / 60;
+  var tMs = 0.0, walk = 0.0;
+  while (tMs < totalSec * 1000) {
+    final sec = tMs / 1000;
+    final phase =
+        2 * math.pi * (f0 * sec + (f1 - f0) * sec * sec / (2 * totalSec));
+    walk = (walk + (rnd.nextDouble() - 0.5) * 12) * 0.98;
+    final v = base + walk + 40 * math.sin(phase);
+    tMs += v;
+    final h = sec / 3600;
+    if (dropouts.any((d) => h >= d.$1 && h < d.$2)) continue;
+    rr.add(v);
+    t.add(tMs);
+  }
+  return (rr: rr, t: t);
+}
+
 void main() {
   _resp01Tests();
   // -------------------------------------------------------------------------
@@ -216,6 +247,224 @@ void main() {
       expect(full.present && trimmed.present, isTrue);
       expect((full.value!.brpm! - trimmed.value!.brpm!).abs(), lessThan(0.5),
           reason: '${full.value!.brpm} vs ${trimmed.value!.brpm}');
+    });
+
+    // -----------------------------------------------------------------------
+    // GAPS. The beat-rate Nyquist used to be read off span/(n−1). correctRr's
+    // beat times are re-anchored across dropouts and advance across rejected
+    // beats, so that is the beat interval DIVIDED BY COVERAGE: below 48/HR
+    // coverage (87 % at 55 bpm, 80 % at 60) a perfectly resolvable night was
+    // withheld whole as an "alias" at a heart rate it never had.
+    // -----------------------------------------------------------------------
+    test('RSA: a 75 %-covered night at 55 bpm is NOT withheld as an alias', () {
+      for (final seed in [11, 12, 13]) {
+        final full = gappyRsaNight(seed);
+        final gap = gappyRsaNight(seed, dropouts: [(1.0, 1.85), (4.0, 4.9)]);
+        final cf = correctRr(full.rr, rrTsMs: full.t);
+        final cg = correctRr(gap.rr, rrTsMs: gap.t);
+        // The fixture really exercises the old pre-check: span/(n−1) > 1.25 s.
+        final spanSec = (cg.nnTimesMs.last - cg.nnTimesMs.first) / 1000;
+        expect(spanSec / (cg.nn.length - 1), greaterThan(1.25));
+        final mf = rsaRespRate(cf.nn, cf.nnTimesMs,
+            artifactFraction: 1 - cf.cleanFraction);
+        final mg = rsaRespRate(cg.nn, cg.nnTimesMs,
+            artifactFraction: 1 - cg.cleanFraction);
+        expect(mf.present, isTrue, reason: mf.note);
+        expect(mg.present, isTrue, reason: 'seed $seed: ${mg.note}');
+        expect(mg.value!.brpm!, closeTo(mf.value!.brpm!, 1.0));
+        expect(mg.value!.brpm!, closeTo(15.0, 0.8)); // time-median of 16→14
+        expect(mg.value!.usableSubwindows!,
+            lessThan(mg.value!.subwindows!),
+            reason: 'the holes cost sub-windows, and the value says so');
+      }
+    });
+
+    test('RSA: the withheld note states the TRUE heart rate', () {
+      final s = gappyRsaNight(5,
+          hrBpm: 43,
+          hours: 2,
+          resp0Brpm: 20,
+          resp1Brpm: 20,
+          dropouts: [(0.5, 0.9)]);
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.note, contains('alias'));
+      final hr = RegExp(r'heart rate ([0-9.]+) bpm').firstMatch(m.note!);
+      expect(hr, isNotNull, reason: m.note);
+      expect(double.parse(hr!.group(1)!), closeTo(43, 1.0),
+          reason: 'the gap-blind ratio printed ~33 bpm');
+    });
+
+    test('RSA: 12 contiguous minutes publish only at low confidence (was 0.9)',
+        () {
+      // Three full 300 s sub-windows agree, so a rate is honestly resolvable;
+      // what it is not is a confident NIGHT. Measured: 15.0 br/min at 0.9
+      // before confidence scaled with usable sub-windows, 0.25 (3/12) now.
+      final s = gappyRsaNight(7, dropouts: [(0.0, 3.4), (3.6, 7.0)]); // 12 min
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.brpm!, closeTo(15.0, 0.8));
+      expect(m.value!.usableSubwindows, 3);
+      expect(m.confidence, lessThanOrEqualTo(0.25));
+    });
+
+    test('RSA: 12 minutes scattered over an hour stay absent, and say why', () {
+      // Four 3-minute bursts, one every 15 minutes: no 300 s sub-window holds
+      // more than 60 % of its time in beats, most hold none. Unlike the next
+      // test (beats everywhere, holes everywhere) this is a night with too
+      // little signal in total, not a gappy one.
+      final s = gappyRsaNight(7, hours: 1, dropouts: [
+        for (var k = 0; k < 4; k++) (k * 0.25 + 0.05, k * 0.25 + 0.25)
+      ]);
+      // The fixture is what it says: four bursts of ~3 min, ~12 min of beats.
+      final bursts = <List<double>>[[s.t.first, s.t.first]];
+      for (final x in s.t.skip(1)) {
+        if (x - bursts.last[1] > 60e3) bursts.add([x, x]);
+        bursts.last[1] = x;
+      }
+      expect(bursts, hasLength(4));
+      for (final b in bursts) {
+        expect((b[1] - b[0]) / 1000, inInclusiveRange(170, 185));
+      }
+      expect(s.rr.fold<double>(0, (a, v) => a + v) / 60e3, closeTo(12, 0.5));
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.confidence, 0);
+      expect(m.note, contains('sub-windows'));
+      // The empty stretches are gaps, and the note says so.
+      expect(m.note, contains('covered by clean beats'));
+      expect(m.note, isNot(contains('alias')));
+    });
+
+    test(
+        'RSA: a sub-window full of holes is counted as gappy, not as a low '
+        'beat rate', () {
+      // 2 h at 55 bpm with a 100 s hole every 5 minutes: every 300 s
+      // sub-window is ~67 % covered. The old code withheld it whole as an
+      // alias at an apparent ~37 bpm.
+      final s = gappyRsaNight(9, hours: 2, dropouts: [
+        for (var k = 0; k < 24; k++)
+          ((k * 300 + 100) / 3600.0, (k * 300 + 200) / 3600.0)
+      ]);
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.note, contains('covered by clean beats'));
+      expect(m.note, isNot(contains('alias')));
+      expect(m.note, isNot(contains('beat rate too low')));
+    });
+
+    test('RSA: a sub-window\'s own ceiling comes from its median beat interval',
+        () {
+      // 55 bpm with a 25 s dropout every 150 s: every 300 s sub-window is
+      // ~83 % covered — complete enough — but its span/(k−1) reads ~1.31 s
+      // (~46 bpm), below the HF band. Only the median-NN ceiling keeps them.
+      final s = gappyRsaNight(3, hours: 2, dropouts: [
+        for (var k = 0; k < 48; k++)
+          ((k * 150 + 60) / 3600.0, (k * 150 + 85) / 3600.0)
+      ]);
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.brpm!, closeTo(15.0, 1.0));
+      expect(m.value!.subwindows, 46);
+      expect(m.value!.usableSubwindows, 46,
+          reason: 'every sub-window is ≥ 80 % covered and resolvable');
+    });
+
+    test('RSA: sub-windows whose own heart rate is below the band are dropped',
+        () {
+      // 1.4 h at 56 bpm, then 0.6 h at 40 bpm (Nyquist 20 br/min, below the
+      // top of the HF band). The whole input's median clears the band; the
+      // slow stretch's sub-windows do not, and must not be used.
+      final a = gappyRsaNight(5, hrBpm: 56, hours: 1.4, resp0Brpm: 15,
+          resp1Brpm: 15);
+      final b = gappyRsaNight(6, hrBpm: 40, hours: 0.6, resp0Brpm: 15,
+          resp1Brpm: 15);
+      final rr = [...a.rr, ...b.rr];
+      final t = [...a.t, for (final x in b.t) a.t.last + x];
+      final c = correctRr(rr, rrTsMs: t);
+      final m =
+          rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 1 - c.cleanFraction);
+      expect(m.present, isTrue, reason: m.note);
+      expect(m.value!.brpm!, closeTo(15.0, 1.0));
+      expect(m.value!.subwindows! - m.value!.usableSubwindows!,
+          greaterThanOrEqualTo(10),
+          reason: 'the 40 bpm stretch holds ~13 sub-windows');
+    });
+
+    test('RSA: the at-ceiling note names the rejecting sub-windows\' own '
+        'ceilings', () {
+      // A beat-to-beat alternation sits exactly at each sub-window's own
+      // Nyquist, so every sub-window peaks at its ceiling: ~26 br/min in the
+      // 52 bpm hour, ~29 in the 58 bpm hour (a 15-min gap between them). The
+      // whole input's ceiling (~28) is neither.
+      final rnd = math.Random(4);
+      final nn = <double>[], t = <double>[];
+      var tMs = 0.0;
+      for (final hr in [52.0, 58.0]) {
+        if (tMs > 0) tMs += 900e3;
+        final end = tMs + 3600e3;
+        while (tMs < end) {
+          final v = 60000 / hr +
+              (nn.length.isEven ? 30 : -30) +
+              (rnd.nextDouble() - 0.5) * 0.5;
+          tMs += v;
+          nn.add(v);
+          t.add(tMs);
+        }
+      }
+      final m = rsaRespRate(nn, t, artifactFraction: 0);
+      expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
+      expect(m.note, contains('at/above'));
+      final nums = RegExp(r'ceiling \(([0-9.]+)(?:–([0-9.]+))? br/min\)')
+          .firstMatch(m.note!);
+      expect(nums, isNotNull, reason: m.note);
+      // The low end comes from the 52 bpm hour, the high end from the 58.
+      expect(double.parse(nums!.group(1)!), inInclusiveRange(25.0, 27.0));
+      expect(double.parse(nums.group(2) ?? '0'), inInclusiveRange(28.5, 30.0));
+    });
+
+    test('RSA: confidence scales with usable sub-windows', () {
+      final s = rsaNight(11);
+      final c = correctRr(s.rr, rrTsMs: s.t);
+      ({List<double> nn, List<double> t}) firstSec(double sec) {
+        // through the first beat PAST [sec], so the span covers all of it
+        final k = c.nnTimesMs
+                .indexWhere((t) => t - c.nnTimesMs.first > sec * 1000) +
+            1;
+        return (nn: c.nn.sublist(0, k), t: c.nnTimesMs.sublist(0, k));
+      }
+
+      final full = rsaRespRate(c.nn, c.nnTimesMs, artifactFraction: 0);
+      expect(full.confidence, greaterThan(0.85));
+      expect(full.value!.usableSubwindows, full.value!.subwindows);
+      final hour = firstSec(3600);
+      final h = rsaRespRate(hour.nn, hour.t, artifactFraction: 0);
+      expect(h.value!.usableSubwindows, 23);
+      expect(h.confidence, greaterThanOrEqualTo(0.85));
+      // 12 half-overlapping sub-windows are ~33 minutes, not an hour.
+      final half = firstSec(1950);
+      final m33 = rsaRespRate(half.nn, half.t, artifactFraction: 0);
+      expect(m33.value!.usableSubwindows, 12);
+      expect(m33.confidence, lessThan(0.6));
+      final q = firstSec(900);
+      final m15 = rsaRespRate(q.nn, q.t, artifactFraction: 0);
+      expect(m15.present, isTrue, reason: m15.note);
+      expect(m15.value!.usableSubwindows, 5);
+      expect(m15.confidence, lessThanOrEqualTo(0.45),
+          reason: 'five 5-min sub-windows are not a confident night');
+      final j = m15.value!.toJson();
+      expect(j['usable_subwindows'], 5);
+      expect(j['subwindows'], 5);
     });
 
     test('RSA: absent on too-few beats -> null + confidence 0', () {
