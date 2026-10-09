@@ -1793,18 +1793,18 @@ void main() {
 
     test('strainScoreMetric is EST tier and absent without any input', () {
       final m =
-          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr);
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true);
       expect(m.present, isTrue);
       expect(m.tier, 'ESTIMATE');
       expect(
-          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr)
+          strainScoreMetric(null, wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true)
               .present,
           isFalse);
       expect(
-          strainScoreMetric(335, wakeMinutes: null, quietHrr: quietWakingHrr)
+          strainScoreMetric(335, wakeMinutes: null, quietHrr: quietWakingHrr, quietSettled: true)
               .present,
           isFalse);
-      expect(strainScoreMetric(335, wakeMinutes: 960, quietHrr: null).present,
+      expect(strainScoreMetric(335, wakeMinutes: 960, quietHrr: null, quietSettled: true).present,
           isFalse);
     });
 
@@ -1815,15 +1815,15 @@ void main() {
       // an absent one: everything downstream treats present as measured.
       for (final m in [
         strainScoreMetric(double.nan,
-            wakeMinutes: 960, quietHrr: quietWakingHrr),
+            wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true),
         strainScoreMetric(double.infinity,
-            wakeMinutes: 960, quietHrr: quietWakingHrr),
+            wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: true),
         strainScoreMetric(392.9,
-            wakeMinutes: double.nan, quietHrr: quietWakingHrr),
+            wakeMinutes: double.nan, quietHrr: quietWakingHrr, quietSettled: true),
         strainScoreMetric(392.9,
-            wakeMinutes: double.infinity, quietHrr: quietWakingHrr),
-        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.nan),
-        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.infinity),
+            wakeMinutes: double.infinity, quietHrr: quietWakingHrr, quietSettled: true),
+        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.nan, quietSettled: true),
+        strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: double.infinity, quietSettled: true),
       ]) {
         expect(m.present, isFalse);
         expect(m.value, isNull);
@@ -1834,12 +1834,12 @@ void main() {
       // broken measurement; baselineTrimp would silently pull it back to
       // maxQuietHrr and score the day against a level nobody measured.
       expect(
-          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: maxQuietHrr)
+          strainScoreMetric(392.9, wakeMinutes: 960, quietHrr: maxQuietHrr, quietSettled: true)
               .present,
           isTrue);
       expect(
           strainScoreMetric(392.9,
-                  wakeMinutes: 960, quietHrr: maxQuietHrr + 0.01)
+                  wakeMinutes: 960, quietHrr: maxQuietHrr + 0.01, quietSettled: true)
               .present,
           isFalse);
     });

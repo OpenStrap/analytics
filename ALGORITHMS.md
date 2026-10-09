@@ -65,7 +65,12 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `readinessLnRmssd` | `clinical/readiness_lnrmssd.dart` | ln(RMSSD) z-scored against a rolling prior-nights baseline | Plews et al. 2013 |
 | `cosinor` | `clinical/cosinor.dart` | Cosinor rhythmometry (MESOR/amplitude/acrophase) | Halberg & Nelson 1979 |
 | `banisterTrimp` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991 |
-| `strainScoreMetric` | `clinical/load_trimp.dart` | log-squash of TRIMP onto a 0-21 scale | — |
+| `dailyQuietWakingHrr` | `clinical/load_trimp.dart` | one day's quiet-waking level: median per-minute %HRR over waking minutes; null above 40 % HRR | Karvonen 1957; ACSM moderate-intensity floor |
+| `personalQuietWakingHrr` | `clinical/load_trimp.dart` | THIS user's quiet-waking level: median of the trailing 28 prior days' `dailyQuietWakingHrr`; abstains (need_baseline) below 3 days, "calibrating" below 7 | — |
+| `netTrimpAboveQuiet` | `clinical/load_trimp.dart` | Banister TRIMP above the quiet level, split at 40 % HRR so quiet minutes never offset exercise minutes (living block floored at 0) | Banister 1991; Morton 1990; ACSM 40 % HRR |
+| `strainScoreFromSeries` | `clinical/load_trimp.dart` | **the headline 0-21 strain** from per-minute wake HR: `netTrimpAboveQuiet` log-mapped onto 0-21 | — |
+| `strainCurveFromSeries` | `clinical/load_trimp.dart` | cumulative 0-21 strain per minute, same arithmetic; last point == headline | — |
+| `strainScoreMetric` | `clinical/load_trimp.dart` | LUMP form (TRIMP minus wake-minutes × quiet cost) log-squashed onto 0-21; can debit exercise, kept only for rescaling a stored TRIMP with no per-minute series | — |
 | `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
 | `baevskyStressIndex` | `clinical/stress_si.dart` | Baevsky Stress Index, 5-min sliding RR-histogram | Baevsky & Berseneva 2008 |
