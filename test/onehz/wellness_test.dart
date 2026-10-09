@@ -137,6 +137,17 @@ void main() {
           'adc_counts');
       expect(
           tempCircadian(samples, deviceFamily: 'gen5').value!.unit, 'centi_c');
+      // A ring has no motion gate: an accel list it is handed is not read,
+      // so it is not named as an input.
+      final still = [for (final s in samples) AccelSample(s.tsMs, 0, 0, 1)];
+      expect(
+          tempCircadian(samples, deviceFamily: 'oura', accel: still)
+              .inputs_used,
+          isNot(contains('accel')));
+      expect(
+          tempCircadian(samples, deviceFamily: 'gen4', accel: still)
+              .inputs_used,
+          contains('accel'));
       for (final id in [null, '', 'imported']) {
         final m = tempCircadian(samples, deviceFamily: id);
         expect(m.present, isFalse, reason: 'id=$id');

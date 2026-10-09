@@ -296,7 +296,9 @@ Metric<TempCircadian> tempCircadian(
   if (adc.length < 4) {
     return Metric<TempCircadian>.absent(
       tier: Tier.relative,
-      inputs_used: accel == null ? inputs : [...inputs, 'accel'],
+      inputs_used: gate == null || accel == null
+          ? inputs
+          : [...inputs, 'accel'],
       note: 'too few valid temp epochs for circadian analysis',
     );
   }
@@ -322,7 +324,9 @@ Metric<TempCircadian> tempCircadian(
     value: TempCircadian(cos.value, np, cal.unit),
     confidence: conf,
     tier: Tier.relative,
-    inputs_used: accel == null ? inputs : [...inputs, 'accel'],
+    inputs_used: gate == null || accel == null
+          ? inputs
+          : [...inputs, 'accel'],
     note: 'RELATIVE skin-temp phase only (no °C/fever/core). Wrist temp is '
         'ANTIPHASE to core; activity-demasked epochs dropped=$deMasked '
         '(gate=${gate == null ? 'none, no accel' : '${gate}g'}). Amplitude '
