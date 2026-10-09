@@ -684,13 +684,49 @@ void main() {
         hr.add(72 + (i % 5).toDouble());
         t += 1000.0;
       }
-      final s =
-          segmentSleep(accel, hr, hrBaseline: List<double>.filled(60, 72));
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(60, 72), tzOffsetSec: 0);
       expect(s.present, isTrue);
       // The 30-min block (1800 s) must be counted as wake/WASO, not bridged.
       // Allow epoch/HR-dip edge trimming but require most of the 30-min block
       // (1800 s) to remain wake — proving sustained arousals are NOT bridged.
       expect(s.wasoSec!, greaterThan(18 * 60));
+    });
+
+    test('a 25-min recording hole keeps the sleep before it, stamped unobserved',
+        () {
+      // segmentSleep only has HR on the accel rows, so a hole has HR at its two
+      // edges and nothing inside. It must still bridge (<= 90 min, sleep-band
+      // HR either side) and mark the hole unobserved, not drop the 45 min of
+      // observed sleep before it.
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0.0;
+      void active(int secs) {
+        for (var i = 0; i < secs; i++) {
+          final p = math.sin(i * 0.5);
+          accel.add(AccelSample(t, 0.3 * p, 0.3, 0.9 * (1 - 0.2 * p)));
+          hr.add(75);
+          t += 1000.0;
+        }
+      }
+      void still(int secs) {
+        for (var i = 0; i < secs; i++) {
+          accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+          hr.add(52);
+          t += 1000.0;
+        }
+      }
+      t = 21 * 3600 * 1000.0;
+      active(3600);
+      still(45 * 60);
+      t += 25 * 60 * 1000.0;
+      still(6 * 3600);
+      active(3600);
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(60, 60), tzOffsetSec: 0);
+      expect(s.present, isTrue);
+      expect(s.unobservedSec!, greaterThan(20 * 60));
     });
   });
 

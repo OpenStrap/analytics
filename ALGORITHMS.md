@@ -56,7 +56,8 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 |---|---|---|---|
 | `hrvTime` | `clinical/hrv_time.dart` | RMSSD/SDNN/pNNx | standard time-domain HRV |
 | `nocturnalRmssd` | `clinical/hrv_time.dart` | median-of-5-min-window nightly RMSSD | — |
-| `sleepSessionWindowedRmssd` | `clinical/hrv_time.dart` | mean-of-5-min-window RMSSD with Malik ectopic rejection | Malik et al. |
+| `sleepSessionWindowedRmssd` / `sleepSessionRmssdDetail` | `clinical/hrv_time.dart` | mean-of-5-min-window RMSSD; windows need ≥ 20 clean successive differences (ultra-short RMSSD literature); Malik 20 % ectopic rejection | Malik et al.; Munoz et al. 2015; Baek et al. 2015 |
+| `rrCoverage` | `clinical/hrv_time.dart` | Σ plausible RR ÷ wall-clock span; > 1.10 means duplicated or interleaved beats, and `hrvTime` / `nocturnalRmssd` / `nightHrvShape` / the sleep-session headline refuse RMSSD; the headline also drops any 5-min window holding more beat-time than its length | — (integrity check; contiguous runs measure 0.963–1.001) |
 | `hrvFreq` | `clinical/hrv_freq.dart` | LF/HF via Lomb-Scargle periodogram on native (unevenly-sampled) beat times | Laguna, Moody & Mark 1998; Bigger 1992 |
 | `decelerationCapacity` / `accelerationCapacity` | `clinical/prsa.dart` | Phase-rectified signal averaging (DC/AC) | Bauer et al. 2006 |
 | `nocturnalRhr` / `hrDip` | `clinical/nocturnal.dart` | nocturnal resting HR + dip classification | — |
@@ -64,7 +65,12 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `readinessLnRmssd` | `clinical/readiness_lnrmssd.dart` | ln(RMSSD) z-scored against a rolling prior-nights baseline | Plews et al. 2013 |
 | `cosinor` | `clinical/cosinor.dart` | Cosinor rhythmometry (MESOR/amplitude/acrophase) | Halberg & Nelson 1979 |
 | `banisterTrimp` | `clinical/load_trimp.dart` | Training impulse from HR-reserve | Banister 1991 |
-| `strainScoreMetric` | `clinical/load_trimp.dart` | log-squash of TRIMP onto a 0-21 scale | — |
+| `dailyQuietWakingHrr` | `clinical/load_trimp.dart` | one day's quiet-waking level: median per-minute %HRR over waking minutes; null above 40 % HRR | Karvonen 1957; ACSM moderate-intensity floor |
+| `personalQuietWakingHrr` | `clinical/load_trimp.dart` | THIS user's quiet-waking level: median of the trailing 28 prior days' `dailyQuietWakingHrr`; abstains (need_baseline) below 3 days, "calibrating" below 7 | — |
+| `netTrimpAboveQuiet` | `clinical/load_trimp.dart` | Banister TRIMP above the quiet level, split at 40 % HRR so quiet minutes never offset exercise minutes (living block floored at 0) | Banister 1991; Morton 1990; ACSM 40 % HRR |
+| `strainScoreFromSeries` | `clinical/load_trimp.dart` | **the headline 0-21 strain** from per-minute wake HR: `netTrimpAboveQuiet` log-mapped onto 0-21 | — |
+| `strainCurveFromSeries` | `clinical/load_trimp.dart` | cumulative 0-21 strain per minute, same arithmetic; last point == headline | — |
+| `strainScoreMetric` | `clinical/load_trimp.dart` | LUMP form (TRIMP minus wake-minutes × quiet cost) log-squashed onto 0-21; can debit exercise, kept only for rescaling a stored TRIMP with no per-minute series | — |
 | `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
 | `baevskyStressIndex` | `clinical/stress_si.dart` | Baevsky Stress Index, 5-min sliding RR-histogram | Baevsky & Berseneva 2008 |
@@ -89,7 +95,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 ### `respiration/`
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `rsaRespRate` | `respiration/resp_rate.dart` | respiratory sinus arrhythmia — HF spectral peak of the RR series | — |
+| `rsaRespRate` | `respiration/resp_rate.dart` | respiratory sinus arrhythmia — HF spectral peak of the RR series: Lomb–Scargle on native beat times in 300 s Welch sub-windows (≥ 80 % covered by clean beats), median across them with an agreement gate; beat-rate Nyquist from the median NN | Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker & Strackee 1984 |
 | `riivRespRate` / `fuseRespRate` | `respiration/resp_rate.dart` | respiration-induced intensity variation, fused with the RSA estimate | Pimentel et al. (multi-grid RIIV fusion) |
 | `cvhrApnea` / `cvhrApneaScreen` | `respiration/cvhr_apnea.dart` | cyclic-variation-in-HR apnea screening | — |
 | `relativeOdi` | `respiration/relative_odi.dart` | ratio-of-ratios relative desaturation index — **never an absolute SpO2 claim** | — |

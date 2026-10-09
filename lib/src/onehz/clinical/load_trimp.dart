@@ -97,7 +97,10 @@ Metric<double> banisterTrimp(
 /// left a day with no activity at all scoring 6.93–12.14 on a 0–21 scale, the
 /// band the anchor table calls "90 min hard session". Every entry point now
 /// takes the level as an argument; [dailyQuietWakingHrr] measures it from the
-/// user's own day. Passing this constant reproduces the anchor table exactly.
+/// user's own day, and [personalQuietWakingHrr] turns those into the trailing
+/// trait every scorer takes. Passing this constant reproduces the anchor
+/// table's Q = 0.20 columns exactly; no caller should pass it for a real user,
+/// and cold start abstains rather than falling back to it.
 const double quietWakingHrr = 0.20;
 
 /// The most a quiet-waking level may be and still be called quiet waking.
@@ -171,19 +174,27 @@ const double maximalNetTrimp = 400.0;
 /// mean anything with the profile and the convention printed next to them:
 ///
 ///   PROFILE  RHR 60, HRmax 187 (Tanaka @30), male constants, 960 waking
-///            minutes, every NON-SESSION minute sitting at exactly
-///            [quietWakingHrr] (= 85 bpm on this profile).
+///            minutes, every NON-SESSION minute sitting at 85 bpm (0.1969
+///            HRR on this profile, its own measured [dailyQuietWakingHrr]).
 ///
-///   inactive 16 h                       TRIMP  176.5 → 0.00
-///   + 60 min walk @105 bpm              TRIMP  192.3 → 2.70
-///   + 45 min moderate run @145 bpm      TRIMP  237.9 → 8.55
-///   + 90 min hard session @165 bpm      TRIMP  392.9 → 16.54
-///   + 5 h @160 bpm                      TRIMP  806.9 → 21.00 (SATURATED)
-///   135 min wear, no activity           TRIMP   24.8 → 0.00
+///                                       TRIMP   lump    guarded  guarded
+///                                               Q=0.20  Q=0.20   Q=0.1969
+///   inactive 16 h                       176.5    0.00    0.00     0.00
+///   + 60 min walk @105 bpm              192.3    2.70    2.70     3.41
+///   + 45 min moderate run @145 bpm      237.9    8.55    8.88     8.90
+///   + 90 min hard session @165 bpm      392.9   16.54   16.65    16.66
+///   + 5 h @160 bpm                      806.9   21.00   21.00    21.00
+///   135 min wear, no activity            24.8    0.00    0.00     0.00
+///
+/// "lump" is [strainScore]; "guarded" is [strainScoreFromSeries], which is
+/// what ships for anything with a per-minute series. They differ only where
+/// quiet minutes below Q would otherwise have been netted against session
+/// minutes — here the few 85-bpm minutes sitting 0.003 HRR under 0.20.
 ///
 /// The old table's "5 h at 160 bpm → 21" was loose, not wrong: with the
 /// baseline subtraction included the scale SATURATES AT ≈3.25 h at 160 bpm
-/// (195 min) and ≈4.25 h at 150 bpm, so everything above that is one number.
+/// (195 min → 21.00 in every column, 190 min stays below) and ≈4.25 h at
+/// 150 bpm, so everything above that is one number.
 ///
 /// THE TABLE ONLY HOLDS AT THE QUIET LEVEL IT WAS GENERATED AT, which is the
 /// point of MOT-03 (edge#226, fixed 2026-08-19). Generated at 0.20 HRR; this
@@ -194,8 +205,8 @@ const double maximalNetTrimp = 400.0;
 /// calls "90 min hard session". The map was never the problem: at their own
 /// 0.274 the same day scores 0.00 and the same day plus an hour's walk scores
 /// 2.15, which is this table's "60 min walk" row. The quiet level is an
-/// argument now, so regenerate the table with whatever you pass, never
-/// separately.
+/// argument now — this user's trailing median, [personalQuietWakingHrr] — so
+/// regenerate the table with whatever you pass, never separately.
 const double strainCurvature = 15.0;
 
 /// The TRIMP that [wakeMinutes] of ordinary waking accrues on its own.
@@ -215,8 +226,18 @@ const double strainCurvature = 15.0;
 /// 10.72/12.72/0.06. Crediting a quiet minute in FULL the moment it clears the
 /// gate is what does it. (Σ(x−Q)·y(x) over the same minutes tracks the current
 /// form within ~1.5 points on gen4 but still breaks MG's honest zeros: 0.00 →
-/// 4.05/4.83.) The gated form is only defensible once [quietWakingHrr] is this
-/// user's own quiet level — MOT-03 — so it is blocked on that, not on taste.
+/// 4.05/4.83.)
+///
+/// WHAT SHIPS NOW is neither that gate nor this lump alone. With MOT-03 done
+/// the level is this user's own trailing median ([personalQuietWakingHrr]),
+/// and [netTrimpAboveQuiet] gates on EXERCISE rather than on Q: minutes at or
+/// above [exerciseFloorHrr] (ACSM's 40 % HRR) are never offset, everything
+/// else nets out among itself exactly as this lump does and floors at 0 as a
+/// block. On a day with no minute at 40 % HRR that is this function to the
+/// last digit, so the honest zeros measured above stay zeros; it only departs
+/// from the lump where quiet time would otherwise have debited a workout. This
+/// subtraction survives as [strainScore] for rescaling a stored TRIMP with no
+/// per-minute series left.
 ///
 /// [quietHrr] is that level: [dailyQuietWakingHrr] measures it, and it is
 /// clamped to (0, [maxQuietHrr]] here so no caller can hand over a baseline
@@ -230,11 +251,8 @@ double baselineTrimp(
   return wakeMinutes * q * StrainScorer.banisterY(q, female: female);
 }
 
-/// Log-map the TRIMP EARNED ABOVE baseline into a 0–21 headline "strain" score.
-///
-///     net    = trimp − baselineTrimp(wakeMinutes, quietHrr)
-///     u      = min(1, net / maximalNetTrimp)
-///     strain = 21 · ln(1 + u·(C−1)) / ln(C),  C = [strainCurvature]
+/// Log-map the TRIMP EARNED ABOVE baseline into a 0–21 headline "strain" score:
+/// `strainFromNetTrimp(trimp − baselineTrimp(wakeMinutes, quietHrr))`.
 ///
 /// [wakeMinutes] is the observed waking wear window that produced [trimp] — it
 /// sets the baseline, so it is required rather than assumed. [quietHrr] is what
@@ -242,15 +260,32 @@ double baselineTrimp(
 /// ([dailyQuietWakingHrr]); it is required for the same reason, and getting it
 /// wrong by 0.07 HRR is the difference between a nothing-day scoring 0 and
 /// scoring 12.
+///
+/// LUMP FORM — CAN DEBIT EXERCISE. Every quiet minute below [quietHrr] nets a
+/// negative term against the whole day, exercise minutes included, so a user
+/// whose quiet sits under the level can see a real run cancelled to 0. Only
+/// for rescaling a stored TRIMP that has no per-minute series left (edge's
+/// strain backfill). Everything with a per-minute series uses
+/// [strainScoreFromSeries].
 double strainScore(
   double trimp, {
   required double wakeMinutes,
   required double quietHrr,
   bool female = false,
-}) {
-  final net =
-      trimp - baselineTrimp(wakeMinutes, quietHrr: quietHrr, female: female);
-  if (net <= 0) return 0.0;
+}) =>
+    strainFromNetTrimp(
+        trimp - baselineTrimp(wakeMinutes, quietHrr: quietHrr, female: female));
+
+/// Map net TRIMP earned above the quiet-waking baseline onto 0–21:
+///
+///     u      = min(1, net / maximalNetTrimp)
+///     strain = 21 · ln(1 + u·(C−1)) / ln(C),  C = [strainCurvature]
+///
+/// The one 0–21 map in this package; [strainScore] (lump) and
+/// [strainScoreFromSeries] (guarded) differ only in how they get to `net`.
+/// A non-finite or non-positive net is 0.
+double strainFromNetTrimp(double net) {
+  if (!net.isFinite || net <= 0) return 0.0;
   final u = math.min(1.0, net / maximalNetTrimp);
   final s = 21.0 *
       math.log(1 + u * (strainCurvature - 1)) /
@@ -260,17 +295,23 @@ double strainScore(
 
 /// Headline 0–21 strain as a Metric, alongside the raw TRIMP (EST tier).
 ///
+/// LUMP FORM — see [strainScore]. Kept for rescaling a stored TRIMP that has no
+/// per-minute series; anything holding the series uses [strainScoreFromSeries].
+///
 /// [trimp] the raw Banister TRIMP for the day/session, [wakeMinutes] the wake
 /// window it was accumulated over, [quietHrr] this user's quiet-waking level
 /// ([dailyQuietWakingHrr]). Absent — with the reason in the note — when any is
 /// missing, non-finite, or out of range: the baseline
 /// subtraction is meaningless without a wake window, guessing one silently
 /// mis-scores every partial-wear day, and a stand-in quiet level is what scored
-/// a day with no activity in it at 12/21 (MOT-03).
+/// a day with no activity in it at 12/21 (MOT-03). [quietSettled] as in
+/// [strainScoreFromSeries]: false lowers confidence and says "calibrating",
+/// never the value — required for the same reason.
 Metric<double> strainScoreMetric(
   double? trimp, {
   required double? wakeMinutes,
   required double? quietHrr,
+  required bool quietSettled,
   bool female = false,
 }) {
   const inputs = ['trimp', 'wake_minutes', 'quiet_waking_hrr'];
@@ -318,11 +359,273 @@ Metric<double> strainScoreMetric(
   return Metric<double>(
     value: strainScore(trimp,
         wakeMinutes: wakeMinutes, quietHrr: quietHrr, female: female),
-    confidence: 0.6,
+    confidence: quietSettled ? 0.6 : 0.45,
     tier: Tier.estimate,
     inputs_used: inputs,
-    note: 'headline 0–21 strain = log map of TRIMP earned above the '
-        'quiet-waking baseline; wrist-HR estimate',
+    note: quietSettled
+        ? 'headline 0–21 strain = log map of TRIMP earned above the '
+            'quiet-waking baseline; wrist-HR estimate'
+        : 'calibrating: quiet-waking level from fewer than '
+            '$quietHrrSettledDays days',
+  );
+}
+
+/// %HRR at or above which a minute is EXERCISE for the strain floor: ACSM's
+/// moderate-intensity floor (40 % HRR). Deliberately the same number as
+/// [maxQuietHrr] and as `Calories.activeHRRFraction`: one boundary between
+/// "living" and "exercise" in the whole package.
+const double exerciseFloorHrr = maxQuietHrr;
+
+/// TRIMP earned above the quiet-waking level, split so quiet time can never
+/// debit exercise.
+///
+/// The lump form ([strainScore]) is `Σ_i (f(x_i) − f(Q))` with `f(x) = x·y(x)`
+/// over every wake minute, so each minute below Q is a negative term that
+/// offsets exercise minutes. For a user who sits at 0.10 HRR against Q = 0.20,
+/// 855 quiet minutes cancel a 45-min run at 145 bpm to 0.00. Even with Q this
+/// user's own level, a day whose quiet stretch sits 0.03 HRR under it halves
+/// that run.
+///
+/// Why not a full per-sample floor `Σ max(0, f(x) − f(Q))`: it is biased
+/// upward on any day with spread around Q, because positive deviations count
+/// and negative ones are dropped — quiet minutes alternating 0.17/0.23 HRR
+/// around Q = 0.20 score 3.86 that way against 0.46 here. That is the MOT-05
+/// failure noted on [baselineTrimp] (honest zeros going to 4.05/4.83).
+///
+/// So living minutes net among themselves and are floored at 0 AS A BLOCK, and
+/// exercise is added in full. On a day with no minute at or above
+/// [exerciseFloorHrr] this equals the lump form exactly, which keeps the
+/// honest zeros MOT-05 protected; algebraically `net == max(lumpNet,
+/// exercise)`, "never less than the exercise minutes alone".
+class NetTrimp {
+  /// Σ over minutes with x ≥ [exerciseFloorHrr] of (x·y(x) − Q·y(Q)). ≥ 0,
+  /// because x ≥ 0.40 ≥ Q and x·y(x) is increasing.
+  final double exercise;
+
+  /// Σ over every other valid minute of (x·y(x) − Q·y(Q)). Either sign.
+  final double living;
+
+  /// Valid (finite, > 0 bpm) minutes the sums ran over.
+  final int minutes;
+
+  const NetTrimp(this.exercise, this.living, this.minutes);
+
+  /// Living minutes cancel among themselves (noise around Q nets to ~0, so an
+  /// honest nothing-day stays 0), then floor at 0 as a block; exercise is
+  /// added in full and is never offset by a quiet afternoon.
+  double get net => exercise + math.max(0.0, living);
+}
+
+/// Whether the anchors and the quiet level can price a minute at all — the
+/// shared gate of [netTrimpAboveQuiet] and [strainCurveFromSeries].
+bool _netAnchorsValid(double? restingHr, double? maxHr, double? quietHrr) =>
+    restingHr != null &&
+    maxHr != null &&
+    quietHrr != null &&
+    restingHr.isFinite &&
+    maxHr.isFinite &&
+    quietHrr.isFinite &&
+    maxHr > restingHr &&
+    quietHrr > 0 &&
+    quietHrr <= maxQuietHrr;
+
+/// [NetTrimp] over per-minute wake HR, against this user's quiet level
+/// [quietHrr] (see [personalQuietWakingHrr]).
+///
+/// Null — never a stand-in — when the anchors are missing, non-finite or
+/// degenerate, when [quietHrr] is outside (0, [maxQuietHrr]], or when no
+/// minute is valid. Same off-skin guard and the same Banister weighting
+/// ([StrainScorer.banisterY]) as [banisterTrimp].
+NetTrimp? netTrimpAboveQuiet(
+  List<double> hrPerMin, {
+  required double? restingHr,
+  required double? maxHr,
+  required double? quietHrr,
+  required Sex sex,
+}) {
+  if (!_netAnchorsValid(restingHr, maxHr, quietHrr)) return null;
+  final acc = _NetAccumulator(restingHr!, maxHr!, quietHrr!, sex);
+  for (final hr in hrPerMin) {
+    acc.add(hr);
+  }
+  return acc.minutes == 0 ? null : acc.result;
+}
+
+/// One pass of [NetTrimp] arithmetic, shared so the curve and the headline
+/// cannot disagree.
+class _NetAccumulator {
+  final double restingHr;
+  final double reserve;
+  final bool female;
+  final double quietRate;
+  var exercise = 0.0;
+  var living = 0.0;
+  var minutes = 0;
+
+  _NetAccumulator(this.restingHr, double maxHr, double quietHrr, Sex sex)
+      : reserve = maxHr - restingHr,
+        female = sex == Sex.female,
+        quietRate = quietHrr *
+            StrainScorer.banisterY(quietHrr, female: sex == Sex.female);
+
+  /// Adds one minute; false (and no change) for an off-skin/non-finite one.
+  bool add(double hr) {
+    if (!hr.isFinite || hr <= 0) return false; // same guard as banisterTrimp
+    final x = math.min(1.0, math.max(0.0, (hr - restingHr) / reserve));
+    final e = x * StrainScorer.banisterY(x, female: female) - quietRate;
+    if (x >= exerciseFloorHrr) {
+      exercise += e;
+    } else {
+      living += e;
+    }
+    minutes++;
+    return true;
+  }
+
+  NetTrimp get result => NetTrimp(exercise, living, minutes);
+}
+
+/// Headline 0–21 strain from per-minute wake HR: Banister TRIMP above this
+/// user's quiet-waking level, exercise minutes protected (see [NetTrimp]).
+///
+/// [quietHrr] is THIS user's level ([personalQuietWakingHrr]); there is no
+/// default and no population fallback (MOT-03). [quietSettled] false (fewer
+/// than [quietHrrSettledDays] days behind the level) lowers confidence and
+/// says "calibrating" — it never changes the value. Required, so no caller
+/// can report a calibrating level at settled confidence by leaving it out
+/// ([QuietLevel.settled]).
+Metric<double> strainScoreFromSeries(
+  List<double> hrPerMin, {
+  required double? restingHr,
+  required double? maxHr,
+  required double? quietHrr,
+  required Sex sex,
+  required bool quietSettled,
+}) {
+  const inputs = ['hr_per_min', 'resting_hr', 'max_hr', 'quiet_waking_hrr'];
+  final n = netTrimpAboveQuiet(hrPerMin,
+      restingHr: restingHr, maxHr: maxHr, quietHrr: quietHrr, sex: sex);
+  if (n == null) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'strain needs finite RHR < HRmax, this user\'s own quiet-waking '
+          'HRR in (0, $maxQuietHrr], and at least one worn minute',
+    );
+  }
+  return Metric<double>(
+    value: strainFromNetTrimp(n.net),
+    confidence: quietSettled ? 0.6 : 0.45,
+    tier: Tier.estimate,
+    inputs_used: inputs,
+    note: quietSettled
+        ? 'Banister TRIMP above your quiet-waking level, log-mapped to 0–21'
+        : 'calibrating: quiet-waking level from fewer than '
+            '$quietHrrSettledDays days',
+  );
+}
+
+/// Cumulative 0–21 strain after each minute of [hrPerMin] (same length; an
+/// invalid minute repeats the previous value, 0 before the first valid one).
+///
+/// Same arithmetic as [strainScoreFromSeries] in one pass, so `curve.last` is
+/// the headline. Exercise already banked never falls back out: `exercise`
+/// only grows, so the curve never drops below what the exercise minutes alone
+/// score.
+///
+/// NOT MONOTONE, deliberately. Living minutes net among themselves, so
+/// positive living banked earlier (a busy morning above Q) can be netted back
+/// out by a quiet evening below it, and the curve declines by exactly that —
+/// e.g. 120 min at 0.30 HRR, 45 min at 145 bpm, then 735 min at 0.10 HRR
+/// (RHR 50, HRmax 187, Q 0.20) reads 10.74 at the end of the run and 9.38 at
+/// the end of the day. A running-max ratchet would hide that, but it would
+/// also bias every quiet day upward (the running max of a random walk around
+/// Q drifts up), which is the MOT-05 inflation [NetTrimp] exists to avoid.
+///
+/// Null when [netTrimpAboveQuiet] would be null.
+List<double>? strainCurveFromSeries(
+  List<double> hrPerMin, {
+  required double? restingHr,
+  required double? maxHr,
+  required double? quietHrr,
+  required Sex sex,
+}) {
+  if (!_netAnchorsValid(restingHr, maxHr, quietHrr)) return null;
+  final acc = _NetAccumulator(restingHr!, maxHr!, quietHrr!, sex);
+  final out = List<double>.filled(hrPerMin.length, 0.0);
+  var last = 0.0;
+  for (var i = 0; i < hrPerMin.length; i++) {
+    if (acc.add(hrPerMin[i])) last = strainFromNetTrimp(acc.result.net);
+    out[i] = last;
+  }
+  return acc.minutes == 0 ? null : out;
+}
+
+/// Prior days needed before a personal level is used at all. With 3 the
+/// median tolerates one unusual day.
+const int quietHrrMinDays = 3;
+
+/// Prior days at which the level counts as settled: a full weekly cycle, so a
+/// run of workdays (or weekend days) cannot set it alone.
+const int quietHrrSettledDays = 7;
+
+/// Trailing window, the same 28 days every other personal baseline uses.
+const int quietHrrWindowDays = 28;
+
+/// Wake minutes a day needs before its own median may enter the trait series.
+/// A 1-hour window measures that hour, not ordinary living.
+const int quietHrrTraitMinMinutes = 360;
+
+/// A personal quiet-waking level and how many prior days back it.
+class QuietLevel {
+  final double hrr;
+  final int days;
+  bool get settled => days >= quietHrrSettledDays;
+  const QuietLevel(this.hrr, this.days);
+  Map<String, dynamic> toJson() =>
+      {'hrr': round6(hrr), 'days': days, 'settled': settled};
+}
+
+/// THIS user's quiet-waking level: the median of the trailing
+/// [quietHrrWindowDays] prior days' [dailyQuietWakingHrr] — the rolling
+/// personal median that function's doc asks for.
+///
+/// [priorDailyLevels] must be strictly BEFORE the day being scored, oldest →
+/// newest: scoring a day against its own median would subtract its own living
+/// (and, on a walking day, its own effort) from itself. Each must already be
+/// an eligible day — [dailyQuietWakingHrr] with `minMinutes:`
+/// [quietHrrTraitMinMinutes] — since a bare level carries no coverage to
+/// check here; the caller that persists the daily levels enforces it.
+///
+/// COLD START ABSTAINS. Below [quietHrrMinDays] valid days this is absent with
+/// the `need_baseline` grammar, never [quietWakingHrr]: that constant is a
+/// population figure for an input that is personal by definition, and passing
+/// it is what billed being awake as training load (MOT-03). 3–6 days is a real
+/// measurement with a wider error, disclosed by a lower confidence and
+/// [QuietLevel.settled] false.
+Metric<QuietLevel> personalQuietWakingHrr(List<double> priorDailyLevels) {
+  const inputs = ['quiet_waking_hrr_history'];
+  final valid = [
+    for (final q in priorDailyLevels)
+      if (q.isFinite && q > 0 && q <= maxQuietHrr) q,
+  ];
+  final w = valid.length > quietHrrWindowDays
+      ? valid.sublist(valid.length - quietHrrWindowDays)
+      : valid;
+  if (w.length < quietHrrMinDays) {
+    return Metric<QuietLevel>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: needBaselineNote(have: w.length, need: quietHrrMinDays),
+    );
+  }
+  final lvl = QuietLevel(median(w)!, w.length);
+  return Metric<QuietLevel>(
+    value: lvl,
+    confidence: lvl.settled ? 0.7 : 0.4,
+    tier: Tier.estimate,
+    inputs_used: inputs,
+    note: 'median of ${w.length} prior days of quiet waking',
   );
 }
 
