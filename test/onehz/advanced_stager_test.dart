@@ -44,6 +44,20 @@ void main() {
     return (grav: grav, hr: hr, rr: rr, nightStart: nightStart, nightEnd: nightEnd);
   }
 
+  // Still wrist at a sleeping HR over each (start, secs) block, nothing
+  // recorded between blocks.
+  ({List<GravTs> grav, List<HrTs> hr}) stillBlocks(List<(int, int)> blocks) {
+    final grav = <GravTs>[];
+    final hr = <HrTs>[];
+    for (final (start, secs) in blocks) {
+      for (var i = 0; i < secs; i++) {
+        grav.add(GravTs(start + i, 0.001 * math.sin(i * 0.01), 0, 1));
+        hr.add(HrTs(start + i, 52));
+      }
+    }
+    return (grav: grav, hr: hr);
+  }
+
   group('AdvancedSleepStager detection + 4-class staging (default: cardio)', () {
     test('still low-HR night → one session with a 4-class hypnogram', () {
       final d = build(2, 7, 1);
@@ -96,6 +110,26 @@ void main() {
       final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr);
       // The single 17h run exceeds maxMainSleepSpanS and is dropped (not truncated).
       expect(sessions, isEmpty);
+    });
+
+    test('a recording gap cannot merge a short rest into the next night', () {
+      const nextNight = 18 * 3600;
+      final d = stillBlocks([(0, 10 * 60), (nextNight, 6 * 3600)]);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
+      expect(sessions, hasLength(1));
+      expect(sessions.single.start, greaterThanOrEqualTo(nextNight));
+      expect(sessions.single.end - sessions.single.start,
+          inInclusiveRange(5 * 3600, 7 * 3600));
+    });
+
+    // segmentSleep only has HR on accel rows, so a hole carries edge HR only.
+    // Under the 90-min cap it bridges; segmentSleep marks it unobserved.
+    test('a sub-90-min hole with sleep-band edge HR stays one session', () {
+      final d = stillBlocks([(0, 2 * 3600), (2 * 3600 + 45 * 60, 6 * 3600)]);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
+      expect(sessions, hasLength(1));
+      expect(sessions.single.start, lessThan(60));
+      expect(sessions.single.end, greaterThan(8 * 3600 + 40 * 60));
     });
   });
 
