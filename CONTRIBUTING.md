@@ -90,3 +90,16 @@ happen, devices keep serving the old numbers.
 - Say whether the output of any existing metric changes. This is the single most
   important line in the PR.
 - No `Co-Authored-By` trailers.
+
+## License and CLA
+
+OpenStrap is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). Before your first PR
+is merged you need to accept the [Contributor License Agreement](CLA.md). In short:
+you keep the copyright in your work, and you grant the copyright holder, OpenStrap,
+the right to relicense your contributions, including under commercial licences.
+To accept, add this line to your first PR description:
+
+> I have read the OpenStrap CLA (CLA.md) and agree to its terms for this and all my
+> future contributions to OpenStrap.
+
+The OpenStrap name and logo are covered separately by [TRADEMARKS.md](TRADEMARKS.md).
