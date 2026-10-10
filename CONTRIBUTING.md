@@ -22,8 +22,8 @@ paper and decide for yourself whether to trust the number.
 
 If nothing in the literature fits, that's allowed — mark it `ESTIMATE`, give it
 low confidence, and say so plainly. What's not allowed is inventing constants
-and presenting them as science, or reverse-engineering WHOOP's scores by
-fitting to their output.
+and presenting them as science, or recreating a vendor's scores by fitting
+to their output.
 
 **2. Never fabricate a value.** If an input isn't there, return a `Metric` with
 a `null` value. Not a default, not a last-known-good, not an interpolation
@@ -90,3 +90,11 @@ happen, devices keep serving the old numbers.
 - Say whether the output of any existing metric changes. This is the single most
   important line in the PR.
 - No `Co-Authored-By` trailers.
+
+## License
+
+OpenStrap is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). By contributing, you
+agree that your contributions are licensed under the same AGPL-3.0 terms. You keep the
+copyright in your work.
+
+The OpenStrap name and logo are covered separately by [TRADEMARKS.md](TRADEMARKS.md).

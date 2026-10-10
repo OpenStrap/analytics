@@ -1,7 +1,7 @@
 # OpenStrap analytics
 
 [![test](https://github.com/OpenStrap/analytics/actions/workflows/test.yml/badge.svg)](https://github.com/OpenStrap/analytics/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![stars](https://img.shields.io/github/stars/OpenStrap/analytics?style=flat&color=e2825f)](https://github.com/OpenStrap/analytics/stargazers)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/dUXds5MWkd)
 [![Donate](https://img.shields.io/badge/donate-BTC%20%2F%20ETH-f7931a)](https://github.com/OpenStrap/edge/blob/main/DONATE.md)
@@ -27,7 +27,7 @@ literature specifically so you can go read the paper yourself and decide whether
 trust the number.
 
 Is it the same as what WHOOP gives you? No. Not close. They've got years and a research
-team behind their recovery/strain scores. I've got a reverse-engineered byte stream and a
+team behind their recovery/strain scores. I've got the data the band hands over and a
 pile of textbook equations. What comes out of here is an honest approximation built from
 exactly what the band hands over, nothing more. It trends correctly, it'll tell you when
 you're under-recovered — it's not their secret sauce, and it never claims to be.
@@ -183,6 +183,11 @@ life, a small tip genuinely helps:
 
 Nothing is gated behind paying, and nothing ever will be. Protocol findings and bug
 reports are worth more than money, though.
+
+## License
+
+AGPL-3.0. See [LICENSE](LICENSE). Contributions are licensed under the same terms. The
+OpenStrap name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
 
