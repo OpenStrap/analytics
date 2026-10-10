@@ -30,7 +30,8 @@
 //      0.70) — see [readinessAutonomicLabels].
 //   4. The composite z is mapped to a 0..100 score via a logistic so typical
 //      days land near 50, rescaled by the user's own composite-z spread once
-//      14 prior nights exist — see [calibratedReadinessScore].
+//      14 prior nights exist, and re-centred on their median (capped ±0.5)
+//      — see [calibratedReadinessScore].
 //   5. ALWAYS attach the per-input contribution breakdown |w_i·z_i| ranked.
 //
 // HONESTY: glass-box index (weights disclosed); "—" when no inputs present;
@@ -137,8 +138,16 @@ class Readiness {
 
   /// Prior composite z's the calibration had to work with.
   final int calibrationNights;
+
+  /// Median of the prior composite z's (raw) and the centre actually removed
+  /// (capped to ±[readinessCentreCap]); null while calibrating.
+  final double? calibrationCentreRaw;
+  final double? calibrationCentre;
   const Readiness(this.score, this.compositeZ,
-      {this.calibrationSigma, this.calibrationNights = 0});
+      {this.calibrationSigma,
+      this.calibrationNights = 0,
+      this.calibrationCentreRaw,
+      this.calibrationCentre});
   Map<String, dynamic> toJson() => {
         'score': round6(score),
         'composite_z': round6(compositeZ),
@@ -146,6 +155,9 @@ class Readiness {
           'status': calibrationSigma == null ? 'calibrating' : 'calibrated',
           'nights': calibrationNights,
           if (calibrationSigma != null) 'sigma': round6(calibrationSigma!),
+          if (calibrationCentreRaw != null)
+            'centre_raw': round6(calibrationCentreRaw!),
+          if (calibrationCentre != null) 'centre': round6(calibrationCentre!),
         },
       };
 }
@@ -202,6 +214,16 @@ const double readinessCalibrationSigmaFloor = 0.3;
 /// 5th/20th/75th percentiles of logistic(N(0, 0.65))).
 const double readinessDesignSigma = 0.65;
 
+/// Cap on the centre removed from z. A user whose nights sit persistently
+/// below their own per-input baselines (one real history: composite-z median
+/// −0.35, HRV under its trailing median on 77% of nights) otherwise reads
+/// "low" every day. Re-centring on the trailing median fixes that, but an
+/// uncapped centre would also absorb a real downturn within ~2 weeks. The cap
+/// lets a step-down beyond 0.5 z keep showing: the part of it past the cap is
+/// never re-centred away, and the rest only as the median catches up.
+/// ponytail: one population constant; personalise if real step-downs say so.
+const double readinessCentreCap = 0.5;
+
 /// Map a composite z to 0..100.
 ///
 /// The band cut-offs assume composite z has SD ≈ 0.65. Real users do not share
@@ -210,20 +232,35 @@ const double readinessDesignSigma = 0.65;
 /// user's PRIOR composite z's) holds ≥ [readinessCalibrationMinNights] nights,
 /// z is rescaled by the user's own robust spread σ̂ = MAD × 1.4826 (floored at
 /// [readinessCalibrationSigmaFloor]):
-///   score = 100 / (1 + exp(−0.65·z / σ̂))
-/// The centre is NOT removed: a run of genuinely poor nights still reads low.
+/// and re-centred on the history's median ĉ, capped to ±[readinessCentreCap]:
+///   score = 100 / (1 + exp(−0.65·(z − ĉ) / σ̂))
 /// Fewer nights → the uncalibrated logistic(z), flagged as calibrating.
-({double score, double? sigma, int nights}) calibratedReadinessScore(
-    double z, List<double> zHistory) {
+({
+  double score,
+  double? sigma,
+  int nights,
+  double? centreRaw,
+  double? centre
+}) calibratedReadinessScore(double z, List<double> zHistory) {
   final n = zHistory.length;
   if (n < readinessCalibrationMinNights) {
-    return (score: 100 / (1 + math.exp(-z)), sigma: null, nights: n);
+    return (
+      score: 100 / (1 + math.exp(-z)),
+      sigma: null,
+      nights: n,
+      centreRaw: null,
+      centre: null,
+    );
   }
   final sigma = math.max(readinessCalibrationSigmaFloor, mad(zHistory)!);
+  final raw = median(zHistory)!;
+  final centre = raw.clamp(-readinessCentreCap, readinessCentreCap).toDouble();
   return (
-    score: 100 / (1 + math.exp(-readinessDesignSigma * z / sigma)),
+    score: 100 / (1 + math.exp(-readinessDesignSigma * (z - centre) / sigma)),
     sigma: sigma,
     nights: n,
+    centreRaw: raw,
+    centre: centre,
   );
 }
 
@@ -385,7 +422,10 @@ Metric<Readiness> readinessComposite(
 
   return Metric<Readiness>(
     value: Readiness(cal.score, composite,
-        calibrationSigma: cal.sigma, calibrationNights: cal.nights),
+        calibrationSigma: cal.sigma,
+        calibrationNights: cal.nights,
+        calibrationCentreRaw: cal.centreRaw,
+        calibrationCentre: cal.centre),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: used,
@@ -395,7 +435,8 @@ Metric<Readiness> readinessComposite(
         'mean of their z) 0.70 > RR 0.20 > temp 0.10, renormalized over present '
         'inputs. Drivers are definitional within the formula (correction, not '
         'inferred cause). '
-        '${cal.sigma == null ? 'calibrating:have=${cal.nights},need=$readinessCalibrationMinNights' : 'calibrated:sigma=${round6(cal.sigma!)},n=${cal.nights}'}.'
+        '${cal.sigma == null ? 'calibrating:have=${cal.nights},need=$readinessCalibrationMinNights' : 'calibrated:sigma=${round6(cal.sigma!)},n=${cal.nights},'
+            'centre=${round6(cal.centre!)},centre_raw=${round6(cal.centreRaw!)}'}.'
         '$suffix',
   );
 }

@@ -105,6 +105,67 @@ void main() {
     });
   });
 
+  group('capped re-centring', () {
+    final rnd = math.Random(11);
+    double gauss() =>
+        math.sqrt(-2 * math.log(1 - rnd.nextDouble())) *
+        math.cos(2 * math.pi * rnd.nextDouble());
+
+    test('a history centred at -0.35 scores a median of ~50', () {
+      final zs = [for (var i = 0; i < 400; i++) -0.35 + 0.9 * gauss()];
+      final scores = [
+        for (var i = 28; i < zs.length; i++)
+          calibratedReadinessScore(zs[i], zs.sublist(i - 28, i)).score
+      ]..sort();
+      expect(scores[scores.length ~/ 2], closeTo(50, 4));
+    });
+
+    test('a sustained -1.0 step-down reads low at first, converges slowly', () {
+      // 28 nights around 0, then every night 1.0 lower.
+      final zs = [
+        for (var i = 0; i < 28; i++) 0.6 * math.sin(i * 2.4), // spread, median ~0
+        for (var i = 0; i < 40; i++) -1.0 + 0.6 * math.sin((i + 28) * 2.4),
+      ];
+      final s = [
+        for (var i = 28; i < zs.length; i++)
+          calibratedReadinessScore(zs[i], zs.sublist(i - 28, i))
+      ];
+      double meanScore(Iterable<({double score, double? sigma, int nights,
+              double? centreRaw, double? centre})> xs) =>
+          xs.map((r) => r.score).reduce((a, b) => a + b) / xs.length;
+      // First week: the centre has barely moved, so the step shows in full —
+      // below the "Take it easy" cut-off (37) on average.
+      final first = meanScore(s.take(7));
+      expect(first, lessThan(37));
+      // Converges slowly: the last week reads higher, but the cap keeps the
+      // half of the step past -0.5 from ever being re-centred away.
+      final last = meanScore(s.skip(s.length - 7));
+      expect(last, greaterThan(first));
+      expect(last, lessThan(50));
+      expect(s.last.centreRaw!, lessThan(-0.5));
+      expect(s.last.centre, -readinessCentreCap);
+    });
+
+    test('cap boundary: centre is the median inside ±0.5, clamped outside', () {
+      final at = calibratedReadinessScore(0, List.filled(20, 0.5));
+      expect(at.centreRaw, 0.5);
+      expect(at.centre, 0.5);
+      final past = calibratedReadinessScore(0, List.filled(20, -0.8));
+      expect(past.centreRaw, -0.8);
+      expect(past.centre, -0.5);
+      // Flat history → σ̂ floor 0.3: (0 − (−0.5)) · 0.65 / 0.3.
+      expect(past.score, closeTo(100 / (1 + math.exp(-0.65 * 0.5 / 0.3)), 1e-9));
+      final m = readinessComposite([
+        hrvInput(4.5, around(4.5, 0.1)),
+        rhrInput(52.0, around(52.0, 2.0)),
+      ], compositeZHistory: List.filled(20, -0.8));
+      final cal = m.value!.toJson()['calibration'] as Map;
+      expect(cal['centre_raw'], -0.8);
+      expect(cal['centre'], -0.5);
+      expect(m.note, contains('centre=-0.5,centre_raw=-0.8'));
+    });
+  });
+
   group('readinessLnRmssd robust centre', () {
     test('one illness night cannot make a low night "normal"', () {
       // The real window: six nights 4.40–4.79 plus one 35.5 ms (3.568) night,
