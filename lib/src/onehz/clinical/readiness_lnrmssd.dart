@@ -15,14 +15,17 @@ import '../util.dart';
 class ReadinessLnRmssd {
   final double lnRmssdToday;
   final double rolling7Mean;
+  /// The window's MEDIAN — the centre z/SWC/band are taken against.
+  final double rolling7Median;
   final double cvPct; // CV of lnRMSSD over the window
-  final double? z; // (today - rollingMean)/rollingSD
-  final double? swc; // smallest worthwhile change (0.5×SD, Plews-style)
+  final double? z; // (today - rollingMedian)/robustSD
+  final double? swc; // smallest worthwhile change (0.5×robust SD, Plews-style)
   final String band; // 'suppressed' | 'normal' | 'elevated'
   final bool saturationFlag;
   const ReadinessLnRmssd({
     required this.lnRmssdToday,
     required this.rolling7Mean,
+    required this.rolling7Median,
     required this.cvPct,
     required this.z,
     required this.swc,
@@ -32,6 +35,7 @@ class ReadinessLnRmssd {
   Map<String, dynamic> toJson() => {
         'ln_rmssd_today': round6(lnRmssdToday),
         'rolling7_mean': round6(rolling7Mean),
+        'rolling7_median': round6(rolling7Median),
         'cv_pct': round6(cvPct),
         if (z != null) 'z': round6(z!),
         if (swc != null) 'swc': round6(swc!),
@@ -117,14 +121,25 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
     );
   }
   final cv = (sd / m).abs() * 100;
-  final z = sd > 0 ? (today - m) / sd : null;
+  // ROBUST CENTRE AND SPREAD for the decision band. One illness night in a
+  // seven-night window both drags the mean down and inflates the SD, so a
+  // genuinely low night reads "normal": on a real window holding a 35.5 ms
+  // night, mean 4.465 / SD 0.405 put a 4.478 night (88 ms) inside the band,
+  // while the other six nights sat at 4.40–4.79. Median + MAD (×1.4826) are
+  // what the window looks like without that one night. MAD collapses only when
+  // more than half the window is identical; the SD stands in then. The CV
+  // above stays the classic SD/mean (Plews' published CV).
+  final centre = median(priorWindow)!;
+  final robustSd = mad(priorWindow)!;
+  final spread = robustSd > 0 ? robustSd : sd;
+  final z = spread > 0 ? (today - centre) / spread : null;
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
-  final swc = 0.5 * sd;
+  final swc = 0.5 * spread;
 
   final String band;
-  if (today < m - swc) {
+  if (today < centre - swc) {
     band = 'suppressed';
-  } else if (today > m + swc) {
+  } else if (today > centre + swc) {
     band = 'elevated';
   } else {
     band = 'normal';
@@ -140,6 +155,7 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
     value: ReadinessLnRmssd(
       lnRmssdToday: today,
       rolling7Mean: m,
+      rolling7Median: centre,
       cvPct: cv,
       z: z,
       swc: swc,
