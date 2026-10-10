@@ -22,8 +22,8 @@ paper and decide for yourself whether to trust the number.
 
 If nothing in the literature fits, that's allowed — mark it `ESTIMATE`, give it
 low confidence, and say so plainly. What's not allowed is inventing constants
-and presenting them as science, or reverse-engineering WHOOP's scores by
-fitting to their output.
+and presenting them as science, or recreating a vendor's scores by fitting
+to their output.
 
 **2. Never fabricate a value.** If an input isn't there, return a `Metric` with
 a `null` value. Not a default, not a last-known-good, not an interpolation

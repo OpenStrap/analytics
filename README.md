@@ -27,7 +27,7 @@ literature specifically so you can go read the paper yourself and decide whether
 trust the number.
 
 Is it the same as what WHOOP gives you? No. Not close. They've got years and a research
-team behind their recovery/strain scores. I've got a reverse-engineered byte stream and a
+team behind their recovery/strain scores. I've got the data the band hands over and a
 pile of textbook equations. What comes out of here is an honest approximation built from
 exactly what the band hands over, nothing more. It trends correctly, it'll tell you when
 you're under-recovered — it's not their secret sauce, and it never claims to be.
