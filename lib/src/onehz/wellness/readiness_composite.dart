@@ -26,8 +26,12 @@
 //   3. Weighted sum with disclosed weights HRV > RHR > RR > temp; weights are
 //      RENORMALIZED over the inputs actually present (missing inputs are
 //      dropped, never zero-imputed).
+//      HRV and RHR form ONE autonomic input (mean of their oriented z's, weight
+//      0.70) — see [readinessAutonomicLabels].
 //   4. The composite z is mapped to a 0..100 score via a logistic so typical
-//      days land near 50.
+//      days land near 50, rescaled by the user's own composite-z spread once
+//      14 prior nights exist, and re-centred on their median (capped ±0.5)
+//      — see [calibratedReadinessScore].
 //   5. ALWAYS attach the per-input contribution breakdown |w_i·z_i| ranked.
 //
 // HONESTY: glass-box index (weights disclosed); "—" when no inputs present;
@@ -127,11 +131,137 @@ ReadinessInput tempInput(
 class Readiness {
   final double score; // 0..100 glass-box readiness
   final double compositeZ; // weighted, sign-oriented composite z
-  const Readiness(this.score, this.compositeZ);
+
+  /// The personal spread σ̂ [score] was mapped with; null while calibrating
+  /// (fewer than [readinessCalibrationMinNights] prior composite z's).
+  final double? calibrationSigma;
+
+  /// Prior composite z's the calibration had to work with.
+  final int calibrationNights;
+
+  /// Median of the prior composite z's (raw) and the centre actually removed
+  /// (capped to ±[readinessCentreCap]); null while calibrating.
+  final double? calibrationCentreRaw;
+  final double? calibrationCentre;
+  const Readiness(this.score, this.compositeZ,
+      {this.calibrationSigma,
+      this.calibrationNights = 0,
+      this.calibrationCentreRaw,
+      this.calibrationCentre});
   Map<String, dynamic> toJson() => {
         'score': round6(score),
         'composite_z': round6(compositeZ),
+        'calibration': {
+          'status': calibrationSigma == null ? 'calibrating' : 'calibrated',
+          'nights': calibrationNights,
+          if (calibrationSigma != null) 'sigma': round6(calibrationSigma!),
+          if (calibrationCentreRaw != null)
+            'centre_raw': round6(calibrationCentreRaw!),
+          if (calibrationCentre != null) 'centre': round6(calibrationCentre!),
+        },
       };
+}
+
+/// The two inputs that read the SAME autonomic state. Lower HRV and higher RHR
+/// move together (oriented-z correlation 0.82 over 52 real nights), so scoring
+/// them as two independent inputs counted one signal twice — 70% of the weight
+/// rode on it. They now form ONE autonomic input: the mean of their oriented
+/// z's, carrying their combined weight.
+const Set<String> readinessAutonomicLabels = {'HRV', 'RHR'};
+
+/// Combined weight of the autonomic input (HRV 0.40 + RHR 0.30).
+const double readinessAutonomicWeight = 0.70;
+
+/// Combine sign-oriented z's into the composite. [used] is every input that
+/// produced a z; [autonomicWeight] is the weight the HRV/RHR group carries
+/// whenever at least one of them is present, split evenly across the members
+/// present (so their contributions are the mean of their z's × the weight).
+/// Every other input keeps its own weight. Returns the composite (weights
+/// renormalised over what is present), the per-label contribution (summing to
+/// the composite), and the weight that was present.
+({double z, Map<String, double> contributions, double weightSum})
+    combineReadinessZ(
+  List<({String label, double weight, double orientedZ})> used, {
+  double autonomicWeight = readinessAutonomicWeight,
+}) {
+  final nAuto =
+      used.where((u) => readinessAutonomicLabels.contains(u.label)).length;
+  var weightSum = nAuto > 0 ? autonomicWeight : 0.0;
+  final raw = <String, double>{};
+  for (final u in used) {
+    final auto = readinessAutonomicLabels.contains(u.label);
+    if (!auto) weightSum += u.weight;
+    raw[u.label] = (auto ? autonomicWeight / nAuto : u.weight) * u.orientedZ;
+  }
+  if (weightSum <= 0) return (z: 0.0, contributions: const {}, weightSum: 0.0);
+  final contributions = {
+    for (final e in raw.entries) e.key: e.value / weightSum,
+  };
+  return (
+    z: contributions.values.fold(0.0, (a, b) => a + b),
+    contributions: contributions,
+    weightSum: weightSum,
+  );
+}
+
+/// Nights of prior composite z before the score mapping is personalised.
+const int readinessCalibrationMinNights = 14;
+
+/// Floor on σ̂: a run of near-identical nights must not blow a small z up.
+const double readinessCalibrationSigmaFloor = 0.3;
+
+/// The composite-z spread the Home band cut-offs were set on (26/37/61 are the
+/// 5th/20th/75th percentiles of logistic(N(0, 0.65))).
+const double readinessDesignSigma = 0.65;
+
+/// Cap on the centre removed from z. A user whose nights sit persistently
+/// below their own per-input baselines (one real history: composite-z median
+/// −0.35, HRV under its trailing median on 77% of nights) otherwise reads
+/// "low" every day. Re-centring on the trailing median fixes that, but an
+/// uncapped centre would also absorb a real downturn within ~2 weeks. The cap
+/// lets a step-down beyond 0.5 z keep showing: the part of it past the cap is
+/// never re-centred away, and the rest only as the median catches up.
+/// ponytail: one population constant; personalise if real step-downs say so.
+const double readinessCentreCap = 0.5;
+
+/// Map a composite z to 0..100.
+///
+/// The band cut-offs assume composite z has SD ≈ 0.65. Real users do not share
+/// one spread: on one real 52-night history it was 1.26, which put 19% of
+/// nights in "Rest today" against a designed 5%. So once [zHistory] (this
+/// user's PRIOR composite z's) holds ≥ [readinessCalibrationMinNights] nights,
+/// z is rescaled by the user's own robust spread σ̂ = MAD × 1.4826 (floored at
+/// [readinessCalibrationSigmaFloor]):
+/// and re-centred on the history's median ĉ, capped to ±[readinessCentreCap]:
+///   score = 100 / (1 + exp(−0.65·(z − ĉ) / σ̂))
+/// Fewer nights → the uncalibrated logistic(z), flagged as calibrating.
+({
+  double score,
+  double? sigma,
+  int nights,
+  double? centreRaw,
+  double? centre
+}) calibratedReadinessScore(double z, List<double> zHistory) {
+  final n = zHistory.length;
+  if (n < readinessCalibrationMinNights) {
+    return (
+      score: 100 / (1 + math.exp(-z)),
+      sigma: null,
+      nights: n,
+      centreRaw: null,
+      centre: null,
+    );
+  }
+  final sigma = math.max(readinessCalibrationSigmaFloor, mad(zHistory)!);
+  final raw = median(zHistory)!;
+  final centre = raw.clamp(-readinessCentreCap, readinessCentreCap).toDouble();
+  return (
+    score: 100 / (1 + math.exp(-readinessDesignSigma * (z - centre) / sigma)),
+    sigma: sigma,
+    nights: n,
+    centreRaw: raw,
+    centre: centre,
+  );
 }
 
 /// Compute the honest readiness composite.
@@ -169,15 +299,15 @@ Metric<Readiness> readinessComposite(
   int minBaseline = readinessCompositeMinBaseline,
   int minInputs = readinessCompositeMinInputs,
   double minWeightSum = readinessCompositeMinWeight,
+  List<double> compositeZHistory = const [],
 }) {
   final used = <String>[];
-  final drivers = <Driver>[];
+  final parts = <({String label, double weight, double orientedZ})>[];
+  final details = <String, String>{};
   final refusals = <String>[
     for (final inp in inputs)
       if (inp.refusal != null) inp.refusal!
   ];
-  var weightSum = 0.0;
-  var weightedZ = 0.0;
   // Track the best-covered input that has a value but a too-short baseline, so
   // we can emit a machine-readable need_baseline note when nothing computes.
   var anyValuePresent = false;
@@ -230,9 +360,7 @@ Metric<Readiness> readinessComposite(
     if (zr == null) continue;
     final oriented = inp.goodSign * zr; // + = good for readiness
     used.add(inp.label);
-    weightSum += inp.weight;
-    weightedZ += inp.weight * oriented;
-    // Driver contribution is the signed weighted z (renormalized later).
+    parts.add((label: inp.label, weight: inp.weight, orientedZ: oriented));
     // GLASS-BOX: the disclosed method must be the method ACTUALLY used — on a
     // quantized baseline the MAD collapses and the mean/SD fallback above
     // produced this z, so saying "robust-z" there would misstate how the
@@ -240,9 +368,13 @@ Metric<Readiness> readinessComposite(
     final method = rz != null
         ? 'robust-z (median+MAD)'
         : 'z (mean+SD fallback — MAD=0 on a quantized baseline)';
-    drivers.add(Driver(inp.label, inp.weight * oriented,
-        detail: 'oriented $method=${round6(oriented)}'));
+    details[inp.label] = 'oriented $method=${round6(oriented)}';
   }
+  final combined = combineReadinessZ(parts, autonomicWeight: [
+    for (final inp in inputs)
+      if (readinessAutonomicLabels.contains(inp.label)) inp.weight
+  ].fold(0.0, (a, b) => a + b));
+  final weightSum = combined.weightSum;
   final suffix = refusals.isEmpty ? '' : ' Refused: ${refusals.join('; ')}.';
   if (used.length < minInputs || weightSum < minWeightSum) {
     // If inputs HAD values but their baselines were too short, say so in the
@@ -272,33 +404,39 @@ Metric<Readiness> readinessComposite(
           '$suffix',
     );
   }
-  // Renormalize weights over present inputs.
-  final composite = weightedZ / weightSum;
-  // Renormalize driver contributions by the same factor so they sum to the
+  // Weights renormalised over present inputs; contributions sum to the
   // composite z (glass-box: contributions are definitional within the formula).
+  final composite = combined.z;
   final normDrivers = <Driver>[
-    for (final d in drivers)
-      Driver(d.label, roundTo(d.contribution / weightSum, 6), detail: d.detail)
+    for (final e in combined.contributions.entries)
+      Driver(e.key, roundTo(e.value, 6), detail: details[e.key])
   ];
   // Rank by |contribution| (the deterministic-narrative driver ordering).
   normDrivers
       .sort((a, b) => b.contribution.abs().compareTo(a.contribution.abs()));
 
-  // Map composite z -> 0..100 via logistic; ~50 at z=0, scale so ±2 z ~ 12/88.
-  final score = 100 / (1 + math.exp(-composite));
+  final cal = calibratedReadinessScore(composite, compositeZHistory);
 
   // Confidence scales with how many inputs were available (more = better).
   final conf = (0.3 + 0.15 * used.length).clamp(0.3, 0.9);
 
   return Metric<Readiness>(
-    value: Readiness(score, composite),
+    value: Readiness(cal.score, composite,
+        calibrationSigma: cal.sigma,
+        calibrationNights: cal.nights,
+        calibrationCentreRaw: cal.centreRaw,
+        calibrationCentre: cal.centre),
     confidence: conf,
     tier: Tier.estimate,
     inputs_used: used,
     drivers: normDrivers,
     note:
-        'GLASS-BOX readiness: disclosed weights HRV>RHR>RR>temp, renormalized '
-        'over present inputs. Drivers are definitional within the formula '
-        '(correction, not inferred cause).$suffix',
+        'GLASS-BOX readiness: disclosed weights autonomic (HRV+RHR, '
+        'mean of their z) 0.70 > RR 0.20 > temp 0.10, renormalized over present '
+        'inputs. Drivers are definitional within the formula (correction, not '
+        'inferred cause). '
+        '${cal.sigma == null ? 'calibrating:have=${cal.nights},need=$readinessCalibrationMinNights' : 'calibrated:sigma=${round6(cal.sigma!)},n=${cal.nights},'
+            'centre=${round6(cal.centre!)},centre_raw=${round6(cal.centreRaw!)}'}.'
+        '$suffix',
   );
 }
