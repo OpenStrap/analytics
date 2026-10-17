@@ -130,7 +130,8 @@ void main() {
           reason: 'not one second of gravity was measured');
     });
 
-    test('the SAME vectors marked valid still stage — the flag is the only '
+    test(
+        'the SAME vectors marked valid still stage — the flag is the only '
         'difference', () {
       // Control: proves the abstention above comes from the validity flag and
       // not from the (0,0,0) coordinates or the window shape.
@@ -473,8 +474,8 @@ void main() {
       // became one ~186-min "cycle" and the mean jumped from ~89 to ~138 min.
       const onset = _t0;
       const nMin = 480;
-      List<SleepCycle> cyclesWith({int? holeFrom, int? holeTo}) {
-        final rnd = math.Random(7);
+      List<SleepCycle> cyclesWith({int? holeFrom, int? holeTo, int seed = 7}) {
+        final rnd = math.Random(seed);
         final rr = <double>[], ts = <double>[];
         for (var s = 0; s < nMin * 60; s++) {
           final m = s ~/ 60;
@@ -485,7 +486,8 @@ void main() {
         }
         final r = detectSleepCycles(rr, ts, onset, onset + nMin * 60);
         if (r.cycles.isNotEmpty) {
-          expect(r.meanDurationMin,
+          expect(
+              r.meanDurationMin,
               closeTo(
                   r.cycles.fold<int>(0, (a, c) => a + c.lenMin) /
                       r.cycles.length,
@@ -500,11 +502,25 @@ void main() {
         expect(c.lenMin, inInclusiveRange(70, 110));
       }
 
-      final holed = cyclesWith(holeFrom: 100, holeTo: 260);
-      for (final c in holed) {
-        expect(c.startMin < 260 && c.endMin > 100, isFalse,
-            reason: 'cycle ${c.startMin}-${c.endMin} spans the 100-260 hole');
-        expect(c.lenMin, inInclusiveRange(70, 110));
+      // Short contact losses matter most: the ±10 min smoothing paints into
+      // each edge of a hole, so a 30-40 min raw hole must still be caught.
+      for (final h in const [
+        [100, 260, 7],
+        [100, 260, 11],
+        [150, 190, 11],
+        [200, 240, 7],
+        [200, 240, 11],
+        [100, 130, 11],
+        [100, 140, 11],
+        [60, 100, 11],
+      ]) {
+        final holed = cyclesWith(holeFrom: h[0], holeTo: h[1], seed: h[2]);
+        for (final c in holed) {
+          expect(c.startMin < h[1] && c.endMin > h[0], isFalse,
+              reason: 'cycle ${c.startMin}-${c.endMin} spans the '
+                  '${h[0]}-${h[1]} hole (seed ${h[2]})');
+          expect(c.lenMin, inInclusiveRange(70, 110));
+        }
       }
     });
   });
