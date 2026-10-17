@@ -129,8 +129,9 @@ class ImmobilityMask {
   /// well-formed 0.0° that is not a measurement of anything.
   final List<double> zAngleDeg;
 
-  /// |Δ z-angle| vs the previous second (index 0 is 0 by definition). NaN when
-  /// either endpoint second is invalid — the arm may have moved across the gap
+  /// |Δ z-angle| vs the sample one smoothing epoch (`smoothSec`) earlier —
+  /// clamped to index 0 for the first epoch, and index 0 is 0 by definition.
+  /// NaN when either endpoint second is invalid — the arm may have moved across the gap
   /// and the record cannot say. Every comparison against NaN is false, so a
   /// consumer testing `deltaDeg[k] < threshold` degrades to "not still", never
   /// to "perfectly still".
@@ -241,9 +242,17 @@ ImmobilityMask immobilityMask(
   final ang = _rollingMedian(raw, smoothSamples);
 
   // 3. per-second immobility: |Δ z-angle| < threshold sustained for ≥ window.
+  //
+  // van Hees 2015 / GGIR test the change between CONSECUTIVE 5 s EPOCHS against
+  // 5°, not the change between consecutive samples. Differencing adjacent 1 Hz
+  // samples made the rule "< 5° per second": a 20° roll spread over 6 s moves
+  // ~3°/s, never crossed the threshold, and a restless hour in bed was certified
+  // as sustained rest. Differencing the smoothed angle across one smoothing
+  // epoch is the sliding form of the epoch-to-epoch comparison, so a slow roll
+  // is judged by the full change it makes over 5 s.
   final dAng = List<double>.filled(n, 0);
   for (var i = 1; i < n; i++) {
-    dAng[i] = (ang[i] - ang[i - 1]).abs();
+    dAng[i] = (ang[i] - ang[math.max(0, i - smoothSamples)]).abs();
   }
   final immobile = List<bool>.filled(n, false);
   final immobileUnknown = List<bool>.filled(n, false);
@@ -273,7 +282,10 @@ ImmobilityMask immobilityMask(
     var maxd = 0.0;
     var gap = !accel[i].valid;
     for (var k = i + 1; k < hi; k++) {
-      if (!accel[k].valid) {
+      // NaN also when the epoch this second is compared against reaches back
+      // into an unmeasured second, possibly one before `i` — the arm may have
+      // moved there, so it is a gap, not stillness.
+      if (!accel[k].valid || dAng[k].isNaN) {
         gap = true;
         break;
       }

@@ -605,7 +605,9 @@ void main() {
 
       // The two seconds must not share one answer — that is the whole bug.
       expect(w.immobileUnknown[3350] == w.immobileUnknown[3500], isFalse);
-      expect(w.undecidableSec, 193, reason: 'pre-fix: 0 (no such state)');
+      // The burst also decides the seconds whose 5 s comparison epoch still
+      // reaches back into it.
+      expect(w.undecidableSec, 189, reason: 'pre-fix: 0 (no such state)');
     });
   });
 

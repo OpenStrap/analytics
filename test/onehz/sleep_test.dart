@@ -195,22 +195,65 @@ void main() {
         accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
         t += 1000.0;
       }
-      // Zero out only the first still-block sample's timestamp.
-      accel[nightStart] = AccelSample(
+      // Zero out only the onset sample's timestamp. The first smoothing epoch
+      // of the still block is still compared against the moving epoch before
+      // it, so the onset lands smoothSec-1 samples into the block.
+      final onsetAt = nightStart + 4;
+      accel[onsetAt] = AccelSample(
         0,
-        accel[nightStart].x,
-        accel[nightStart].y,
-        accel[nightStart].z,
+        accel[onsetAt].x,
+        accel[onsetAt].y,
+        accel[onsetAt].z,
       );
 
       final m = vanHeesSleepWindow(accel);
       expect(m.present, isTrue);
       final w = m.value!;
-      expect(w.onsetIdx, nightStart,
+      expect(w.onsetIdx, onsetAt,
           reason: 'test setup must target the sample the code actually reads');
       expect(w.onsetMs, isNull,
           reason: 'unstamped onset sample must not fabricate epoch 0');
       expect(w.offsetMs, isNotNull);
+    });
+  });
+
+  group('van Hees epoch-to-epoch angle rule', () {
+    // 60 min of slow wrist rolls (20 deg over 6 s, ~3.3 deg/s, every 3 min,
+    // alternating direction) then 90 min perfectly still. No single second
+    // moves 5 deg, but consecutive 5 s epochs differ by well over 5 deg —
+    // van Hees 2015 / GGIR count that as movement.
+    List<AccelSample> slowRolls() {
+      final out = <AccelSample>[];
+      var base = 10.0;
+      var dir = 1.0;
+      for (var i = 0; i < 150 * 60; i++) {
+        var deg = base;
+        if (i < 60 * 60) {
+          final p = i % 180;
+          if (p < 6) deg = base + dir * 20 * (p + 1) / 6;
+          if (p == 5) {
+            base += dir * 20;
+            dir = -dir;
+          }
+        }
+        final r = deg * math.pi / 180;
+        out.add(AccelSample(1000.0 + i * 1000.0, math.cos(r), 0, math.sin(r)));
+      }
+      return out;
+    }
+
+    test('a slow roll spread over several seconds breaks immobility', () {
+      final accel = slowRolls();
+      final mask = immobilityMask(accel);
+      final restless = mask.immobile.sublist(0, 55 * 60);
+      expect(restless.where((s) => s).length, 0,
+          reason: 'pre-fix: every second of the restless hour was immobile');
+      expect(mask.immobile[70 * 60], isTrue);
+
+      final m = vanHeesSleepWindow(accel);
+      expect(m.present, isTrue);
+      expect(m.value!.onsetIdx, greaterThanOrEqualTo(57 * 60),
+          reason: 'pre-fix: onset at 0 — the restless hour was annexed');
     });
   });
 
