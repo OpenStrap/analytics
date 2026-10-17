@@ -721,10 +721,17 @@ class DailyMovementEstimate {
 /// deliberately NO constant fallback: a constant absolute floor is precisely
 /// the failure this design removes.
 ///
-/// The note counts DAYS, against [personalDynFloorMinDays]. It used to count
+/// The note counts DAYS, against [requiredHistoryDays]. It used to count
 /// them against [personalDynFloorMinMinutes] (2000) while every caller passed a
 /// day count, so a user three days in was told `have=3,need=2000` — ~1997 more
 /// of a unit nobody was measuring, for a metric that unlocks in two.
+///
+/// [requiredHistoryDays] must be the gate the caller actually applies before
+/// it stops passing a null floor. It defaults to [enrollmentDaysForFrozenFloor]
+/// because a caller that freezes the floor keeps it null until then; reporting
+/// against [personalDynFloorMinDays] made days 5-13 read `have=9,need=5`, a
+/// met gate on a metric that was still absent. A caller that uses the bare
+/// [personalDynFloorFromDailySummaries] median passes that function's minimum.
 ///
 /// Tier is always ESTIMATE.
 ///
@@ -738,6 +745,7 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
   double minSamplesPerMinute = 30,
   int minBoutMin = 3,
   int historyDaysAvailable = 0,
+  int requiredHistoryDays = enrollmentDaysForFrozenFloor,
   int? expectedMinutes,
 }) {
   const inputs = ['dyn_amp_per_min', 'personal_dyn_floor'];
@@ -758,7 +766,7 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
       inputs_used: inputs,
       note: needBaselineNote(
         have: historyDaysAvailable,
-        need: personalDynFloorMinDays,
+        need: requiredHistoryDays,
       ),
     );
   }
