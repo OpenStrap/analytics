@@ -1388,6 +1388,27 @@ void main() {
       expect(m.value!.z!.abs(), lessThan(0.1));
       expect(m.value!.band, 'normal');
     });
+    test('a stable user is flagged on ~32% of nights at every window size',
+        () {
+      // the band used to be centre ± 1 MAD of the prior 3-7 nights. the MAD of
+      // so few points runs small, so with no change at all 62% of nights were
+      // flagged at 3 prior nights and 45% at 7, against the 31.7% a known
+      // mean ± SD gives.
+      final rng = math.Random(11);
+      double gauss() =>
+          math.sqrt(-2 * math.log(1 - rng.nextDouble())) *
+          math.cos(2 * math.pi * rng.nextDouble());
+      for (final prior in [3, 4, 5, 6, 7]) {
+        var flagged = 0;
+        const trials = 6000;
+        for (var t = 0; t < trials; t++) {
+          final hist = [for (var i = 0; i <= prior; i++) 4.0 + 0.1 * gauss()];
+          if (readinessLnRmssd(hist).value!.band != 'normal') flagged++;
+        }
+        expect(flagged / trials, inInclusiveRange(0.28, 0.36),
+            reason: '$prior prior nights');
+      }
+    });
     group('stable user N(4.2, 0.15), 7 prior nights', () {
       final rng = math.Random(7);
       double gauss() =>
@@ -1413,8 +1434,10 @@ void main() {
       });
       test('a real drop is still caught', () {
         // a night 2 SD under the user's own level reads 'suppressed' most of
-        // the time, and a 3 SD drop nearly always.
-        expect(rate(-2, 'suppressed'), greaterThan(0.75));
+        // the time, and a 3 SD drop nearly always. a band calibrated to a
+        // ~32% steady-state flag rate on 7 estimated nights catches a 2 SD
+        // drop ~74% of the time; 84% is only reachable with known parameters.
+        expect(rate(-2, 'suppressed'), greaterThan(0.7));
         expect(rate(-3, 'suppressed'), greaterThan(0.9));
         // and a drop is never mistaken for the opposite.
         expect(rate(-2, 'elevated'), lessThan(0.02));
