@@ -303,6 +303,53 @@ void main() {
       expect(m.present, isTrue);
       expect(m.value, isEmpty, reason: 'the only block IS the main sleep');
     });
+
+    test('a fragment that continues the night is not booked as a nap', () {
+      // REGRESSION. The night detector drops a second short pre-dawn tail once
+      // its one-shot night-tail exemption is used, so the main window it hands
+      // over ends before the band shows the user was up. The index-overlap
+      // check let that dropped tail through, and it came back as a 6 AM "nap"
+      // at the 0.85 confidence cap.
+      for (final arousal in [12, 30, 60]) {
+        final d = _Day()
+          ..active(180, bpm: 80)
+          ..still(420, bpm: 55) // the night the main window covers
+          ..active(arousal, bpm: 72)
+          ..still(42, bpm: 56) // the dropped tail
+          ..active(600, bpm: 80);
+        final start = 180 * 60, end = start + 420 * 60;
+
+        final m = detectNaps(
+          d.accel,
+          d.hr,
+          mainSleep: SleepWindowSpan(start, end),
+        );
+
+        expect(m.present, isTrue);
+        expect(m.value, isEmpty,
+            reason: 'a $arousal-min arousal sits inside the night\'s '
+                'continuation gap, so the bout after it is the same night');
+        expect(m.note, contains('continuing the main sleep'));
+      }
+    });
+
+    test('a nap well clear of the night is still a nap', () {
+      final d = _Day()
+        ..active(180, bpm: 80)
+        ..still(420, bpm: 55)
+        ..active(180, bpm: 80) // three hours up — past any continuation
+        ..still(40, bpm: 56)
+        ..active(300, bpm: 80);
+      final start = 180 * 60, end = start + 420 * 60;
+
+      final m = detectNaps(
+        d.accel,
+        d.hr,
+        mainSleep: SleepWindowSpan(start, end),
+      );
+
+      expect(m.value, hasLength(1));
+    });
   });
 
   group('detectNaps — honest absence', () {

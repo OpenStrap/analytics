@@ -22,7 +22,8 @@
 //      two detectors have never been shown to agree on real nights.
 //   2. Enumerate EVERY immobility bout (the nocturnal path keeps only the
 //      longest), bridging brief arousals.
-//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window,
+//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window
+//      and anything starting within the night's continuation gap after it,
 //      and bouts built on seconds the band never measured (`minNapAccelCoverage`).
 //   4. Require an autonomic signature — median HR inside the bout at or below
 //      `napRestingHrMult` × the DAYTIME-AWAKE HR baseline. Stillness alone is
@@ -41,6 +42,7 @@
 
 import '../types.dart';
 import '../util.dart';
+import 'advanced_stager.dart' show AdvancedSleepStager;
 import 'van_hees.dart';
 
 /// An index range [start, end) into the day's arrays marking the MAIN
@@ -154,6 +156,18 @@ const double maxNapOffWristFraction = 0.5;
 /// and the leading fragment gets emitted as a multi-hour "nap" for the day that
 /// is ending — the exact phantom the deferral exists to prevent.
 const int napChainGapSec = 60 * 60;
+
+/// A bout starting within this long after the main sleep ends is the night
+/// going on, not a nap. Same gap the night detector chains continuations with,
+/// so the two detectors agree on where a night can still be.
+///
+/// The night detector does not keep every continuation it sees: once its
+/// one-shot short-tail exemption is spent, a second short pre-dawn tail falls
+/// to the 60-min floor and the main window ends before it. Those dropped tails
+/// are still, HR-dipped and outside the window, so an overlap test alone books
+/// them as a 6 AM nap and the night reads short.
+const int napNightContinuationSec =
+    AdvancedSleepStager.nightContinuationGapMin * 60;
 
 /// Minimum awake HR samples needed to define a baseline. Below this the day is
 /// not judged at all: a threshold set by a handful of samples is not a
@@ -324,9 +338,27 @@ Metric<List<NapWindow>> detectNaps(
   //   * any UNFINISHED bout. The nap window deliberately runs hours past
   //     midnight, so the first hours of tonight's sleep sit in this record;
   //     they are sleep, not sedentary wake, and they belong in no baseline.
+  // Bouts that start inside the night's continuation gap after the main sleep
+  // ends (see [napNightContinuationSec]). Measured on the wall clock from the
+  // window's last second, since index distance is not elapsed time.
+  final continuesNight = List<bool>.filled(bouts.length, false);
+  final mainEnd = mainSleep == null
+      ? 0
+      : (mainSleep.end > n ? n : mainSleep.end);
+  if (mainSleep != null && mainEnd > 0 && mainEnd > mainSleep.start) {
+    final mainEndAbs = absAt(mainEnd - 1) + 1;
+    for (var b = 0; b < bouts.length; b++) {
+      if (bouts[b][0] < mainEnd) continue;
+      final gap = absAt(bouts[b][0]) - mainEndAbs;
+      if (gap <= napNightContinuationSec) continuesNight[b] = true;
+    }
+  }
+
   final deferredSec = List<bool>.filled(n, false);
   for (var b = 0; b < bouts.length; b++) {
-    if (!unfinished[b]) continue;
+    // A night fragment is sleep, not sedentary wake, so it stays out of the
+    // awake baseline for the same reason an unfinished bout does.
+    if (!unfinished[b] && !continuesNight[b]) continue;
     for (var k = bouts[b][0]; k < bouts[b][1]; k++) {
       deferredSec[k] = true;
     }
@@ -355,6 +387,7 @@ Metric<List<NapWindow>> detectNaps(
   // A silent `continue` turns "your 7-hour still block is too long to be a nap"
   // into a bare "no qualifying nap", which tells the caller nothing about why.
   var outOfRange = 0, inMainSleep = 0, noBaseline = 0, unobserved = 0;
+  var nightTail = 0;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -380,6 +413,11 @@ Metric<List<NapWindow>> detectNaps(
 
     if (mainSleep != null && start < mainSleep.end && end > mainSleep.start) {
       inMainSleep++;
+      continue;
+    }
+
+    if (continuesNight[bi]) {
+      nightTail++;
       continue;
     }
 
@@ -502,6 +540,7 @@ Metric<List<NapWindow>> detectNaps(
     if (noBaseline > 0) '$noBaseline without an awake HR baseline',
     if (outOfRange > 0) '$outOfRange outside 15 min–6 h',
     if (inMainSleep > 0) '$inMainSleep inside the main sleep window',
+    if (nightTail > 0) '$nightTail continuing the main sleep',
     if (unobserved > 0) '$unobserved with accel coverage <50% (unmeasured)',
     if (unverifiable > 0) '$unverifiable unverifiable (HR coverage <50%)',
     if (offWrist > 0) '$offWrist off-wrist/excluded',
