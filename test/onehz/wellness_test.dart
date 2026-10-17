@@ -545,6 +545,29 @@ void main() {
       expect(cusumChangePoints(x, dates: contiguous, h: 5.0),
           hasLength(cusumChangePoints(x, h: 5.0).length));
     });
+
+    // A one-night gap every week (the band charging overnight) used to restart
+    // the regime on every gap, so the baseline never reached minBaseline and a
+    // sustained shift was never reported with dates passed.
+    test('a weekly one-night gap keeps the baseline (short gaps)', () {
+      const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      String day(int n) => DateTime.utc(2026, 1, 1)
+          .add(Duration(days: n))
+          .toIso8601String()
+          .substring(0, 10);
+      final x = <double>[];
+      final dates = <String>[];
+      for (var d = 0; d < 120; d++) {
+        if (d % 7 == 6) continue; // charging night
+        x.add((d < 60 ? 55.0 : 63.0) + noise10[d % 10]);
+        dates.add(day(d));
+      }
+      final dets = cusumChangePoints(x, dates: dates, h: 5.0);
+      expect(dets, hasLength(1));
+      expect(dets.single.direction, 1);
+      expect(
+          dates[dets.single.index].compareTo(day(60)), greaterThanOrEqualTo(0));
+    });
   });
 
   // -------------------------------------------------------------------------
