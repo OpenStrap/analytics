@@ -1026,6 +1026,55 @@ void main() {
       // l=2 (the default) still works on the same series.
       expect(decelerationCapacity(rr, l: 2).present, isTrue);
     });
+    test('REGRESSION: DC is RELATIVE, not HIGH', () {
+      // The same subject read 7.6-9.9 ms on gen4 and 1.7 ms on W5; publishing
+      // it HIGH made a strap switch look like an 80% collapse.
+      final rr = <double>[
+        for (var i = 0; i < 400; i++) 1000 + 20 * math.sin(2 * math.pi * i / 20)
+      ];
+      expect(decelerationCapacity(rr).tier, Tier.relative);
+      expect(accelerationCapacity(rr).tier, Tier.relative);
+      expect(decelerationCapacity([1000, 1010, 990]).tier, Tier.relative);
+    });
+    test('REGRESSION: no anchor window spans a hole in the beat record', () {
+      // 600 steady beats, a 40-min hole, 600 steady beats at a slower rate.
+      // Neither run has a single deceleration; the only one is the pair
+      // straddling the hole, which used to publish DC = 20 ms on its own.
+      final rr = <double>[], ts = <double>[];
+      var t = 1.7e12;
+      for (var i = 0; i < 600; i++) {
+        t += 1000;
+        rr.add(1000);
+        ts.add((t ~/ 1000) * 1000.0);
+      }
+      t += 40 * 60 * 1000;
+      for (var i = 0; i < 600; i++) {
+        t += 1040;
+        rr.add(1040);
+        ts.add((t ~/ 1000) * 1000.0);
+      }
+      final c = correctRr(rr, rrTsMs: ts);
+      expect(decelerationCapacity(c.nn).present, isTrue,
+          reason: 'without times the seam still anchors (legacy callers)');
+      final dc = decelerationCapacity(c.nn, nnTimesMs: c.nnTimesMs);
+      expect(dc.present, isFalse);
+      expect(dc.note, contains('no valid PRSA anchors'));
+    });
+    test('beat times on a contiguous record change nothing', () {
+      final rr = <double>[
+        for (var i = 0; i < 400; i++) 1000 + 20 * math.sin(2 * math.pi * i / 20)
+      ];
+      final ts = <double>[];
+      var t = 0.0;
+      for (final r in rr) {
+        t += r;
+        ts.add(t);
+      }
+      final a = decelerationCapacity(rr);
+      final b = decelerationCapacity(rr, nnTimesMs: ts);
+      expect(b.value!.anchors, a.value!.anchors);
+      expect(b.value!.capacity, a.value!.capacity);
+    });
   });
 
   group('nocturnal RHR + dip', () {
