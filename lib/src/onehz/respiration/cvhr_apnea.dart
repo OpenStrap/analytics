@@ -183,7 +183,15 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final perHour = cycleCount / analyzedHours;
-  final conf = ((1 - artifactFraction) * 0.85).clamp(0.2, 0.85);
+  // Confidence also scales with how much time was analysed. Any gap-free
+  // stretch of a minute counts, so a night that dropout left with one clean
+  // 72 s segment and a single dip read 50 cycles/h at 0.85 and tier HIGH. Full
+  // weight needs the same observed hours the 30-night screen asks of a night;
+  // below that the per-hour index is an estimate off a short sample.
+  final coverage = (analyzedHours / minAnalyzedHoursPerNight).clamp(0.0, 1.0);
+  final conf = ((1 - artifactFraction) * 0.85 * coverage).clamp(0.01, 0.85);
+  final tier =
+      analyzedHours < minAnalyzedHoursPerNight ? Tier.estimate : Tier.high;
   return Metric<CvhrResult>(
     value: CvhrResult(
       cycleCount: cycleCount,
@@ -195,7 +203,7 @@ Metric<CvhrResult> cvhrApneaScreen(
       widthQuartilesSec: _quartiles(widths),
     ),
     confidence: conf,
-    tier: Tier.high,
+    tier: tier,
     inputs_used: inputs,
     note: 'CVHR/ACAT (Hayano) apnea SCREEN — NOT a diagnosis, NOT an AHI; '
         'single-night CVHR has substantial night-to-night variability, '
