@@ -1520,6 +1520,31 @@ void main() {
       expect(m.note, contains('PRV not ECG'));
     });
 
+    test('stage mask is read on the beat clock, not from the first kept beat',
+        () {
+      // correctRr keeps the elapsed time of a dropped leading artifact run, so
+      // the first NN beat can sit minutes past 0 while the caller's mask starts
+      // at 0. Here the first 10 min were dropped: 600-1200 s is NREM (small
+      // swing), 1200-2400 s is REM (large swing) and masked out.
+      final nn = <double>[];
+      final times = <double>[];
+      var t = 600000.0;
+      var i = 0;
+      while (t < 2400000.0) {
+        final amp = t < 1200000.0 ? 10.0 : 40.0;
+        nn.add(1000.0 + amp * math.sin(2 * math.pi * i / 12));
+        t += nn.last;
+        times.add(t);
+        i++;
+      }
+      final mask = List<bool>.generate(2500, (s) => s < 1200);
+      final m = nocturnalRmssd(nn, times, stageMaskPerSec: mask);
+      expect(m.present, isTrue);
+      // Only the two NREM windows count (~3.7 ms); reading the mask from the
+      // first kept beat let two REM windows in and pulled the median to ~9 ms.
+      expect(m.value!, lessThan(6.0));
+    });
+
     test('absent without enough beats', () {
       expect(nocturnalRmssd([800, 810], [800, 1610]).present, isFalse);
     });
