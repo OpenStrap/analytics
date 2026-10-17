@@ -177,10 +177,11 @@ Metric<AlertnessForecast> alertnessForecast({
   final s0 =
       _sUpper - (_sUpper - _sLower) * math.exp(-sleepDurationHours / _tauSleep);
 
-  final phase =
-      (circadianAcrophaseHours != null && circadianAcrophaseHours.isFinite)
-          ? circadianAcrophaseHours
-          : _defaultAcrophaseHours;
+  // One predicate decides both the curve and its disclosure: a non-finite
+  // phase falls back to the population curve, so the note must say so too.
+  final fittedPhase =
+      circadianAcrophaseHours != null && circadianAcrophaseHours.isFinite;
+  final phase = fittedPhase ? circadianAcrophaseHours : _defaultAcrophaseHours;
 
   // THE CURVE ENDS WHEN THE DAY DOES. Until 2026-08-17 it ran a fixed 18 h and
   // the trough search below could only look at windows that fitted inside that
@@ -269,7 +270,7 @@ Metric<AlertnessForecast> alertnessForecast({
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'Three-Process Model shape only — NO SCORE. '
-        '${circadianAcrophaseHours == null ? _assumedPhaseNote : _fittedPhaseNote}'
+        '${fittedPhase ? _fittedPhaseNote : _assumedPhaseNote}'
         'The low window is where this model bottoms out over your waking day — '
         'usually its last hours. It follows from when you woke and how long you '
         'slept, and is not a dip measured on you. '

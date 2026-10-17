@@ -33,6 +33,29 @@ void main() {
       }
     });
 
+    test(
+        'REGRESSION: a non-finite phase draws AND discloses the population curve',
+        () {
+      // The curve fell back to the population phase on NaN while the note
+      // still claimed a phase fitted on the user's own data.
+      final nan = alertnessForecast(
+        wakeLocalHour: 7,
+        sleepDurationHours: 7,
+        circadianAcrophaseHours: double.nan,
+      );
+      final none = alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 7);
+      expect(nan.present, isTrue);
+      expect(nan.note, contains('ASSUMED from the population'));
+      expect(nan.note, isNot(contains('fitted on your own data')));
+      expect(nan.value!.troughLabel, none.value!.troughLabel);
+      final fitted = alertnessForecast(
+        wakeLocalHour: 7,
+        sleepDurationHours: 7,
+        circadianAcrophaseHours: 16,
+      );
+      expect(fitted.note, contains('fitted on your own data'));
+    });
+
     test('the safety refusal is on every output, present or absent', () {
       final present =
           alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 7.5);

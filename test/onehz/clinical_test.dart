@@ -1396,6 +1396,7 @@ void main() {
       final y = <double>[for (var i = 0; i < 24; i++) i.isEven ? 1.0 : -1.0];
       final m = cosinor(t, y);
       expect(m.value!.r2, lessThan(0.2));
+      expect(m.value!.acrophaseHours, isNull);
     });
     test('REGRESSION: 4 random points never score a confident circadian fit',
         () {
@@ -1413,10 +1414,14 @@ void main() {
     });
     test('REGRESSION: confidence comes from the ADJUSTED R² (3 fitted params)',
         () {
-      // 8 points of noise: raw R² is upward-biased, adjusted R² is not.
+      // A modest real rhythm under noise: raw R² is upward-biased, adjusted
+      // R² is not, and confidence follows the adjusted value.
       final rnd = math.Random(4242);
-      final t = <double>[for (var i = 0; i < 8; i++) i * 3.0];
-      final y = <double>[for (var i = 0; i < 8; i++) rnd.nextDouble()];
+      final t = <double>[for (var i = 0; i < 24; i++) i * 2.0];
+      final y = <double>[
+        for (var i = 0; i < 24; i++)
+          math.cos(2 * math.pi * t[i] / 24) + rnd.nextDouble()
+      ];
       final m = cosinor(t, y);
       expect(m.present, isTrue);
       expect(m.value!.r2Adj, lessThan(m.value!.r2));
@@ -1463,6 +1468,60 @@ void main() {
       final r = cosinor(t, rhythm);
       expect(r.value!.amplitudeP, lessThan(cosinorAcrophaseAlpha));
       expect(r.value!.acrophaseHours, closeTo(15, 1.0));
+    });
+  });
+
+  group('cosinor zero-amplitude gate', () {
+    // Hourly HR over 3 days (n = 72), built the way the cross-day pipeline
+    // feeds it. With no 24 h rhythm the fit explains ~0% of the variance, yet
+    // it used to publish an acrophase at tier HIGH and the alertness forecast
+    // placed its trough by that noise.
+    List<double> hours() => [for (var i = 0; i < 72; i++) i.toDouble()];
+
+    test('REGRESSION: rotating shifts (peaks drift 8 h/day) publish no phase',
+        () {
+      final y = <double>[
+        for (var i = 0; i < 72; i++)
+          () {
+            final day = i ~/ 24;
+            final peak = [14.0, 22.0, 6.0][day];
+            return 70 + 15 * math.cos(2 * math.pi * ((i % 24) - peak) / 24);
+          }()
+      ];
+      final m = cosinor(hours(), y);
+      expect(m.value!.acrophaseHours, isNull);
+      expect(m.value!.acrophaseRad, isNull);
+      expect(m.value!.amplitudeP, greaterThanOrEqualTo(0.05));
+    });
+
+    test('REGRESSION: irregular noise publishes no phase', () {
+      var abstained = 0;
+      for (var seed = 0; seed < 100; seed++) {
+        final rnd = math.Random(seed);
+        final y = <double>[
+          for (var i = 0; i < 72; i++) 70 + 20 * rnd.nextDouble()
+        ];
+        if (cosinor(hours(), y).value!.acrophaseHours == null) abstained++;
+      }
+      // alpha = 0.05: noise passes the gate about 5% of the time, never most.
+      expect(abstained, greaterThanOrEqualTo(85));
+    });
+
+    test('a constant signal has no rhythm to phase', () {
+      final m = cosinor(hours(), List.filled(72, 60.0));
+      expect(m.value?.acrophaseHours, isNull);
+    });
+
+    test('a real but noisy circadian rhythm still fits', () {
+      final rnd = math.Random(7);
+      final y = <double>[
+        for (var i = 0; i < 72; i++)
+          65 + 8 * math.cos(2 * math.pi * ((i % 24) - 16) / 24) +
+              6 * (rnd.nextDouble() - 0.5)
+      ];
+      final m = cosinor(hours(), y);
+      expect(m.present, isTrue);
+      expect(m.value!.acrophaseHours, closeTo(16, 0.5));
     });
   });
 
