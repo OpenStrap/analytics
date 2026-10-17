@@ -87,6 +87,7 @@ class _TempCal {
   /// g of |‖a‖ − 1| above which an epoch is masked. Null = the family sends
   /// no accelerometer with its temperature (a ring), so nothing is masked.
   final double? motionGate;
+
   /// One-sided settle band, in [unit]: a sample more than this far BELOW the
   /// night's median is not settled skin (see [nightlySkinTemp]). Null = this
   /// family has no measured band, so the settled mean REFUSES for it rather
@@ -254,6 +255,14 @@ Metric<SettledSkinTemp> nightlySkinTemp(
 /// every import, every raw replay — REFUSES, because a gen4 ADC count and a
 /// gen5 centi-°C in the same array cannot be told apart afterwards.
 ///
+/// [tzOffsetResolver] maps a unix-second timestamp to the UTC offset (seconds)
+/// in effect at that instant. The acrophase is a clock time and the IS profile
+/// is an hour-of-day profile, so both must be built on LOCAL time: on raw
+/// epoch time the peak comes out as the UTC hour (5.5 h out for a UTC+5:30
+/// user), and a DST change inside the record shifts real behaviour by an hour
+/// against the grid. Resolved per timestamp for that reason. When omitted the
+/// machine's local offset at each instant is used, as in `segmentSleep`.
+///
 /// Returns a RELATIVE-tier metric (phase only). Absent if too little data.
 Metric<TempCircadian> tempCircadian(
   List<AdcSample> samples, {
@@ -261,6 +270,7 @@ Metric<TempCircadian> tempCircadian(
   List<AccelSample>? accel,
   double? motionGate,
   int epochMin = 60,
+  int Function(int tsSec)? tzOffsetResolver,
 }) {
   const inputs = ['skin_temp_adc', 'device_family'];
   final cal = calibrationFor(_tempCal, deviceFamily);
@@ -272,6 +282,11 @@ Metric<TempCircadian> tempCircadian(
     );
   }
   final gate = motionGate ?? cal.motionGate;
+  final int Function(int tsSec) tzAt = tzOffsetResolver ??
+      (int tsSec) => DateTime.fromMillisecondsSinceEpoch(
+            tsSec * 1000,
+            isUtc: false,
+          ).timeZoneOffset.inSeconds;
   // De-mask: drop invalid + high-motion epochs.
   final ts = <double>[];
   final adc = <double>[];
@@ -289,16 +304,16 @@ Metric<TempCircadian> tempCircadian(
         }
       }
     }
-    ts.add(s.tsMs);
+    // Local wall-clock ms: everything downstream reads hour-of-day off this.
+    ts.add(s.tsMs + tzAt((s.tsMs / 1000).floor()) * 1000.0);
     adc.add(s.adc);
   }
 
   if (adc.length < 4) {
     return Metric<TempCircadian>.absent(
       tier: Tier.relative,
-      inputs_used: gate == null || accel == null
-          ? inputs
-          : [...inputs, 'accel'],
+      inputs_used:
+          gate == null || accel == null ? inputs : [...inputs, 'accel'],
       note: 'too few valid temp epochs for circadian analysis',
     );
   }
@@ -324,9 +339,7 @@ Metric<TempCircadian> tempCircadian(
     value: TempCircadian(cos.value, np, cal.unit),
     confidence: conf,
     tier: Tier.relative,
-    inputs_used: gate == null || accel == null
-          ? inputs
-          : [...inputs, 'accel'],
+    inputs_used: gate == null || accel == null ? inputs : [...inputs, 'accel'],
     note: 'RELATIVE skin-temp phase only (no °C/fever/core). Wrist temp is '
         'ANTIPHASE to core; activity-demasked epochs dropped=$deMasked '
         '(gate=${gate == null ? 'none, no accel' : '${gate}g'}). Amplitude '
@@ -336,8 +349,8 @@ Metric<TempCircadian> tempCircadian(
 }
 
 /// Witting/van Someren nonparametric circadian statistics. Bins the series into
-/// fixed [epochMin]-minute epochs aligned to wall-clock (hour-of-day from
-/// tsMs), averages within epoch, then computes IS/IV/RA/L5/M10.
+/// fixed [epochMin]-minute epochs aligned to wall-clock ([tsMs] must already be
+/// shifted to local time by the caller), averages within epoch, then computes IS/IV/RA/L5/M10.
 CircadianNonparam? _nonparam(
   List<double> tsMs,
   List<double> adc, {

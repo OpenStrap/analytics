@@ -16,6 +16,10 @@ import 'package:test/test.dart';
 import 'package:openstrap_analytics/src/onehz/wellness/wellness.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
+// The synthetic series below put their phase on the UTC epoch grid; pin the
+// local offset to zero so they do not depend on the machine's time zone.
+int _utc(int _) => 0;
+
 void main() {
   // -------------------------------------------------------------------------
   // 1. Relative skin-temp circadian — cosinor recovers an injected phase.
@@ -33,7 +37,8 @@ void main() {
             2000 + 300 * math.cos(2 * math.pi / 24 * (tHours - peakHour));
         samples.add(AdcSample(tMs, adc));
       }
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
       expect(m.present, isTrue);
       expect(m.tier, Tier.relative);
       final fit = m.value!.cosinorFit!;
@@ -44,6 +49,44 @@ void main() {
       final np = m.value!.nonparam!;
       expect(np.interdailyStability, greaterThan(0.7));
       expect(np.intradailyVariability, lessThan(0.5));
+    });
+
+    test('acrophase and IS bins are local clock time, not UTC', () {
+      // UTC+5:30 user whose wrist temp peaks at 03:00 LOCAL = 21:30 UTC.
+      const off = 19800;
+      const peakLocal = 3.0;
+      final samples = <AdcSample>[];
+      // 7 days @ 1 sample / 5 min, starting at a UTC midnight.
+      final t0 = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch.toDouble();
+      for (var i = 0; i < 7 * 24 * 12; i++) {
+        final tMs = t0 + i * 5 * 60 * 1000.0;
+        final localH = ((tMs / 1000 + off) / 3600) % 24;
+        final adc =
+            2000 + 300 * math.cos(2 * math.pi / 24 * (localH - peakLocal));
+        samples.add(AdcSample(tMs, adc));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: (_) => off);
+      expect(m.value!.cosinorFit!.acrophaseHours, closeTo(peakLocal, 0.1));
+    });
+
+    test('a DST change inside the record does not blur IS', () {
+      // Peak at 03:00 local throughout; the offset steps +1 h mid-record. On a
+      // UTC grid the second half's profile lands an hour late.
+      final t0 = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch.toDouble();
+      final switchMs = t0 + 7 * 24 * 3600 * 1000.0;
+      int offAt(int s) => s * 1000 < switchMs ? 0 : 3600;
+      // Square wave on the local clock: hour-aligned plateaus, so an exact
+      // local grid gives IS == 1 and any 1 h misalignment gives IS < 1.
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 14 * 24 * 12; i++) {
+        final tMs = t0 + i * 5 * 60 * 1000.0;
+        final localH = ((tMs / 1000 + offAt((tMs / 1000).floor())) / 3600) % 24;
+        samples.add(AdcSample(tMs, localH < 8 ? 2300 : 2000));
+      }
+      final local = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: offAt);
+      expect(local.value!.nonparam!.interdailyStability, closeTo(1.0, 1e-9));
     });
 
     test('RD-14: IS is taken about the GRAND mean, not the profile mean', () {
@@ -64,7 +107,8 @@ void main() {
           }
         }
       }
-      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+      final np = tempCircadian(samples,
+              deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc)
           .value!
           .nonparam!;
       // van Someren's IS puts BOTH variances about the grand mean. Using the
@@ -91,7 +135,8 @@ void main() {
           }
         }
       }
-      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+      final np = tempCircadian(samples,
+              deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc)
           .value!
           .nonparam!;
       // Correct value with divisor = epochsPerDay; strictly less than the
@@ -108,7 +153,8 @@ void main() {
         samples.add(
             AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi / 24 * tHours)));
       }
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
       final j = m.value!.nonparam!.toJson();
       // Not "absent when unobserved" — absent from the shape entirely, because
       // RA on a median-centred series divides by a quantity that crosses zero.
@@ -200,7 +246,8 @@ void main() {
         for (var i = 0; i < 3 * 24 * 6; i++)
           AdcSample(i * 10 * 60 * 1000.0, 2000.0),
       ];
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
       expect(m.value!.nonparam, isNull);
     });
   });
