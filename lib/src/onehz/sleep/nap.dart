@@ -23,7 +23,7 @@
 //   2. Enumerate EVERY immobility bout (the nocturnal path keeps only the
 //      longest), bridging brief arousals.
 //   3. Reject hard: off-wrist, charging/workout spans, the main sleep window
-//      and anything starting within the night's continuation gap after it,
+//      and short night tails starting within the continuation gap after it,
 //      and bouts built on seconds the band never measured (`minNapAccelCoverage`).
 //   4. Require an autonomic signature — median HR inside the bout at or below
 //      `napRestingHrMult` × the DAYTIME-AWAKE HR baseline. Stillness alone is
@@ -157,17 +157,33 @@ const double maxNapOffWristFraction = 0.5;
 /// is ending — the exact phantom the deferral exists to prevent.
 const int napChainGapSec = 60 * 60;
 
-/// A bout starting within this long after the main sleep ends is the night
-/// going on, not a nap. Same gap the night detector chains continuations with,
-/// so the two detectors agree on where a night can still be.
+/// A short sleep bout starting within this long after the main sleep ends is
+/// the night going on, not a nap. Same gap the night detector chains
+/// continuations with, so the two detectors agree on where a night can still
+/// be.
 ///
 /// The night detector does not keep every continuation it sees: once its
 /// one-shot short-tail exemption is spent, a second short pre-dawn tail falls
 /// to the 60-min floor and the main window ends before it. Those dropped tails
 /// are still, HR-dipped and outside the window, so an overlap test alone books
 /// them as a 6 AM nap and the night reads short.
+///
+/// Only a bout the night detector could actually have dropped is attributed to
+/// the night: at most [napNightTailMaxSec] long, and only once it has already
+/// passed every nap gate (still, measured, HR-dipped). A long still block right
+/// after waking — breakfast, a commute, the start of desk work — is not a tail
+/// and is judged like any other bout.
+///
+/// The night window itself is not extended here, so a genuine short
+/// back-to-sleep within this gap counts toward neither the night nor nap
+/// minutes. That loses a few minutes of sleep; booking them as a nap invents
+/// one and shortens the night.
 const int napNightContinuationSec =
     AdvancedSleepStager.nightContinuationGapMin * 60;
+
+/// Longest bout that can be a dropped night tail: the night detector's own
+/// minimum-sleep floor, which is what drops it.
+const int napNightTailMaxSec = AdvancedSleepStager.minSleepMin * 60;
 
 /// Minimum awake HR samples needed to define a baseline. Below this the day is
 /// not judged at all: a threshold set by a handful of samples is not a
@@ -338,27 +354,9 @@ Metric<List<NapWindow>> detectNaps(
   //   * any UNFINISHED bout. The nap window deliberately runs hours past
   //     midnight, so the first hours of tonight's sleep sit in this record;
   //     they are sleep, not sedentary wake, and they belong in no baseline.
-  // Bouts that start inside the night's continuation gap after the main sleep
-  // ends (see [napNightContinuationSec]). Measured on the wall clock from the
-  // window's last second, since index distance is not elapsed time.
-  final continuesNight = List<bool>.filled(bouts.length, false);
-  final mainEnd = mainSleep == null
-      ? 0
-      : (mainSleep.end > n ? n : mainSleep.end);
-  if (mainSleep != null && mainEnd > 0 && mainEnd > mainSleep.start) {
-    final mainEndAbs = absAt(mainEnd - 1) + 1;
-    for (var b = 0; b < bouts.length; b++) {
-      if (bouts[b][0] < mainEnd) continue;
-      final gap = absAt(bouts[b][0]) - mainEndAbs;
-      if (gap <= napNightContinuationSec) continuesNight[b] = true;
-    }
-  }
-
   final deferredSec = List<bool>.filled(n, false);
   for (var b = 0; b < bouts.length; b++) {
-    // A night fragment is sleep, not sedentary wake, so it stays out of the
-    // awake baseline for the same reason an unfinished bout does.
-    if (!unfinished[b] && !continuesNight[b]) continue;
+    if (!unfinished[b]) continue;
     for (var k = bouts[b][0]; k < bouts[b][1]; k++) {
       deferredSec[k] = true;
     }
@@ -388,6 +386,14 @@ Metric<List<NapWindow>> detectNaps(
   // into a bare "no qualifying nap", which tells the caller nothing about why.
   var outOfRange = 0, inMainSleep = 0, noBaseline = 0, unobserved = 0;
   var nightTail = 0;
+  // Wall-clock end of the main sleep, measured from the window's last second
+  // since index distance is not elapsed time.
+  final mainEndIdx =
+      mainSleep == null ? 0 : (mainSleep.end > n ? n : mainSleep.end);
+  final int? mainEndAbs =
+      mainSleep != null && mainEndIdx > 0 && mainEndIdx > mainSleep.start
+          ? absAt(mainEndIdx - 1) + 1
+          : null;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -413,11 +419,6 @@ Metric<List<NapWindow>> detectNaps(
 
     if (mainSleep != null && start < mainSleep.end && end > mainSleep.start) {
       inMainSleep++;
-      continue;
-    }
-
-    if (continuesNight[bi]) {
-      nightTail++;
       continue;
     }
 
@@ -478,6 +479,20 @@ Metric<List<NapWindow>> detectNaps(
 
     if (medHr > baseline * napRestingHrMult) {
       awakeStill++;
+      continue;
+    }
+
+    // A short sleep bout inside the night's continuation gap is a night tail
+    // the night detector dropped, not a nap (see [napNightContinuationSec]).
+    // Checked only now, after the bout has proven itself sleep, so the note
+    // never calls an awake sit "continuing the main sleep". It stays in the
+    // awake pool on purpose: removing still, low-HR seconds can only raise the
+    // baseline, which is the direction that invents naps.
+    if (mainEndAbs != null &&
+        tib <= napNightTailMaxSec &&
+        aStart >= mainEndAbs &&
+        aStart - mainEndAbs <= napNightContinuationSec) {
+      nightTail++;
       continue;
     }
 

@@ -333,6 +333,38 @@ void main() {
       }
     });
 
+    test('a long still block right after waking stays in the awake baseline',
+        () {
+      // REGRESSION. Treating every still bout that starts within the night's
+      // continuation gap as night pulled a 5-hour morning desk block out of the
+      // awake-HR pool. With only walking HR left, a 40-min awake sit at 75 bpm
+      // cleared the dip gate and became a nap, and the note called the desk
+      // block "continuing the main sleep".
+      for (final wake in [10, 60]) {
+        final d = _Day()
+          ..active(60, bpm: 85)
+          ..still(420, bpm: 55) // the night the main window covers
+          ..active(wake, bpm: 85)
+          ..still(300, bpm: 77) // morning desk work, awake
+          ..active(90, bpm: 80)
+          ..still(40, bpm: 75) // an awake sit
+          ..active(90, bpm: 80);
+        final start = 60 * 60, end = start + 420 * 60;
+
+        final m = detectNaps(
+          d.accel,
+          d.hr,
+          mainSleep: SleepWindowSpan(start, end),
+        );
+
+        expect(m.present, isTrue);
+        expect(m.value, isEmpty,
+            reason: 'nobody napped; the desk block anchors the awake baseline '
+                '($wake min after waking)');
+        expect(m.note, isNot(contains('continuing the main sleep')));
+      }
+    });
+
     test('a nap well clear of the night is still a nap', () {
       final d = _Day()
         ..active(180, bpm: 80)
