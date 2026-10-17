@@ -210,11 +210,15 @@ Metric<StrainTarget> strainTarget({
       targetMin: lo,
       targetMax: hi,
       band: band,
-      rationale: 'Target shaped by recovery and recent load.',
+      // Without a built-up fitness-fatigue model the window is recovery
+      // alone; naming load here would claim an input that never entered it.
+      rationale: hasLoad
+          ? 'Target shaped by recovery and recent load.'
+          : 'Target shaped by recovery.',
     ),
     confidence: 0.6,
     tier: Tier.estimate,
-    inputs_used: const ['recovery', 'load'],
+    inputs_used: hasLoad ? const ['recovery', 'load'] : const ['recovery'],
   );
 }
 
