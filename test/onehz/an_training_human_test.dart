@@ -113,7 +113,23 @@ void main() {
         if (shape[i] > shape[peak]) peak = i;
       }
       final peakClock = 7 + peak * 0.25;
-      expect(peakClock, closeTo(15.75, 0.5));
+      expect(peakClock, closeTo(16.75, 0.5));
+    });
+
+    test('the 12 h ultradian term puts the dip after lunch, not mid-morning',
+        () {
+      // Process U's trough sits 3 h before the circadian acrophase (Åkerstedt,
+      // Folkard & Portin 2004), ~13:48 at the default phase. It used to peak AT
+      // the acrophase with no offset: a dip at 10:48, a bump at 16:48, so the
+      // curve climbed steeply through late morning and then sagged in the late
+      // afternoon while C was still peaking.
+      final v =
+          alertnessForecast(wakeLocalHour: 6, sleepDurationHours: 9).value!;
+      double at(double h) => v.shape[((h - 6) / v.stepHours).round()];
+      final lateMorningRise = at(12) - at(10.75);
+      final lateAfternoonRise = at(16.75) - at(15);
+      expect(lateAfternoonRise, greaterThan(0));
+      expect(lateMorningRise, lessThan(lateAfternoonRise));
     });
 
     test('RD-02: the low window moves with sleep length, not with the horizon',
