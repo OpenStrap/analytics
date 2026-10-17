@@ -2188,6 +2188,59 @@ void main() {
       expect(untimed.present, isTrue);
       expect(untimed.value!.si, isNot(closeTo(gapAware.value!.si, 1e-6)));
     });
+
+    test(
+        'REGRESSION: gap fragments far shorter than ~5 min are not scored '
+        'against the 5-min resting bands', () {
+      // Resting beats around 1000 ms with RSA + slow drift. Over a 5-min
+      // window MxDMn picks up the drift; over a ~1-min fragment it cannot,
+      // so a short window reads a narrower range and a taller mode → higher SI.
+      double rr(int i) =>
+          1000.0 +
+          35.0 * math.sin(2 * math.pi * i / 4.5) +
+          50.0 * math.sin(2 * math.pi * i / 300.0) +
+          12.0 * math.sin(i * 2.399);
+
+      // A restless night: 60-beat runs separated by 45 s RR dropouts.
+      List<double> timesWithGaps(List<double> nn, int every, double gapMs) {
+        var t = 0.0;
+        return [
+          for (var i = 0; i < nn.length; i++)
+            t += nn[i] + (i > 0 && i % every == 0 ? gapMs : 0.0)
+        ];
+      }
+
+      final frag = <double>[for (var i = 0; i < 3000; i++) rr(i)];
+      final fragmented =
+          baevskyStressIndex(frag, nnTimesMs: timesWithGaps(frag, 60, 45000));
+      expect(fragmented.present, isFalse);
+      expect(fragmented.value, isNull);
+
+      // Long segments mixed with fragments: the fragments must not move the
+      // median — it equals the SI of the long segments on their own.
+      final long1 = <double>[for (var i = 0; i < 600; i++) rr(i)];
+      final shorts = <double>[for (var i = 600; i < 1200; i++) rr(i)];
+      final long2 = <double>[for (var i = 1200; i < 1800; i++) rr(i)];
+      final nn = [...long1, ...shorts, ...long2];
+      var t = 0.0;
+      final times = <double>[];
+      for (var i = 0; i < nn.length; i++) {
+        final inShorts = i >= 600 && i < 1200;
+        final gap = (i == 600 || i == 1200 || (inShorts && (i - 600) % 50 == 0))
+            ? 45000.0
+            : 0.0;
+        times.add(t += nn[i] + gap);
+      }
+      final mixed = baevskyStressIndex(nn, nnTimesMs: times);
+      final longOnly = baevskyStressIndex([...long1, ...long2],
+          nnTimesMs: [
+            ...[for (var i = 0; i < 600; i++) times[i]],
+            ...[for (var i = 1200; i < 1800; i++) times[i]],
+          ]);
+      expect(mixed.present, isTrue);
+      expect(longOnly.present, isTrue);
+      expect(mixed.value!.si, closeTo(longOnly.value!.si, 1e-9));
+    });
   });
 
   group('cardiac coherence (McCraty & Zayas 2014)', () {
