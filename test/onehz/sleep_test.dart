@@ -283,6 +283,34 @@ void main() {
       expect(agree, lessThanOrEqualTo(cases));
       expect(cases, lessThan(m.value!.cases));
     });
+
+    test(
+        'abstains when no pair clears the coverage floor, and sizes confidence '
+        'from the pairs that do', () {
+      // Eight days of grid, but the mask accepts one minute on day 0 and day
+      // 1. Before the floor gated the total this published SRI=+100 at 0.95.
+      const epochsPerDay = 1440;
+      final vec = List<bool>.filled(8 * epochsPerDay, true);
+      final valid = List<bool>.filled(8 * epochsPerDay, false);
+      valid[100] = true;
+      valid[epochsPerDay + 100] = true;
+      final thin = phillipsSri(vec, epochsPerDay, valid: valid);
+      expect(thin.present, isFalse);
+      expect(thin.value, isNull);
+
+      // Same eight-day grid, only days 0..2 fully observed: two qualifying
+      // pairs, so confidence reflects two comparisons, not seven.
+      final valid2 = List<bool>.generate(
+          8 * epochsPerDay, (i) => i < 3 * epochsPerDay);
+      final two = phillipsSri(vec, epochsPerDay, valid: valid2);
+      expect(two.present, isTrue);
+      expect(two.value!.pairs, hasLength(2));
+      expect(two.confidence, closeTo(0.3, 1e-9));
+
+      // A fully observed week still saturates.
+      final full = phillipsSri(vec, epochsPerDay);
+      expect(full.confidence, closeTo(0.95, 1e-9));
+    });
   });
 
   // ----------------------------------------------- segmentSleep (SINGLE SOURCE)
