@@ -1372,6 +1372,29 @@ void main() {
       expect(m.present, isTrue, reason: m.note);
       expect(m.value!.z, rows.value!.z);
     });
+    test('an ordinary night is not "suppressed" on single-night noise', () {
+      // tonight sits half a spread under the median; the week's rolling mean
+      // does not move, so nothing physiological happened.
+      final hist = <double>[4.05, 4.10, 4.18, 4.20, 4.22, 4.30, 4.35, 4.12];
+      final m = readinessLnRmssd(hist);
+      expect(m.value!.z!, lessThan(-0.5));
+      expect(m.value!.band, 'normal');
+    });
+    test('a stable user reads "normal" on most nights', () {
+      // nightly lnRMSSD ~ N(4.2, 0.15) with no change at all. compared one
+      // night at a time against a half-SD band, ~70% of nights were flagged.
+      final rng = math.Random(7);
+      double gauss() =>
+          math.sqrt(-2 * math.log(1 - rng.nextDouble())) *
+          math.cos(2 * math.pi * rng.nextDouble());
+      var flagged = 0;
+      const trials = 4000;
+      for (var t = 0; t < trials; t++) {
+        final hist = [for (var i = 0; i < 8; i++) 4.2 + 0.15 * gauss()];
+        if (readinessLnRmssd(hist).value!.band != 'normal') flagged++;
+      }
+      expect(flagged / trials, lessThan(0.35));
+    });
   });
 
   group('cosinor', () {

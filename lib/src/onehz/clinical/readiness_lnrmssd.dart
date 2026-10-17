@@ -79,15 +79,17 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
   final List<double> priorWindow;
+  List<int>? day;
   // all-or-nothing: calendarDays falls back to the row index for a label it
   // can't parse, and an index compared against epoch days is meaningless.
   if (dates != null &&
       dates.length == n &&
       dates.every((d) => DateTime.tryParse(d) != null)) {
-    final day = calendarDays(dates);
+    final d = calendarDays(dates);
+    day = d;
     priorWindow = [
       for (var i = 0; i < n - 1; i++)
-        if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
+        if (d[i] < d[n - 1] && d[n - 1] - d[i] <= windowDays)
           historyLnRmssd[i]
     ];
   } else {
@@ -136,10 +138,29 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
   final swc = 0.5 * spread;
 
+  // The band is decided on the ROLLING mean of the last [windowDays] nights
+  // ending tonight, as Plews compares it, not on tonight alone. Half a robust
+  // SD sits well inside single-night noise: tested one night at a time, a user
+  // whose HRV never changed read 'suppressed' or 'elevated' on about 70% of
+  // nights. Averaging the week shrinks that noise by roughly 1/sqrt(7) before
+  // the comparison. z stays single-night (the saturation guard wants tonight).
+  final List<double> rollingWindow;
+  if (day != null) {
+    rollingWindow = [
+      for (var i = 0; i < n; i++)
+        if (day[i] <= day[n - 1] && day[n - 1] - day[i] < windowDays)
+          historyLnRmssd[i]
+    ];
+  } else {
+    final rs = n - windowDays < 0 ? 0 : n - windowDays;
+    rollingWindow = historyLnRmssd.sublist(rs);
+  }
+  final rollingTonight = mean(rollingWindow)!;
+
   final String band;
-  if (today < centre - swc) {
+  if (rollingTonight < centre - swc) {
     band = 'suppressed';
-  } else if (today > centre + swc) {
+  } else if (rollingTonight > centre + swc) {
     band = 'elevated';
   } else {
     band = 'normal';
