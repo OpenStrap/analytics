@@ -405,6 +405,12 @@ class AdvancedSleepStager {
       if (!continuesChain) {
         chainFromOvernight = _isOvernightOnset(p.start, tzAt);
         nightTailAccepted = false; // new chain re-arms the one-shot exemption
+      } else if (!chainFromOvernight && _isOvernightOnset(p.start, tzAt)) {
+        // A chain that opened on an evening doze (onset before 20:00) becomes
+        // overnight once the real night continues it. Judging only the first
+        // session would leave the flag false for the whole night and drop the
+        // short re-onset after a pre-dawn arousal at the 60-min floor.
+        chainFromOvernight = true;
       } else if (isNightTail && (p.end - p.start) <= minSleepS) {
         // Consume the one-shot ONLY when a SHORT tail actually relied on the floor
         // exemption; a >60-min continuation passes the floor unaided and must not
