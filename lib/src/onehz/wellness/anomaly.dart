@@ -211,22 +211,33 @@ List<AnomalyDay> multivariateAnomaly(
     // after illness or a deload, measured against a baseline that still holds
     // the bad stretch) cleared the gate exactly like a deterioration and
     // surfaced as an illness-family "unusual physiology" flag. Only deviations
-    // in the oriented illness direction count toward the distance. Clamping
-    // can only lower d², so the [_madInflationTable] calibration stays
-    // conservative. Drivers below keep the signed zc.
+    // in the oriented illness direction count toward the distance. Drivers
+    // below keep the signed zc.
+    //
+    // Clamping alone does NOT only lower d²: when a baseline pair comes out
+    // anti-correlated (Pearson on 10-28 rows often does for temp/resp or
+    // temp/RHR), inv[a][b] > 0, and zeroing the negative member removes a
+    // negative cross term, so d² RISES — temp +5 with resp -3 crossed a gate
+    // the two-sided distance stayed under. The [_madInflationTable] was
+    // measured on the two-sided statistic, so the one-sided distance is taken
+    // as min(clamped, two-sided): it keeps the one-sided behaviour and stays
+    // bounded by the statistic the gate is calibrated for.
     final zb = [for (final v in zc) v > 0 ? v : 0.0];
-    double d2;
-    if (inv == null) {
-      // Fall back to identity (uncorrelated) — sum of squared z.
-      d2 = zb.fold(0.0, (s, v) => s + v * v);
-    } else {
-      d2 = 0.0;
-      for (var a = 0; a < zb.length; a++) {
-        for (var b = 0; b < zb.length; b++) {
-          d2 += zb[a] * inv[a][b] * zb[b];
+    double quad(List<double> z) {
+      if (inv == null) {
+        // Fall back to identity (uncorrelated) — sum of squared z.
+        return z.fold(0.0, (s, v) => s + v * v);
+      }
+      var q = 0.0;
+      for (var a = 0; a < z.length; a++) {
+        for (var b = 0; b < z.length; b++) {
+          q += z[a] * inv[a][b] * z[b];
         }
       }
+      return q;
     }
+
+    var d2 = math.min(quad(zb), quad(zc));
     if (d2 < 0) d2 = 0; // numerical guard
     final dist = math.sqrt(d2);
 

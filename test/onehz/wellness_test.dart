@@ -417,6 +417,40 @@ void main() {
         expect(out[i].drivers.every((d) => d.contribution < 0), isTrue);
       }
     });
+
+    test('clamping a healthy-side z never raises d² above the two-sided one',
+        () {
+      // Temp and resp anti-correlated in the baseline, so the inverse
+      // correlation has a positive off-diagonal. Tonight temp is well up and
+      // resp well down: zeroing resp's negative z removes a negative cross
+      // term, which on its own pushes d² past a gate the two-sided distance
+      // (the one the inflation table was measured on) stays under.
+      final r = math.Random(7);
+      double g() {
+        final u1 = r.nextDouble() + 1e-12, u2 = r.nextDouble();
+        return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
+      }
+
+      final feats = <AnomalyFeatures>[];
+      for (var k = 0; k < 28; k++) {
+        final u = g(), w = g();
+        feats.add(
+            AnomalyFeatures(temp: 100 + 2 * u, resp: 15 + (-0.6 * u + 0.8 * w)));
+      }
+      for (var k = 28; k < 30; k++) {
+        final win = feats.sublist(k - 28, k);
+        final tc = [for (final f in win) f.temp!];
+        final rc = [for (final f in win) f.resp!];
+        feats.add(AnomalyFeatures(
+            temp: median(tc)! + 5 * mad(tc)!,
+            resp: median(rc)! - 3 * mad(rc)!));
+      }
+      final out = multivariateAnomaly(dates(feats.length), feats);
+      for (var i = 28; i < 30; i++) {
+        expect(out[i].candidate, isFalse, reason: 'night $i');
+        expect(out[i].flagged, isFalse, reason: 'night $i');
+      }
+    });
   });
 
   // -------------------------------------------------------------------------
