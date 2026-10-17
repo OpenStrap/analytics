@@ -1373,27 +1373,52 @@ void main() {
       expect(m.value!.z, rows.value!.z);
     });
     test('an ordinary night is not "suppressed" on single-night noise', () {
-      // tonight sits half a spread under the median; the week's rolling mean
-      // does not move, so nothing physiological happened.
+      // tonight sits half a spread under the median: ordinary night-to-night
+      // noise, nothing physiological.
       final hist = <double>[4.05, 4.10, 4.18, 4.20, 4.22, 4.30, 4.35, 4.12];
       final m = readinessLnRmssd(hist);
       expect(m.value!.z!, lessThan(-0.5));
       expect(m.value!.band, 'normal');
     });
-    test('a stable user reads "normal" on most nights', () {
-      // nightly lnRMSSD ~ N(4.2, 0.15) with no change at all. compared one
-      // night at a time against a half-SD band, ~70% of nights were flagged.
+    test('an old bad night does not label an ordinary tonight', () {
+      // tonight equals the centre; the 3.568 night six nights back must not
+      // make it 'suppressed', and the band must agree with z.
+      final hist = [4.56, 3.568, 4.623, 4.397, 4.662, 4.794, 4.653, 4.62];
+      final m = readinessLnRmssd(hist);
+      expect(m.value!.z!.abs(), lessThan(0.1));
+      expect(m.value!.band, 'normal');
+    });
+    group('stable user N(4.2, 0.15), 7 prior nights', () {
       final rng = math.Random(7);
       double gauss() =>
           math.sqrt(-2 * math.log(1 - rng.nextDouble())) *
           math.cos(2 * math.pi * rng.nextDouble());
-      var flagged = 0;
-      const trials = 4000;
-      for (var t = 0; t < trials; t++) {
-        final hist = [for (var i = 0; i < 8; i++) 4.2 + 0.15 * gauss()];
-        if (readinessLnRmssd(hist).value!.band != 'normal') flagged++;
+      double rate(double tonightShiftSd, String band) {
+        var hit = 0;
+        const trials = 4000;
+        for (var t = 0; t < trials; t++) {
+          final hist = [
+            for (var i = 0; i < 7; i++) 4.2 + 0.15 * gauss(),
+            4.2 + 0.15 * (tonightShiftSd + gauss()),
+          ];
+          if (readinessLnRmssd(hist).value!.band == band) hit++;
+        }
+        return hit / trials;
       }
-      expect(flagged / trials, lessThan(0.35));
+
+      test('with no change, most nights read "normal"', () {
+        // against a half-SD band one night at a time, ~70% were flagged.
+        expect(rate(0, 'normal'), greaterThan(0.5));
+        expect(rate(0, 'suppressed'), lessThan(0.27));
+      });
+      test('a real drop is still caught', () {
+        // a night 2 SD under the user's own level reads 'suppressed' most of
+        // the time, and a 3 SD drop nearly always.
+        expect(rate(-2, 'suppressed'), greaterThan(0.75));
+        expect(rate(-3, 'suppressed'), greaterThan(0.9));
+        // and a drop is never mistaken for the opposite.
+        expect(rate(-2, 'elevated'), lessThan(0.02));
+      });
     });
   });
 

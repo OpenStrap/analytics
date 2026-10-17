@@ -20,7 +20,7 @@ class ReadinessLnRmssd {
   final double cvPct; // CV of lnRMSSD over the window
   final double? z; // (today - rollingMedian)/robustSD
   final double? swc; // smallest worthwhile change (0.5×robust SD, Plews-style)
-  final String band; // 'suppressed' | 'normal' | 'elevated'
+  final String band; // 'suppressed' | 'normal' | 'elevated' (tonight vs centre ± 1 spread)
   final bool saturationFlag;
   const ReadinessLnRmssd({
     required this.lnRmssdToday,
@@ -79,17 +79,15 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
   final List<double> priorWindow;
-  List<int>? day;
   // all-or-nothing: calendarDays falls back to the row index for a label it
   // can't parse, and an index compared against epoch days is meaningless.
   if (dates != null &&
       dates.length == n &&
       dates.every((d) => DateTime.tryParse(d) != null)) {
-    final d = calendarDays(dates);
-    day = d;
+    final day = calendarDays(dates);
     priorWindow = [
       for (var i = 0; i < n - 1; i++)
-        if (d[i] < d[n - 1] && d[n - 1] - d[i] <= windowDays)
+        if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
           historyLnRmssd[i]
     ];
   } else {
@@ -138,29 +136,22 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
   final swc = 0.5 * spread;
 
-  // The band is decided on the ROLLING mean of the last [windowDays] nights
-  // ending tonight, as Plews compares it, not on tonight alone. Half a robust
-  // SD sits well inside single-night noise: tested one night at a time, a user
-  // whose HRV never changed read 'suppressed' or 'elevated' on about 70% of
-  // nights. Averaging the week shrinks that noise by roughly 1/sqrt(7) before
-  // the comparison. z stays single-night (the saturation guard wants tonight).
-  final List<double> rollingWindow;
-  if (day != null) {
-    rollingWindow = [
-      for (var i = 0; i < n; i++)
-        if (day[i] <= day[n - 1] && day[n - 1] - day[i] < windowDays)
-          historyLnRmssd[i]
-    ];
-  } else {
-    final rs = n - windowDays < 0 ? 0 : n - windowDays;
-    rollingWindow = historyLnRmssd.sublist(rs);
-  }
-  final rollingTonight = mean(rollingWindow)!;
-
+  // The band is a SINGLE-NIGHT decision, so its threshold has to be a
+  // single-night one: tonight outside centre ± 1 × spread, Kiviniemi 2007's
+  // daily reference value (baseline mean ± SD). The SWC above (0.5 × spread)
+  // is Plews' threshold for a 7-day ROLLING mean, where averaging has already
+  // cut night-to-night noise by ~1/sqrt(7); applied to one night it sits inside
+  // ordinary noise and a user whose HRV never changed read 'suppressed' or
+  // 'elevated' on ~70% of nights. Comparing a rolling mean instead does not
+  // work against this baseline: the week being tested is six-sevenths the same
+  // nights the centre comes from, so a real multi-night drop drags the centre
+  // with it and goes unflagged, and one old bad night keeps an ordinary
+  // tonight 'suppressed' for the rest of the week. At zero spread any
+  // departure from the centre is outside the band.
   final String band;
-  if (rollingTonight < centre - swc) {
+  if (today < centre - spread) {
     band = 'suppressed';
-  } else if (rollingTonight > centre + swc) {
+  } else if (today > centre + spread) {
     band = 'elevated';
   } else {
     band = 'normal';
