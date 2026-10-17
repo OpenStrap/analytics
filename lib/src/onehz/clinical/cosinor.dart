@@ -17,8 +17,15 @@ import '../util.dart';
 class CosinorFit {
   final double mesor; // rhythm-adjusted mean
   final double amplitude; // half the peak-to-trough range
-  final double acrophaseRad; // phase of the peak (rad), in [-π, π]
-  final double acrophaseHours; // acrophase expressed as clock-hours of [period]
+  /// Phase of the peak (rad), in [-π, π]. Null when the zero-amplitude F-test
+  /// does not reject (Nelson 1979): with no resolvable rhythm the angle of
+  /// (β, γ) is set by noise or rounding, not by the data, and a caller would
+  /// otherwise present it as the user's own peak time.
+  final double? acrophaseRad;
+  final double? acrophaseHours; // acrophase expressed as clock-hours of [period]
+
+  /// p-value of the zero-amplitude F-test, F(2, n−3).
+  final double amplitudeP;
   final double periodHours;
   final double r2; // raw goodness of fit (0..1)
 
@@ -34,16 +41,32 @@ class CosinorFit {
     required this.periodHours,
     required this.r2,
     required this.r2Adj,
+    required this.amplitudeP,
   });
   Map<String, dynamic> toJson() => {
         'mesor': round6(mesor),
         'amplitude': round6(amplitude),
-        'acrophase_rad': round6(acrophaseRad),
-        'acrophase_hours': round6(acrophaseHours),
+        'acrophase_rad': acrophaseRad == null ? null : round6(acrophaseRad!),
+        'acrophase_hours':
+            acrophaseHours == null ? null : round6(acrophaseHours!),
         'period_hours': round6(periodHours),
         'r2': round6(r2),
         'r2_adj': round6(r2Adj),
+        'amplitude_p': round6(amplitudeP),
       };
+}
+
+/// Significance level of the zero-amplitude test below which the acrophase is
+/// reported.
+const double cosinorAcrophaseAlpha = 0.05;
+
+/// Upper tail of F(2, d): P(F > f) = (1 + 2f/d)^(−d/2), exact for 2 numerator
+/// degrees of freedom.
+double _f2Survival(double f, int d) {
+  if (f.isNaN) return 1.0;
+  if (f.isInfinite) return 0.0;
+  if (f <= 0) return 1.0;
+  return math.pow(1 + 2 * f / d, -d / 2).toDouble();
 }
 
 /// Minimum samples for a cosinor fit. The model has 3 free parameters
@@ -131,22 +154,41 @@ Metric<CosinorFit> cosinor(
   // score confidence 0.95 at tier HIGH.
   final double r2Adj = (1 - (1 - r2) * (n - 1) / (n - 3)).clamp(0, 1);
 
+  // Zero-amplitude F-test (Nelson 1979): the acrophase is only defined once
+  // the test rejects. A flat or rhythm-free series still yields some
+  // atan2(−γ, β) from residual noise or float rounding.
+  final dof = n - 3;
+  final double ampP;
+  if (ssTot <= 0) {
+    ampP = 1.0;
+  } else if (ssRes <= 0) {
+    ampP = 0.0;
+  } else {
+    final f = ((ssTot - ssRes) / 2) / (ssRes / dof);
+    ampP = _f2Survival(f, dof);
+  }
+  final phaseDefined = ampP < cosinorAcrophaseAlpha;
+
   final conf = r2Adj.clamp(0.1, 0.95);
   return Metric<CosinorFit>(
     value: CosinorFit(
       mesor: mesor,
       amplitude: amplitude,
-      acrophaseRad: acro,
-      acrophaseHours: phaseHours,
+      acrophaseRad: phaseDefined ? acro : null,
+      acrophaseHours: phaseDefined ? phaseHours : null,
       periodHours: periodHours,
       r2: r2,
       r2Adj: r2Adj,
+      amplitudeP: ampP,
     ),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'single-component cosinor; anchor circadian phase on the nocturnal '
-        'trough, not the daytime peak',
+    note: phaseDefined
+        ? 'single-component cosinor; anchor circadian phase on the nocturnal '
+            'trough, not the daytime peak'
+        : 'single-component cosinor; no resolvable rhythm '
+            '(zero-amplitude test not rejected), acrophase undefined',
   );
 }
 

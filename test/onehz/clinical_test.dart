@@ -1430,6 +1430,40 @@ void main() {
       expect(good.value!.r2Adj, closeTo(1.0, 1e-6));
       expect(good.confidence, 0.95);
     });
+    test('REGRESSION: no acrophase when the zero-amplitude test does not reject',
+        () {
+      // A flat or rhythm-free series used to publish an acrophase picked by
+      // float rounding / noise, which callers then treated as the user's own
+      // circadian peak.
+      for (final n in [72, 300]) {
+        final t = <double>[for (var h = 0; h < n; h++) h.toDouble()];
+        final flat = cosinor(t, List.filled(n, 60.0));
+        expect(flat.present, isTrue);
+        expect(flat.value!.acrophaseHours, isNull);
+        expect(flat.value!.acrophaseRad, isNull);
+        expect(flat.value!.toJson()['acrophase_hours'], isNull);
+        expect(flat.value!.amplitudeP, 1.0);
+      }
+      final rnd = math.Random(7);
+      final t = <double>[for (var h = 0; h < 72; h++) h.toDouble()];
+      final noise = <double>[
+        for (var h = 0; h < 72; h++) 60 + (rnd.nextDouble() * 3 - 1.5)
+      ];
+      final m = cosinor(t, noise);
+      expect(m.value!.r2Adj, 0);
+      expect(m.value!.amplitudeP, greaterThan(cosinorAcrophaseAlpha));
+      expect(m.value!.acrophaseHours, isNull);
+      // A weak but real rhythm in noise keeps its acrophase.
+      final rhythm = <double>[
+        for (var h = 0; h < 72; h++)
+          60 +
+              3 * math.cos(2 * math.pi * (h - 15) / 24) +
+              (rnd.nextDouble() * 3 - 1.5)
+      ];
+      final r = cosinor(t, rhythm);
+      expect(r.value!.amplitudeP, lessThan(cosinorAcrophaseAlpha));
+      expect(r.value!.acrophaseHours, closeTo(15, 1.0));
+    });
   });
 
   group('TRIMP + CTL/ATL/TSB', () {
