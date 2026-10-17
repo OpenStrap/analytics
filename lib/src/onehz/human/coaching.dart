@@ -619,7 +619,9 @@ class JournalNumericEffect {
   /// count alone does not explain — currently only
   /// `need_history:have=N,need=M`, meaning the permutation test's own
   /// discreteness floor could not clear the multiplicity correction at N days
-  /// however strong the effect was, and M days would. Null otherwise.
+  /// however strong the effect was, and M days would; or
+  /// `unreachable_floor:have=N` when no day count within a season would.
+  /// Null otherwise.
   final String? note;
 
   const JournalNumericEffect({
@@ -838,11 +840,20 @@ double _binom(int n, int k) {
 /// field at exactly 8 days CANNOT be published however real the effect. At n = 9
 /// it can (1/126 × 4 = 0.032). A test that cannot pass is not a "no", and the
 /// silence with no reason attached is the part that was wrong.
-double _permPFloor(int n, int n1, int b) {
+double _permPFloor(int n, int n1, int b) =>
+    math.max(1.0 / (b + 1), _labelPFloor(n, n1));
+
+/// The data's own part of [_permPFloor]: the floor with every relabelling
+/// enumerated, before any sampling floor is added.
+double _labelPFloor(int n, int n1) {
   final c = _binom(n, n1);
   final k = (n1 * 2 == n) ? 2.0 : 1.0;
-  return math.max(1.0 / (b + 1), c <= 0 ? 1.0 : k / c);
+  return c <= 0 ? 1.0 : k / c;
 }
+
+/// Upper bound on the family-scaled shuffle count in
+/// [journalNumericCorrelations]; enough for a family of 500 tests at 0.05.
+const int _maxPermutations = 19999;
 
 /// The smallest number of paired days at which this test could clear [alpha]
 /// after a family-of-[m] BH correction, holding the observed group balance.
@@ -922,8 +933,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
     double? cohensD,
     int? nWith,
     int? nWithout,
-    double? p,
-    double pFloor,
+    double Function(int b)? pAt,
+    double dataFloor,
     int nSmallerSide,
     bool floorOk,
     bool insufficient,
@@ -942,8 +953,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
         cohensD: null,
         nWith: null,
         nWithout: null,
-        p: null,
-        pFloor: 1.0,
+        pAt: null,
+        dataFloor: 1.0,
         nSmallerSide: 0,
         floorOk: false,
         insufficient: true,
@@ -1027,8 +1038,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
           cohensD: d,
           nWith: withIt.length,
           nWithout: without.length,
-          p: _permTwoSampleP(ys, inGroup, permutations, permutationSeed),
-          pFloor: _permPFloor(n, withIt.length, permutations),
+          pAt: (b) => _permTwoSampleP(ys, inGroup, b, permutationSeed),
+          dataFloor: _labelPFloor(n, withIt.length),
           nSmallerSide: math.min(withIt.length, without.length),
           // Both sides exactly constant leaves d undefined; the per-side floor
           // is already the tag path's zero-spread rule, so a real gap between
@@ -1077,8 +1088,8 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
       // result for CONTINUOUS data applied to tie-heavy ordinal journal fields.
       // See [_permSpearmanP]. The interval above is unchanged and still what a
       // screen displays.
-      final p =
-          n >= 4 ? _permSpearmanP(xs, ys, permutations, permutationSeed) : null;
+      final pAt =
+          n >= 4 ? (int b) => _permSpearmanP(xs, ys, b, permutationSeed) : null;
 
       rows.add((
         field: field,
@@ -1093,11 +1104,11 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
         cohensD: null,
         nWith: null,
         nWithout: null,
-        p: p,
+        pAt: pAt,
         // A rank permutation has n! relabellings — 40,320 already at the n = 8
-        // minimum, where 2/n! is far below the sampling floor — so in practice
-        // only 1/(b+1) binds. Nothing like the binary path's 1/C(n, n₁).
-        pFloor: math.max(1.0 / (permutations + 1), 2.0 / _factorial(n)),
+        // minimum — so the data never binds here; only the shuffle count could.
+        // Nothing like the binary path's 1/C(n, n₁).
+        dataFloor: 2.0 / _factorial(n),
         nSmallerSide: n,
         floorOk: rho.abs() >= minAbsRho,
         insufficient: false,
@@ -1105,25 +1116,36 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
     }
   }
 
-  final qs = benjaminiHochberg([for (final r in rows) r.p]);
   // The BH family size, so each row can be asked whether it COULD have passed.
-  // Computed once from the p's as they stand: dropping the unreachable rows and
-  // re-running would only shrink m and let more through, which is the wrong
-  // direction for a gate whose job is to refuse.
-  final m = rows.where((r) => r.p != null).length;
+  // Computed once from the rows as they stand: dropping the unreachable rows
+  // and re-running would only shrink m and let more through, which is the
+  // wrong direction for a gate whose job is to refuse.
+  final m = rows.where((r) => r.pAt != null).length;
+  // The shuffle count scales with the family. 1/(b+1) is a resolution limit of
+  // the simulation, not a property of the data: with b fixed at 999 it alone
+  // failed the gate below once m reached 51 (13 fields × 4 outcomes), so one
+  // more logged field blanked every numeric finding behind a "need more days"
+  // note that no amount of logging could satisfy, since that term does not
+  // depend on n. 2m/alpha keeps the sampling floor at half the BH budget, and
+  // the cap only bounds the cost for a journal with hundreds of fields.
+  final b = math.max(
+      permutations, math.min(_maxPermutations, (2 * m / fdrAlpha).ceil()));
+  final ps = [for (final r in rows) r.pAt?.call(b)];
+  final qs = benjaminiHochberg(ps);
   final byField = <String, List<JournalNumericEffect>>{};
   for (var i = 0; i < rows.length; i++) {
     final r = rows[i];
+    final p = ps[i];
     final q = qs[i];
     // STRUCTURALLY UNREACHABLE ⇒ ABSTAIN, and say how many days it would take.
     // A permutation p cannot go below [_permPFloor]; if even that floor fails
     // the correction, this test could not have been published however strong
     // the effect, and reporting it as a computed-but-weak "no" is a verdict we
     // never actually reached.
-    final unreachable = r.p != null && r.pFloor * m > fdrAlpha;
+    final floor = math.max(1.0 / (b + 1), r.dataFloor);
+    final unreachable = p != null && floor * m > fdrAlpha;
     final need = unreachable
-        ? _needForFloor(r.n, r.nSmallerSide, permutations, m, fdrAlpha,
-            binary: r.binary)
+        ? _needForFloor(r.n, r.nSmallerSide, b, m, fdrAlpha, binary: r.binary)
         : null;
     byField.putIfAbsent(r.field, () => []).add(
           JournalNumericEffect(
@@ -1135,15 +1157,19 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
             n: r.n,
             insufficient: r.insufficient || unreachable,
             meaningful: !unreachable && r.floorOk && q != null && q <= fdrAlpha,
+            // No N within a season clears the floor (a very lopsided binary
+            // split): say so rather than promise a day count that would not.
             note: unreachable
-                ? 'need_history:have=${r.n},need=${need ?? r.n + 90}'
+                ? (need != null
+                    ? 'need_history:have=${r.n},need=$need'
+                    : 'unreachable_floor:have=${r.n}')
                 : null,
             binary: r.binary,
             delta: r.delta,
             cohensD: r.cohensD,
             nWith: r.nWith,
             nWithout: r.nWithout,
-            p: r.p,
+            p: p,
             q: q,
           ),
         );

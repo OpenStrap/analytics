@@ -636,6 +636,47 @@ void main() {
       expect(at9.meaningful, isTrue);
     });
 
+    // The 1/(b+1) sampling floor is a resolution limit of how many shuffles were
+    // drawn, not a property of the data. With b fixed at 999 it alone failed
+    // the BH gate once the family reached 51 tests (13 fields × 4 outcomes), so
+    // one more logged field blanked every numeric insight, with a "need more
+    // days" note that no amount of logging could ever satisfy.
+    test('a large family does not make every test structurally unreachable',
+        () {
+      List<JournalNumericCorrelation> run(int fields) {
+        const n = 30;
+        final dates = _dates(n);
+        final rng = math.Random(7);
+        final noise = [
+          for (var f = 0; f < fields; f++)
+            [for (var i = 0; i < n; i++) (rng.nextInt(5) + 1).toDouble()],
+        ];
+        return journalNumericCorrelations(
+          fieldLagDays: const {},
+          journal: [
+            for (var i = 0; i < n; i++)
+              JournalNumericDay(dates[i], {
+                'f00': (i % 10).toDouble(),
+                for (var f = 1; f < fields; f++)
+                  'f${f.toString().padLeft(2, '0')}': noise[f][i],
+              }),
+          ],
+          dates: dates,
+          outcomes: {
+            for (final k in ['rmssd', 'rhr', 'readiness', 'efficiency'])
+              k: [for (var i = 0; i < n; i++) 50.0 + 3.0 * (i % 10) + (i % 2)],
+          },
+        );
+      }
+
+      for (final fields in [12, 13, 20]) {
+        final e = _effect(run(fields), 'f00', 'readiness');
+        expect(e.insufficient, isFalse, reason: 'fields=$fields');
+        expect(e.note, isNull, reason: 'fields=$fields');
+        expect(e.meaningful, isTrue, reason: 'fields=$fields q=${e.q}');
+      }
+    });
+
     test('empty input is empty output, not a crash', () {
       expect(
         journalNumericCorrelations(
