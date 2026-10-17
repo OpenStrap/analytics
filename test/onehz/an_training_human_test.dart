@@ -382,6 +382,18 @@ void main() {
       expect(m.value!.longestIntervalDays, 60);
       expect(m.value!.maxConsecutiveDifferenceDays, 32);
     });
+
+    test('an interval past the long-interval criterion is a hole, not a bar',
+        () {
+      // 75 days: under the old 90-day cutoff this was charted and met the
+      // 60-day criterion on its own, while the app's cycle screen refused the
+      // same log. One rule, one threshold.
+      final m = cycleLengthSeries(
+          onsets([28, 28, 75, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28]));
+      expect(m.present, isFalse);
+      expect(m.note, contains('log_has_holes:intervals_over_60d=1'));
+      expect(cycleLengthImplausibleGapDays, cycleLongIntervalCriterionDays);
+    });
   });
 }
 
