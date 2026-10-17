@@ -113,6 +113,25 @@ void main() {
         expect(m.value!.habitualHours, closeTo(7.5, 1e-9));
       }
     });
+    test('too few free nights => OSD null, need_baseline note', () {
+      // One 11 h Saturday used to come back verbatim as the p75 and set the
+      // user's sleep need.
+      final one = sleepDebt([7.0, 6.8, 7.1, 11.0], const [11.0]);
+      expect(one.present, isTrue);
+      expect(one.value!.osdHours, isNull);
+      expect(one.value!.debtHours, isNull);
+      expect(one.value!.hasFreeNight, isTrue);
+      expect(one.value!.habitualHours, closeTo(7.05, 1e-9));
+      expect(one.note, 'need_baseline:have=1,need=$sleepDebtMinFreeNights');
+      final two = sleepDebt([7.0, 6.8, 7.1, 5.0], const [5.0, 10.5]);
+      expect(two.value!.osdHours, isNull);
+      expect(two.note, 'need_baseline:have=2,need=$sleepDebtMinFreeNights');
+    });
+    test('too few recent nights => need_baseline note', () {
+      final m = sleepDebt([7.0, 6.8], const [8.0, 8.2, 8.4]);
+      expect(m.present, isFalse);
+      expect(m.note, 'need_baseline:have=2,need=3');
+    });
     test('free-night rebound => positive debt', () {
       // Habitual ~6 h, free nights ~8.5 h => debt ≈ 2.5 h.
       final m = sleepDebt([6.0, 6.1, 5.9, 6.0, 6.2], [8.4, 8.6, 8.5]);

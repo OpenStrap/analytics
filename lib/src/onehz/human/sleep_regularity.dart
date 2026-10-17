@@ -28,6 +28,13 @@
 import '../types.dart';
 import '../util.dart';
 
+/// Unconstrained nights needed before [sleepDebt] reports a p75. With one
+/// night the "percentile" is that night verbatim, so a single 4.5 h or 11 h
+/// Saturday became the user's sleep need — and with it tonight's need, the
+/// recommended bedtime and sleep performance. Three is the fewest at which a
+/// p75 is not just the maximum or the only value.
+const int sleepDebtMinFreeNights = 3;
+
 class SleepDebt {
   /// p75 of your UNCONSTRAINED nights (h) — "where your longer free nights
   /// land". NOT Kitamura's optimal sleep duration; see the file header.
@@ -63,14 +70,14 @@ Metric<SleepDebt> sleepDebt(
   List<double> recentSleepH,
   List<double> freeNightSleepH, {
   int minRecent = 3,
-  int minFree = 3,
+  int minFree = sleepDebtMinFreeNights,
 }) {
   const inputs = ['sleep_duration_recent', 'sleep_duration_free'];
   if (recentSleepH.length < minRecent) {
-    return const Metric<SleepDebt>.absent(
+    return Metric<SleepDebt>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'need more recent nights to estimate habitual sleep',
+      note: 'need_baseline:have=${recentSleepH.length},need=$minRecent',
     );
   }
   final habitual = median(recentSleepH)!;
@@ -94,8 +101,7 @@ Metric<SleepDebt> sleepDebt(
       confidence: 0.3,
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'need_baseline:have=${freeNightSleepH.length},need=$minFree '
-          'free nights before comparing against your habitual night',
+      note: 'need_baseline:have=${freeNightSleepH.length},need=$minFree',
     );
   }
   // The upper part of free-night durations: "when unconstrained, this is where
