@@ -57,6 +57,12 @@ const int _smoothMin = 10; // ± window of the moving average
 const int _minPeakDist = 20; // min minutes between cycle peaks
 const double _minProminence = 0.9; // z-score prominence to qualify a peak
 
+/// Longest run of unobserved minutes a cycle may span. Contact loss, charging
+/// or an RR dropout leaves the per-minute series null; pairing the peak before
+/// such a hole with the peak after it reported the hole itself as one long
+/// "cycle" and dragged the mean cycle length up with it.
+const int _maxGapMin = 20;
+
 /// Physiologic RR gate (ms): keep 300–2000, drop |Δ|>200 (ectopy/artifact).
 const double _rrMin = 300, _rrMax = 2000, _rrStep = 200;
 
@@ -126,6 +132,7 @@ SleepCyclesResult detectSleepCycles(
   final cycles = <SleepCycle>[];
   for (var i = 0; i + 1 < peaks.length; i++) {
     final a = peaks[i], b = peaks[i + 1];
+    if (_longestNullRun(z, a, b) > _maxGapMin) continue;
     cycles.add(SleepCycle(a, b, b - a));
   }
   final meanDur = cycles.isEmpty
@@ -142,6 +149,19 @@ SleepCyclesResult detectSleepCycles(
     }
   }
   return SleepCyclesResult(cycles, meanDur, cycles.length, series);
+}
+
+int _longestNullRun(List<double?> y, int from, int to) {
+  var best = 0, run = 0;
+  for (var k = from; k <= to; k++) {
+    if (y[k] == null) {
+      run++;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  return best;
 }
 
 double? _rmssd(List<double> rr) {
@@ -163,16 +183,23 @@ List<int> _findPeaks(List<double?> y, int minDist, double minProm) {
   final cand = <List<double>>[]; // [index, value]
   for (var i = 1; i < n - 1; i++) {
     final yi = y[i];
-    if (yi == null) continue;
-    final a = y[i - 1] ?? double.negativeInfinity;
-    final b = y[i + 1] ?? double.negativeInfinity;
+    final a = y[i - 1], b = y[i + 1];
+    // A missing neighbour is unknown, not -inf: a point beside a data hole
+    // (where the one-sided moving average also bends) is not a local maximum
+    // on that evidence alone. The prominence walk likewise stops at a hole, so
+    // the base on that side is only what was actually observed.
+    if (yi == null || a == null || b == null) continue;
     if (!(yi >= a && yi > b)) continue;
     var l = i;
-    while (l > 0 && (y[l - 1] ?? double.negativeInfinity) < yi) {
+    while (l > 0) {
+      final v = y[l - 1];
+      if (v == null || v >= yi) break;
       l--;
     }
     var r = i;
-    while (r < n - 1 && (y[r + 1] ?? double.negativeInfinity) < yi) {
+    while (r < n - 1) {
+      final v = y[r + 1];
+      if (v == null || v >= yi) break;
       r++;
     }
     var lmin = yi, rmin = yi;

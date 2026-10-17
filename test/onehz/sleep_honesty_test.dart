@@ -466,6 +466,47 @@ void main() {
               't == onsetSec');
       expect(r.series.any((p) => p['t'] == onset), isFalse);
     });
+
+    test('a cycle never spans a long RR hole', () {
+      // 8 h with a 90-min RMSSD rhythm, then no RR at all for minutes 100-259
+      // (contact loss). Pre-fix the peak before the hole and the peak after it
+      // became one ~186-min "cycle" and the mean jumped from ~89 to ~138 min.
+      const onset = _t0;
+      const nMin = 480;
+      List<SleepCycle> cyclesWith({int? holeFrom, int? holeTo}) {
+        final rnd = math.Random(7);
+        final rr = <double>[], ts = <double>[];
+        for (var s = 0; s < nMin * 60; s++) {
+          final m = s ~/ 60;
+          if (holeFrom != null && m >= holeFrom && m < holeTo!) continue;
+          final amp = 20 + 15 * math.sin(2 * math.pi * m / 90);
+          rr.add(1000 + amp * (rnd.nextBool() ? 1 : -1) * 0.7);
+          ts.add((onset + s) * 1000.0);
+        }
+        final r = detectSleepCycles(rr, ts, onset, onset + nMin * 60);
+        if (r.cycles.isNotEmpty) {
+          expect(r.meanDurationMin,
+              closeTo(
+                  r.cycles.fold<int>(0, (a, c) => a + c.lenMin) /
+                      r.cycles.length,
+                  1e-9));
+        }
+        return r.cycles;
+      }
+
+      final full = cyclesWith();
+      expect(full, isNotEmpty);
+      for (final c in full) {
+        expect(c.lenMin, inInclusiveRange(70, 110));
+      }
+
+      final holed = cyclesWith(holeFrom: 100, holeTo: 260);
+      for (final c in holed) {
+        expect(c.startMin < 260 && c.endMin > 100, isFalse,
+            reason: 'cycle ${c.startMin}-${c.endMin} spans the 100-260 hole');
+        expect(c.lenMin, inInclusiveRange(70, 110));
+      }
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
