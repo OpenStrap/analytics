@@ -303,8 +303,12 @@ class AutoWorkoutDetector {
             cnt++;
           }
         }
-        meanMotion = cnt == 0 ? 0.0 : sum / cnt;
-        if (meanMotion < motionConfirmMean) {
+        // No motion sample inside the window is missing evidence, not a still
+        // wrist: reading it as 0.0 g failed the gate and dropped the bout,
+        // and handed the classifier an intensity nobody measured. Judge the
+        // window on HR alone, as with no motion series at all.
+        meanMotion = cnt == 0 ? null : sum / cnt;
+        if (meanMotion != null && meanMotion < motionConfirmMean) {
           // Low-motion but a genuine exercise-like onset — see [onsetRiseBpm].
           final preMean =
               _meanBpmInRange(ts, bpm, start - onsetLookbackS, start);
