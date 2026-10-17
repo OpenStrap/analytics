@@ -1446,4 +1446,48 @@ void main() {
           reason: 'a MAD over ten nights is not a known scale');
     });
   });
+
+  group('multivariateAnomaly one-sided clamp (regression)', () {
+    test('an improving feature cannot raise d2 above the two-sided distance',
+        () {
+      // Resp negatively coupled to RHR across the baseline, so the robust
+      // correlation is strongly negative. Tonight RHR is high (illness side)
+      // and resp is well below its median (the good side). Zeroing the good
+      // component used to drop the negative cross term and inflate d2 above
+      // the neutral-resp night and over the gate.
+      double noise(int i) =>
+          math.sin(i * 1.7) +
+          0.6 * math.sin(i * 0.31) +
+          0.4 * math.cos(i * 2.9);
+      final base = <AnomalyFeatures>[
+        for (var i = 0; i < 28; i++)
+          () {
+            final rhr = (60 + 2 * noise(i)).roundToDouble();
+            return AnomalyFeatures(
+                rhr: rhr, resp: 15 - 0.25 * (rhr - 60) + 0.2 * noise(i + 50));
+          }(),
+      ];
+      final dates = [
+        for (var i = 0; i < 29; i++)
+          DateTime.utc(2026, 9, 1)
+              .add(Duration(days: i))
+              .toIso8601String()
+              .substring(0, 10)
+      ];
+      double d2(double resp) {
+        final out = multivariateAnomaly(
+            dates, [...base, AnomalyFeatures(rhr: 66, resp: resp)]);
+        final m = out.last.mahalanobis!;
+        return m * m;
+      }
+
+      // Neutral = resp exactly at its baseline median (z = 0).
+      final resps = [for (final f in base) f.resp!]..sort();
+      final median = (resps[13] + resps[14]) / 2;
+      final neutral = d2(median);
+      final improving = d2(median - 1.5);
+      expect(improving, lessThan(neutral - 1e-6),
+          reason: 'slower breathing must not score as more anomalous');
+    });
+  });
 }
