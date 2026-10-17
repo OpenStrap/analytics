@@ -88,6 +88,9 @@ class IllnessDay {
 /// so this is roughly 4× more specific than the method it used to cite. Say the
 /// number, not "conservative": red drives a medical-class notification.
 /// [persistDays] yellow nights required before escalating to red.
+/// [maxGapNights] unscored nights (no RHR, or a baseline that abstained) that
+/// may sit between two scored nights without breaking the run. A longer gap
+/// zeroes the accumulator and every run counter.
 ///
 /// Returns a per-night list. Nights before [minBaseline] valid history are
 /// green with null cusum (we never flag without a baseline — no fabrication).
@@ -101,6 +104,7 @@ List<IllnessDay> illnessCusum(
   int minBaseline = illnessCusumMinBaseline,
   double returnZ = 0.5,
   int recoverDays = 2,
+  int maxGapNights = 2,
 }) {
   final n = rhr.length;
   final out = <IllnessDay>[];
@@ -174,7 +178,15 @@ List<IllnessDay> illnessCusum(
     // guard had just zeroed normalRun so recovery could not clear it either.
     // A CUSUM is evidence accumulated over consecutive observations; there are
     // no observations across a gap, so there is no evidence to carry.
-    if (day[i] - lastScoredDay > 1) {
+    //
+    // But a gap of one or two nights must not count as a break. Sleep goes
+    // undetected and the band comes off precisely while someone is sick, so
+    // resetting on any single unscored night wiped an episode's evidence at
+    // the moment it mattered: two +2.5 z nights (cusum 4.0), one night with no
+    // main sleep, and a third +2.5 night restarted from 0 and read green; on
+    // alternate-night gaps the alarm could never trip at all. A short gap
+    // carries the run untouched — it neither advances nor resets it.
+    if (day[i] - lastScoredDay > 1 + maxGapNights) {
       yellowRun = 0;
       normalRun = 0;
       cusum = 0;

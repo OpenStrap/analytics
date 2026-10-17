@@ -1198,6 +1198,61 @@ void main() {
       expect(out.last.state, IllnessState.green);
       expect(out.last.need, belowQuantumNote);
     });
+    group('a short unscored gap carries the run', () {
+      const base = <double>[
+        58,
+        60,
+        59,
+        61,
+        58,
+        60,
+        59,
+        61,
+        58,
+        60,
+        59,
+        61,
+        58,
+        60
+      ];
+      List<String> datesFor(int n) => [
+            for (var i = 0; i < n; i++)
+              DateTime.utc(2026, 9, 1 + i).toIso8601String().substring(0, 10)
+          ];
+      test(
+          'REGRESSION: one night with no RHR does not wipe an accumulating '
+          'episode', () {
+        final rhr = <double?>[...base, 64, 64, null, 64];
+        final out = illnessCusum(datesFor(rhr.length), rhr);
+        final cont =
+            illnessCusum(datesFor(rhr.length), <double?>[...base, 64, 64, 64]);
+        // The run keeps the evidence of the two nights before the gap.
+        expect(out[17].cusum!, greaterThan(out[15].cusum!));
+        expect(out[17].state, isNot(IllnessState.green));
+        expect(cont.last.state, IllnessState.red);
+      });
+      test('REGRESSION: alternate-night gaps can still trip the alarm', () {
+        final rhr = <double?>[...base, 64, null, 64, null, 64, null];
+        final out = illnessCusum(datesFor(rhr.length), rhr);
+        expect(out.map((d) => d.state), contains(IllnessState.red));
+      });
+      test('a long wear gap still zeroes the accumulator', () {
+        final rhr = <double?>[...base, 64, 64, 64, 64];
+        final dates = datesFor(rhr.length);
+        // 70 nights off-wrist, then one night back at baseline.
+        final back = DateTime.utc(2026, 9, rhr.length + 70)
+            .toIso8601String()
+            .substring(0, 10);
+        // A baseline window long enough to span the gap, so the night back
+        // is actually scored rather than abstaining for want of history.
+        final out =
+            illnessCusum([...dates, back], [...rhr, 60], baselineDays: 120);
+        expect(out[rhr.length - 1].state, IllnessState.red);
+        expect(out.last.cusum, isNotNull);
+        expect(out.last.cusum!, lessThan(1.0));
+        expect(out.last.state, IllnessState.green);
+      });
+    });
   });
 
   group('lnRMSSD readiness stack', () {
