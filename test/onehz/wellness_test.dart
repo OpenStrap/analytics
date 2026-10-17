@@ -86,8 +86,7 @@ void main() {
           if (h == 3) continue;
           for (var k = 0; k < 6; k++) {
             final tHours = day * 24.0 + h + k / 6.0;
-            final adc =
-                2000 + 150 * math.cos(2 * math.pi / 24 * (tHours - 4));
+            final adc = 2000 + 150 * math.cos(2 * math.pi / 24 * (tHours - 4));
             samples.add(AdcSample(tHours * 3.6e6, adc));
           }
         }
@@ -341,6 +340,36 @@ void main() {
       expect(out[20].candidate, isTrue);
       expect(out[20].flagged, isFalse, reason: 'one night cannot flag');
     });
+
+    test('a run of unusually GOOD nights is not an illness anomaly', () {
+      // Recovery after a holiday / deload: RHR well down, HRV well up, resp
+      // down. Every oriented deviation points the healthy way, so the
+      // one-sided {RHR↑, HRV↓, temp↑, resp↑} detector must stay quiet.
+      final r = math.Random(11);
+      double g() {
+        final u1 = 1 - r.nextDouble(), u2 = r.nextDouble();
+        return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
+      }
+
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 60; i++)
+          AnomalyFeatures(
+              rhr: (55 + 1.5 * g()).roundToDouble(),
+              hrv: 60 + 6 * g(),
+              resp: 14.5 + 0.4 * g()),
+        for (var i = 0; i < 3; i++)
+          const AnomalyFeatures(rhr: 47, hrv: 95, resp: 12.8),
+      ];
+      final out = multivariateAnomaly(dates(feats.length), feats,
+          baselineDays: 28, minBaseline: 10, persistDays: 2);
+      for (var i = 60; i < 63; i++) {
+        expect(out[i].mahalanobis, isNotNull);
+        expect(out[i].candidate, isFalse, reason: 'night $i improved');
+        expect(out[i].flagged, isFalse, reason: 'night $i improved');
+        // The drivers still report the signed (healthy) deviation.
+        expect(out[i].drivers.every((d) => d.contribution < 0), isTrue);
+      }
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -592,7 +621,20 @@ void main() {
       // is asserted as a refusal in its own test below. The rescue itself is
       // unchanged; only a baseline with resolvable dispersion reaches it.
       final tightBase = <double>[
-        52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 49, 55, 53
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        49,
+        55,
+        53
       ];
       // minInputs:1 — the subject here is the MAD==0 rescue, not the RD-04
       // minimum-inputs gate (which has its own test below).
@@ -616,8 +658,9 @@ void main() {
       // The measured production failure: [58,58,59] bpm + a 52 bpm night =>
       // MAD 0 => mean/SD fallback on an SD of 0.577 bpm => z = -10.97 =>
       // readiness 99.949 at confidence 0.60. Maximal recovery out of 6 bpm.
-      final m = readinessComposite([rhrInput(52.0, <double>[58, 58, 59])],
-          minInputs: 1, minWeightSum: 0.0);
+      final m = readinessComposite([
+        rhrInput(52.0, <double>[58, 58, 59])
+      ], minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isFalse, reason: 'was: 99.949 at confidence 0.60');
       expect(m.note, contains('need_baseline:have=3,need=14'));
     });
@@ -630,7 +673,20 @@ void main() {
       // clamp (a bounded-but-wrong score at confidence 0.60 is harder to catch
       // than an absurd one).
       final base = <double>[
-        58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 59
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        59
       ];
       final m = readinessComposite([rhrInput(52.0, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -856,8 +912,7 @@ void main() {
       final feats = <AnomalyFeatures>[
         for (var i = 0; i < 12; i++)
           AnomalyFeatures(
-              rhr: i == 5 ? 59 : 58,
-              hrv: 40.0 + (i.isEven ? 1.0 : -1.0)),
+              rhr: i == 5 ? 59 : 58, hrv: 40.0 + (i.isEven ? 1.0 : -1.0)),
         const AnomalyFeatures(rhr: 60, hrv: 40.0), // ordinary 2-bpm move
       ];
       final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
@@ -886,7 +941,20 @@ void main() {
       // so the baseline still has more than 1 bpm of SD — below that the input
       // is refused outright rather than scored (A4).
       final base = <double>[
-        55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 58, 51
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        58,
+        51
       ];
       final m = readinessComposite([rhrInput(60, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -898,7 +966,20 @@ void main() {
 
     test('a dispersed baseline still discloses robust-z (median+MAD)', () {
       final base = <double>[
-        50, 52, 54, 56, 58, 60, 62, 51, 53, 55, 57, 59, 61, 63
+        50,
+        52,
+        54,
+        56,
+        58,
+        60,
+        62,
+        51,
+        53,
+        55,
+        57,
+        59,
+        61,
+        63
       ];
       final m = readinessComposite([rhrInput(70, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -1026,8 +1107,7 @@ void main() {
       }
     });
 
-    test('a cold segment 2 °C or more low is trimmed, 25 % of one refuses',
-        () {
+    test('a cold segment 2 °C or more low is trimmed, 25 % of one refuses', () {
       for (final drop in [200.0, 300.0, 500.0]) {
         final m = nightlySkinTemp(
             ringNight(coldFrom: 30, coldRecords: 12, coldDrop: drop),

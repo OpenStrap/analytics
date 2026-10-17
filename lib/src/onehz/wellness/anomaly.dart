@@ -48,7 +48,7 @@ const int multivariateAnomalyMinBaseline = 10;
 class AnomalyDay {
   final String date;
   final double?
-      mahalanobis; // robust Mahalanobis distance (null if no baseline)
+      mahalanobis; // robust one-sided (illness-direction) Mahalanobis distance; null if no baseline
   final bool flagged; // distance crossed gate AND persistence satisfied
   final bool candidate; // distance crossed gate THIS night (pre-persistence)
   final List<Driver> drivers; // per-feature signed contribution
@@ -206,15 +206,24 @@ List<AnomalyDay> multivariateAnomaly(
     ];
     final cov = _robustCorr(rows, keep, center, scale, ridge);
     final inv = _invert(cov);
+    // ONE-SIDED: d² is a quadratic form, so it is blind to the sign of zc, and
+    // a run of unusually GOOD nights (RHR well down, HRV well up — recovery
+    // after illness or a deload, measured against a baseline that still holds
+    // the bad stretch) cleared the gate exactly like a deterioration and
+    // surfaced as an illness-family "unusual physiology" flag. Only deviations
+    // in the oriented illness direction count toward the distance. Clamping
+    // can only lower d², so the [_madInflationTable] calibration stays
+    // conservative. Drivers below keep the signed zc.
+    final zb = [for (final v in zc) v > 0 ? v : 0.0];
     double d2;
     if (inv == null) {
       // Fall back to identity (uncorrelated) — sum of squared z.
-      d2 = zc.fold(0.0, (s, v) => s + v * v);
+      d2 = zb.fold(0.0, (s, v) => s + v * v);
     } else {
       d2 = 0.0;
-      for (var a = 0; a < zc.length; a++) {
-        for (var b = 0; b < zc.length; b++) {
-          d2 += zc[a] * inv[a][b] * zc[b];
+      for (var a = 0; a < zb.length; a++) {
+        for (var b = 0; b < zb.length; b++) {
+          d2 += zb[a] * inv[a][b] * zb[b];
         }
       }
     }
