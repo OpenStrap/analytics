@@ -98,6 +98,21 @@ void main() {
       expect(m.value!.debtHours, isNull);
       expect(m.value!.hasFreeNight, isFalse);
     });
+    test('one or two free nights => no comparison, not a 1-night p75', () {
+      final recent = [7.5, 7.4, 7.6, 7.5, 7.3, 7.6, 5.0];
+      for (final free in [
+        [5.0],
+        [9.8],
+        [9.8, 5.0],
+      ]) {
+        final m = sleepDebt(recent, free);
+        expect(m.present, isTrue);
+        expect(m.value!.hasFreeNight, isTrue);
+        expect(m.value!.osdHours, isNull, reason: '$free');
+        expect(m.value!.debtHours, isNull, reason: '$free');
+        expect(m.value!.habitualHours, closeTo(7.5, 1e-9));
+      }
+    });
     test('free-night rebound => positive debt', () {
       // Habitual ~6 h, free nights ~8.5 h => debt ≈ 2.5 h.
       final m = sleepDebt([6.0, 6.1, 5.9, 6.0, 6.2], [8.4, 8.6, 8.5]);

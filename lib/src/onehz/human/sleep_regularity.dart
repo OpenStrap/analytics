@@ -55,13 +55,15 @@ class SleepDebt {
 /// [recentSleepH] recent nightly sleep durations (h), oldest→newest.
 /// [freeNightSleepH] sleep durations on UNCONSTRAINED nights (no alarm / free
 /// days). We take their 75th percentile. With no free nights we report habitual
-/// sleep but DECLINE to compare (honest: "no free night yet").
+/// sleep but DECLINE to compare (honest: "no free night yet"); the same with
+/// fewer than [minFree] free nights, where the percentile is a single night.
 ///
 /// NOT Kitamura's OSD — see the file header for what that would require.
 Metric<SleepDebt> sleepDebt(
   List<double> recentSleepH,
   List<double> freeNightSleepH, {
   int minRecent = 3,
+  int minFree = 3,
 }) {
   const inputs = ['sleep_duration_recent', 'sleep_duration_free'];
   if (recentSleepH.length < minRecent) {
@@ -80,6 +82,20 @@ Metric<SleepDebt> sleepDebt(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no free night yet — cannot honestly estimate your sleep need',
+    );
+  }
+  // A p75 of one or two nights is just those nights: one short Saturday read
+  // as "you need 2.5 h less than you sleep", one lie-in as 2.3 h of debt that
+  // raised tonight's need and bedtime. Below [minFree] we still say a free
+  // night exists but decline to compare.
+  if (freeNightSleepH.length < minFree) {
+    return Metric<SleepDebt>(
+      value: SleepDebt(null, habitual, null, true),
+      confidence: 0.3,
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'need_baseline:have=${freeNightSleepH.length},need=$minFree '
+          'free nights before comparing against your habitual night',
     );
   }
   // The upper part of free-night durations: "when unconstrained, this is where
