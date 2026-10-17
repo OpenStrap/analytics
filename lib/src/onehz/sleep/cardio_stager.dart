@@ -940,8 +940,12 @@ CardioStagerResult classifyCardioEpochs(
           (hrSleepMed ?? hrMedGlobal) + math.max(6.0, stddev(sleepHr) ?? 6.0),
       rmssdMed: rmssdMed,
       rmssdMad: mad(sleepRmssd),
-      enmoStillCut: motMed + 1.5 * motMad,
-      enmoMoveCut: motMed + 5.0 * motMad,
+      // A MAD-0 night abstained from the motion axis above; its cuts would be
+      // the same degenerate ~0 g threshold, and folding that into the profile
+      // drags later nights' big-move bar toward 0 so ordinary repositioning
+      // reads as WAKE. No measurement ⇒ null ⇒ the fold leaves the axis alone.
+      enmoStillCut: motUsable ? motMed + 1.5 * motMad : null,
+      enmoMoveCut: motUsable ? motMed + 5.0 * motMad : null,
       lfhfMed: median(sleepLfhf),
       rkMed: median(sleepRk),
     ));

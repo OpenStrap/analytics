@@ -82,6 +82,38 @@ void main() {
       expect(back.rmssdMed, isNull);
     });
 
+    test('a night with no motion spread records no ENMO cuts for the profile',
+        () {
+      // Exactly flat gravity ⇒ motion MAD 0 ⇒ the stager abstains from the
+      // motion axis. The observation must not carry a 0 g still/move cut that
+      // would later be folded in and pull every night's big-move bar to 0.
+      const n = 4 * 3600;
+      final hr = [for (var i = 0; i < n; i++) 55.0 + (i ~/ 60) % 5];
+      final flat = <AccelSample>[
+        for (var i = 0; i < n; i++) AccelSample(i * 1000.0, 0, 0, 1.0),
+      ];
+      cardioRecordObservations = true;
+      resetCardioObservations();
+      try {
+        cardioStager(hr, flat);
+        final obs = takeCardioObservations();
+        expect(obs, hasLength(1));
+        expect(obs.single.hrSleepMedian, isNotNull);
+        expect(obs.single.enmoStillCut, isNull);
+        expect(obs.single.enmoMoveCut, isNull);
+
+        // Folding it leaves an established motion profile untouched.
+        const settled = SleepUserProfile(
+            nights: 14, enmoStillCut: 0.001, enmoMoveCut: 0.003);
+        final folded = settled.fold(obs.single);
+        expect(folded.enmoStillCut, 0.001);
+        expect(folded.enmoMoveCut, 0.003);
+      } finally {
+        cardioRecordObservations = false;
+        resetCardioObservations();
+      }
+    });
+
     test('a profile consistent with the night does not destabilize staging',
         () {
       // Synthetic still, low-HR night (should read as overwhelmingly asleep).
