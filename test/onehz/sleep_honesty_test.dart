@@ -614,31 +614,6 @@ void main() {
   //     never a sentinel, never a NaN dressed up as a number.
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — cardiopulmonary coupling is WITHDRAWN', () {
-    test('always absent, with the reason attached', () {
-      // It never measured coupling. Thomas 2005 needs a respiration channel
-      // INDEPENDENT of the beat times; the "surrogate" here was the NN series
-      // linearly detrended, so sqrt(P_rr . P_resp) collapsed to P_rr and
-      // cpc_ratio equalled the plain RR periodogram HF/LF ratio — measured
-      // 84.493910 vs 84.493190 on this shape, a ratio of 1.0000085. A healthy
-      // record used to "still report a real ratio"; that was the bug, not the
-      // control case.
-      final nn = <double>[];
-      final ts = <double>[];
-      var t = 0.0;
-      for (var i = 0; i < 3600; i++) {
-        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
-        t += rr;
-        nn.add(rr);
-        ts.add(t);
-      }
-      // ignore: deprecated_member_use_from_same_package
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isFalse);
-      expect(m.value, isNull);
-      expect(m.confidence, 0);
-      expect(m.note, contains('respiration channel'));
-    });
-
     test('the ratio it used to publish was the RR periodogram HF/LF', () {
       // The assertion that would have failed from the first commit (T-02).
       final nn = <double>[];

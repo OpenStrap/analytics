@@ -15,7 +15,6 @@
 //       honesty-bounded; stager.dart holds only the shared post-processing
 //       (StagerResult, Webster rescore, consolidation) it reuses. The
 //       autonomic-HR-only stager that used to live in stager.dart is DELETED.
-//   - Cardiopulmonary Coupling (CPC)              (cpc.dart)
 //   - Nonparametric circadian IS/IV/RA/L5/M10     (circadian_np.dart)
 //
 // Pure Dart, built on the package foundations (RR correction, Lomb-Scargle,
@@ -35,7 +34,6 @@ export 'accounting.dart';
 // `autonomicStager` is DELETED — `cardioStager` is the stager.
 export 'stager.dart';
 export 'cardio_stager.dart';
-export 'cpc.dart';
 export 'circadian_np.dart';
 export 'cycles.dart';
 export 'night_hrv_shape.dart';

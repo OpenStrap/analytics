@@ -5,7 +5,7 @@
 // expected value), then sanity-checked against the ~9-min real type-24 snippet.
 //
 // IMPORTANT: ../whoop_hist.jsonl is only ~9 min of 1 Hz records — far too short
-// for a real night. So van Hees / SRI / accounting / staging / CPC / circadian
+// for a real night. So van Hees / SRI / accounting / staging / circadian
 // get SYNTHETIC validation only; on the real capture we only assert the
 // pipeline runs and (where applicable) returns honest "absent" rather than a
 // fabricated night. That limitation is stated honestly here, not faked.
@@ -758,28 +758,6 @@ void main() {
     });
   });
 
-  // ---------------------------------------------------------------------- CPC
-  group('Cardiopulmonary Coupling (WITHDRAWN)', () {
-    test('abstains — no respiration channel independent of the beat times', () {
-      // Was: "NN with injected ~0.25 Hz respiration → HF coupling band". That
-      // passed because the respiration surrogate WAS the NN series, so of
-      // course the "coupling" peak sat at the RSA frequency. See cpc.dart.
-      final nn = <double>[];
-      final times = <double>[];
-      var t = 0.0;
-      for (var i = 0; i < 1800; i++) {
-        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
-        t += rr;
-        nn.add(rr);
-        times.add(t);
-      }
-      // ignore: deprecated_member_use_from_same_package
-      final m = cardiopulmonaryCoupling(nn, times);
-      expect(m.present, isFalse);
-      expect(m.note, contains('respiration channel'));
-    });
-  });
-
   // ----------------------------------------------------------- circadian (NP)
   group('nonparametric circadian IS/IV/RA/L5/M10', () {
     test('clean 24-h cosine activity over 7 days → IS≈1, RA high', () {
@@ -824,7 +802,6 @@ void main() {
           histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final accel = <AccelSample>[];
       final hr = <double>[];
-      final rrMs = <double>[];
       var t = 0.0;
       for (final line in lines) {
         final obj = jsonDecode(line) as Map<String, dynamic>;
@@ -836,9 +813,6 @@ void main() {
           accel.add(AccelSample(t, a[0], a[1], a[2]));
         }
         hr.add(r.hr.toDouble());
-        for (final rr in r.rrIntervalsMs) {
-          if (rr > 0) rrMs.add(rr.toDouble());
-        }
         t += 1000.0;
       }
       expect(accel.length, greaterThan(100));
@@ -852,18 +826,6 @@ void main() {
         expect(sw.value!.sptSec, greaterThan(0));
       } else {
         expect(sw.confidence, 0);
-      }
-
-      // CPC on real RR via the foundation corrector: should run and produce a
-      // dominant frequency in the physiological respiratory range (or absent).
-      final corr = correctRr(rrMs);
-      if (corr.nn.length >= 60) {
-        // ignore: deprecated_member_use_from_same_package
-        final cpc = cardiopulmonaryCoupling(corr.nn, corr.nnTimesMs);
-        if (cpc.present) {
-          expect(cpc.value!.dominantHz, inInclusiveRange(0.0, 0.45));
-          expect(cpc.value!.hfc, greaterThanOrEqualTo(0));
-        }
       }
     });
   });
