@@ -29,11 +29,17 @@ export 'advanced_stager.dart';
 export 'band_offset.dart';
 export 'sri.dart';
 export 'accounting.dart';
-// stager.dart provides StagerResult + the shared Webster/consolidation
-// post-processing (both used by cardio_stager and tests). Its deprecated
-// `autonomicStager` is DELETED — `cardioStager` is the stager.
+// stager.dart provides StagerResult + the shared consolidation post-step. Its
+// deprecated `autonomicStager` is DELETED — `cardioStager` is the stager.
 export 'stager.dart';
-export 'cardio_stager.dart';
+// The test hooks drive private passes directly and are not entry points; tests
+// import cardio_stager.dart itself to reach them.
+export 'cardio_stager.dart'
+    hide
+        websterRescoreCardio,
+        cleanBeatsInWindowForTest,
+        cleanBeatDiffsInWindowForTest,
+        windowRmssdRkForTest;
 export 'circadian_np.dart';
 export 'cycles.dart';
 export 'night_hrv_shape.dart';

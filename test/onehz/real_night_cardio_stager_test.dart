@@ -43,6 +43,11 @@
 import 'dart:io';
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/src/onehz/sleep/cardio_stager.dart'
+    show
+        cleanBeatsInWindowForTest,
+        cleanBeatDiffsInWindowForTest,
+        windowRmssdRkForTest;
 
 void main() {
   _windowEdgeTies();

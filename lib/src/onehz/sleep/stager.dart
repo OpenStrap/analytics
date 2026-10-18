@@ -1,18 +1,19 @@
-// SLEEP/CIRCADIAN — the shared staging POST-PROCESSING (arousal bridging +
-// stage-architecture consolidation) and the [StagerResult] shape both stagers
-// return.
+// SLEEP/CIRCADIAN — the shared stage-architecture consolidation post-step and
+// the [StagerResult] shape the stagers return.
 //
 // The 3-class `autonomicStager` that used to live here is GONE (2026-08): it
 // was deprecated, hidden from the barrel and reachable only from its own test,
 // and it conflated epoch count with sample count (`n ~/ epochSec` assumes a
 // 1 Hz stream, so any other cadence silently rescaled every epoch). The live
 // stager is `cardioStager` (cardio_stager.dart), which reuses everything below.
+// Its arousal-bridging pass lives in cardio_stager.dart only: this file used to
+// carry a second copy with a wider rule table (15 min of sleep bridged 5 min of
+// wake, not 4) that no stager called any more but the barrel still exported.
 //
 // HONESTY CEILING (catalog rule 5): wrist staging is at best a 3-class
 // AUTONOMIC ESTIMATE, never a PSG 4-stage hypnogram. We NEVER emit N1/N2/N3.
 // This is tier ESTIMATE.
 
-import 'dart:math' as math;
 import '../util.dart';
 import 'accounting.dart' show SleepStage;
 
@@ -36,121 +37,6 @@ class StagerResult {
         'rem_pct': round6(remPct),
         'epochs': stages.length,
       };
-}
-
-/// Test seam for [_websterRescore] — exposed (non-private) so the regression
-/// test can drive the continuity rule directly. Not part of the public barrel.
-void websterRescoreAutonomic(List<SleepStage> sm, int epochSec) =>
-    _websterRescore(sm, epochSec);
-
-/// Arousal-bridging sleep-continuity smoother (in place). NOT Webster's
-/// rescore: Webster et al. 1982 / Cole et al. 1992 turn SLEEP into WAKE after
-/// sustained wake and only ever remove sleep; this turns WAKE into SLEEP and
-/// only ever adds it. It borrows their minute values as bounds — see
-/// `cardio_stager.dart`'s `_websterRescore` for why it is kept.
-///
-/// After sleep onset (first sleep epoch), a contiguous run of WAKE epochs that
-/// is short enough relative to the SUSTAINED sleep bracketing it is rescored to
-/// SLEEP (NREM) — it is an arousal, not real WASO. Runs longer than the
-/// allowed bout, or with insufficient surrounding sleep, are LEFT as wake (a
-/// genuine, sustained awakening). Rules (in epochs):
-///   sleep-before ≥ 4 min  AND wake-run ≤ 1 min → sleep
-///   sleep-before ≥10 min  AND wake-run ≤ 3 min → sleep
-///   sleep-before ≥15 min  AND wake-run ≤ 5 min → sleep
-/// The top row is 5, not Webster's 4, and the widening is deliberate: it
-/// absorbs the van Hees 5-min mask-smear artifact. See the rules table below.
-/// `cardio_stager`'s copy runs the published 4 because van Hees does not run
-/// on its forced-window paths at all.
-/// "sleep-before" is satisfied by sustained sleep on EITHER bracketing side,
-/// so an arousal sandwiched between two long sleep bouts is bridged.
-///
-/// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
-/// hypnogram taken before the pass, not against sleep this same pass just
-/// manufactured. Reading the list
-/// being mutated let every bridged bout count as context for the next one, so
-/// bridging CASCADED and a genuinely fragmented night collapsed into one
-/// continuous sleep block (WASO 0, efficiency 100%).
-void _websterRescore(List<SleepStage> sm, int epochSec) {
-  bool isSleep(SleepStage s) => s != SleepStage.wake;
-  final n = sm.length;
-  // epochs-per-minute (rounded; epochSec=30 → 2/min).
-  double minToEp(double m) => m * 60.0 / epochSec;
-  // Immutable context snapshot — see the doc comment above.
-  final snap = List<SleepStage>.of(sm);
-
-  // Locate sleep onset & final sleep epoch — only rescore within the sleep body.
-  var onset = -1, lastSleep = -1;
-  for (var i = 0; i < n; i++) {
-    if (isSleep(snap[i])) {
-      if (onset < 0) onset = i;
-      lastSleep = i;
-    }
-  }
-  if (onset < 0) return; // never slept — nothing to rescore.
-
-  // Sustained sleep run immediately before index `i` (epochs), within body.
-  int sleepRunBefore(int i) {
-    var c = 0;
-    var k = i - 1;
-    while (k >= onset && isSleep(snap[k])) {
-      c++;
-      k--;
-    }
-    return c;
-  }
-
-  // Sustained sleep run immediately after index `i` (epochs), within body.
-  int sleepRunAfter(int i) {
-    var c = 0;
-    var k = i + 1;
-    while (k <= lastSleep && isSleep(snap[k])) {
-      c++;
-      k++;
-    }
-    return c;
-  }
-
-  // (sleep-context-epochs, max-wake-run-epochs) thresholds, longest context first.
-  // The top rule allows up to 5 min of wake to be bridged when flanked by ≥15
-  // min of consolidated sleep: this is the empirical floor for "real WASO needs
-  // a SUSTAINED arousal", and it absorbs the van Hees 5-min mask-smear artifact
-  // (a single reposition inflated to ~300 s) without bridging genuine multi-
-  // minute awakenings (which exceed 5 min and stay scored as wake).
-  final rules = <List<double>>[
-    [minToEp(15), minToEp(5)],
-    [minToEp(10), minToEp(3)],
-    [minToEp(4), minToEp(1)],
-  ];
-
-  var i = onset;
-  while (i <= lastSleep) {
-    if (isSleep(snap[i])) {
-      i++;
-      continue;
-    }
-    // WAKE run [i, j).
-    var j = i;
-    while (j <= lastSleep && !isSleep(snap[j])) {
-      j++;
-    }
-    final wakeLen = j - i;
-    final before = sleepRunBefore(i);
-    final after = sleepRunAfter(j - 1);
-    final context = math.max(before, after).toDouble();
-    var rescore = false;
-    for (final r in rules) {
-      if (context >= r[0] && wakeLen <= r[1]) {
-        rescore = true;
-        break;
-      }
-    }
-    if (rescore) {
-      for (var k = i; k < j; k++) {
-        sm[k] = SleepStage.nrem;
-      }
-    }
-    i = j;
-  }
 }
 
 /// Minimum sustained REM episode (min) and minimum NREM/REM bout (min) for the

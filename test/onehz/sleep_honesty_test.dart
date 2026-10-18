@@ -12,6 +12,8 @@
 import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/src/onehz/sleep/cardio_stager.dart'
+    show websterRescoreCardio;
 
 /// Fixed absolute epoch second so every fixture is deterministic.
 const int _t0 = 1700000000;
@@ -285,13 +287,25 @@ void main() {
           reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
     });
 
-    test('stager: only the bout with REAL flanking sleep is bridged', () {
-      // Same shape, sized to the classic Webster table this file uses
-      // (≥15 min context bridges ≤5 min of wake).
-      final sm = fragmented(leadMin: 15, wakeMin: 4, reps: 5);
-      websterRescoreAutonomic(sm, 30);
-      expect(wakeInBody(sm), 4 * 8,
-          reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
+    test('a 5-min awakening flanked by 15 min of sleep stays wake', () {
+      // The bridging table tops out at 4 min. A second copy that bridged up to
+      // 5 min used to sit in stager.dart behind a public seam; this pins the
+      // one live table so the wider bound cannot quietly come back.
+      final sm = [
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+        for (var k = 0; k < 10; k++) SleepStage.wake,
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+      ];
+      websterRescoreCardio(sm, 30);
+      expect(wakeInBody(sm), 10);
+
+      final short = [
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+        for (var k = 0; k < 8; k++) SleepStage.wake,
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+      ];
+      websterRescoreCardio(short, 30);
+      expect(wakeInBody(short), 0, reason: '4 min is still an arousal');
     });
 
     test('a genuinely fragmented night keeps its WASO end-to-end', () {
