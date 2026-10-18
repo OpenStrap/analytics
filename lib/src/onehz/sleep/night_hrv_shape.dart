@@ -193,6 +193,18 @@ Metric<NightHrvShape> nightHrvShape(
     ));
   }
 
+  // Enough beats overall can still be spread so thin that no bin reaches the
+  // floor. A shape made only of holes measures nothing, so it is an
+  // abstention, not a present value at zero confidence.
+  if (!bins.any((b) => b.present)) {
+    return Metric<NightHrvShape>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no ${binMin.round()}-min bin reached $minBeatsPerBin beats '
+          'with a usable RMSSD',
+    );
+  }
+
   final third = bins.length ~/ 3;
   double? meanOf(Iterable<NightHrvBin> xs) {
     final v = [

@@ -1166,6 +1166,23 @@ void _cv06Tests() {
       expect(m.note, contains('no shape'));
     });
 
+    test('a night where every bin is a hole is absent, not an empty shape',
+        () {
+      // 400 beats over ~1.1 h: past the beat-count and three-bin gates, but no
+      // 30-min bin reaches the per-bin floor.
+      final nn = <double>[];
+      final t = <double>[];
+      for (var i = 0; i < 400; i++) {
+        nn.add(i.isEven ? 800.0 : 900.0);
+        t.add(i * 9900.0);
+      }
+      final m = nightHrvShape(nn, t);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0.0);
+      expect(m.note, contains('$kMinBeatsPerHrvBin beats'));
+    });
+
     test('CV-06 does not publish a time-to-max (deliberately cut)', () {
       final n = _syntheticNight(hours: 8, ampMs: (_) => 20.0);
       final j = nightHrvShape(n.nn, n.t).value!.toJson();
