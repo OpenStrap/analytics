@@ -707,6 +707,21 @@ void main() {
           reason: 'nothing about stillness was observable on this day');
     });
 
+    test('a measured nap survives a day that is mostly unmeasured', () {
+      // A fully measured, HR-corroborated nap, then six hours of HR-only
+      // records with no gravity. The day as a whole is under the coverage
+      // floor, but the nap passed its own per-bout gate and must be kept.
+      final d = _Day()
+        ..active(120)
+        ..still(45)
+        ..active(120)
+        ..unmeasuredAccel(6 * 60, bpm: 74);
+
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.present, isTrue);
+      expect(m.value, hasLength(1));
+    });
+
     test('accel coverage is judged outside the main sleep only', () {
       // The awake day is fully measured; the unmeasured stretch is the night,
       // which naps are never drawn from. The day stays judged.
