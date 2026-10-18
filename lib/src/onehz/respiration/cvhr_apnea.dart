@@ -280,9 +280,12 @@ class CvhrDistribution {
   /// mean is being read against.
   final List<double> quartiles;
 
-  /// True when the recent nights sit above the retained distribution's own p75.
-  /// This is the ONLY comparative statement the screen makes, and it is a
-  /// statement about this user's own history, not about apnea.
+  /// True when the recent nights sit clearly above the OLDER retained nights:
+  /// above their p75 and by more than their own spread allows for (see
+  /// [minReferenceNightsForCvhrComparison]). False, not absent, while there are
+  /// too few older nights to say. This is the ONLY comparative statement the
+  /// screen makes, and it is a statement about this user's own history, not
+  /// about apnea.
   final bool aboveOwnUsual;
 
   const CvhrDistribution({
@@ -315,6 +318,48 @@ const int minNightsForCvhrDistribution = 5;
 /// Nights considered, newest-first, once the gates have run. Also the calendar
 /// span, in days ending on the newest night, that a night must fall inside.
 const int cvhrDistributionWindowNights = 30;
+
+/// The comparison needs this many OLDER nights behind the recent ones. It is
+/// a separate, higher floor than [minNightsForCvhrDistribution]: at the 5-night
+/// distribution floor the reference would be 3 nights, and a stable user then
+/// read as "running higher" on about one evaluation in five.
+const int minReferenceNightsForCvhrComparison = 6;
+
+/// Floor on the reference spread, in cycles/h. Identical or quantized nights
+/// give MAD = 0, and a zero spread turns any difference at all into a verdict.
+/// A 1/h difference in an AHI-scaled index is below any published category
+/// boundary (5/15/30). Candidate for personalisation, not a validated constant.
+const double minCvhrReferenceSpreadPerHour = 1.0;
+
+/// One-sided 95% normal quantile for the recent-vs-reference gap.
+const double _cvhrComparisonZ = 1.645;
+
+/// Whether the recent nights sit clearly above the OLDER nights behind them.
+///
+/// The recent nights are held out of [reference]: comparing them with a range
+/// that contains them makes a single high night its own evidence. Above the
+/// reference p75 alone is not enough either — with a handful of nights p75 is
+/// close to an order statistic and ordinary night-to-night noise clears it.
+/// The recent mean must clear that p75 by z·σ̂·√(1/m + π/(2r)), the standard
+/// error of an m-night mean against an r-night median (π/2 is the median's
+/// variance inflation for normal data), σ̂ = MAD×1.4826. Measuring the gap
+/// from the median instead let a stable user through 5-10% of the time; from
+/// p75 it stays at or below what the plain p75 test gave on long histories.
+bool _recentAboveReference({
+  required double recentMean,
+  required int recentNights,
+  required List<double> reference,
+}) {
+  if (reference.length < minReferenceNightsForCvhrComparison ||
+      recentNights < 1) {
+    return false;
+  }
+  final p75 = percentile(reference, 75)!;
+  final spread = math.max(mad(reference)!, minCvhrReferenceSpreadPerHour);
+  final se =
+      spread * math.sqrt(1 / recentNights + math.pi / (2 * reference.length));
+  return recentMean - p75 > _cvhrComparisonZ * se;
+}
 
 /// RESP-01 — the 30-night personal CVHR distribution.
 ///
@@ -408,7 +453,11 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
       weightedMean: all,
       recentWeightedMean: rec,
       quartiles: q,
-      aboveOwnUsual: rec > q[2],
+      aboveOwnUsual: _recentAboveReference(
+        recentMean: rec,
+        recentNights: recent.length,
+        reference: [for (final n in kept.skip(recentCount)) n.cvhrPerHour],
+      ),
     ),
     // Relative tier on purpose: this compares the user only with themselves.
     tier: Tier.relative,

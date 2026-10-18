@@ -1163,6 +1163,52 @@ void _resp01Tests() {
       expect(edge.value!.nightsUsed, 6);
     });
 
+    test('night-to-night noise is not "running higher"', () {
+      // 0.05/h over the old all-nights p75, recent nights inside the range.
+      final noise = cvhrPersonalDistribution([
+        night(1, 4.8),
+        night(2, 5.1),
+        night(3, 4.9),
+        night(4, 5.3),
+        night(5, 5.4),
+      ]);
+      expect(noise.value!.aboveOwnUsual, isFalse);
+      // A single high newest night is not its own evidence, at the floor or
+      // a few nights past it.
+      for (final n in [5, 6, 8, 12]) {
+        final oneHigh = cvhrPersonalDistribution([
+          for (var d = 1; d < n; d++) night(d, 5),
+          night(n, 9),
+        ]);
+        expect(oneHigh.value!.aboveOwnUsual, isFalse, reason: 'n=$n');
+      }
+      // Recent nights inside an older, noisier spread stay quiet.
+      final spread = cvhrPersonalDistribution([
+        for (var d = 1; d <= 9; d++) night(d, d.isEven ? 4 : 12),
+        night(10, 13),
+        night(11, 12),
+        night(12, 13),
+      ]);
+      expect(spread.value!.aboveOwnUsual, isFalse);
+    });
+
+    test('too few older nights says nothing comparative', () {
+      // 8 nights: 3 recent, 5 older — under the reference floor however
+      // large the jump.
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 5),
+        for (var d = 6; d <= 8; d++) night(d, 40),
+      ]);
+      expect(m.present, isTrue);
+      expect(m.value!.aboveOwnUsual, isFalse);
+      // one more older night and the same jump reads.
+      final enough = cvhrPersonalDistribution([
+        for (var d = 1; d <= 6; d++) night(d, 5),
+        for (var d = 7; d <= 9; d++) night(d, 40),
+      ]);
+      expect(enough.value!.aboveOwnUsual, isTrue);
+    });
+
     test('a re-derived day counts once', () {
       final m = cvhrPersonalDistribution([
         for (var d = 1; d <= 5; d++) night(d, 10),
