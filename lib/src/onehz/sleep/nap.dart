@@ -254,8 +254,28 @@ Metric<List<NapWindow>> detectNaps(
   // can be made better here — the record simply does not say what happened
   // before it — so it is REPORTED instead, via [NapWindow.startsAtRecordEdge]
   // below.
-  bool stillAt(int k) =>
-      mask.deltaDeg[k] < thr && (k == 0 || absAt(k) - absAt(k - 1) == 1);
+  //
+  // "Discontinuity" is judged against the published van Hees epoch, not a
+  // hard-coded 1 s step. The mask accepts any measured cadence up to
+  // [vanHeesMaxCadenceSec] and scales its windows to it, so a 2 s or 5 s stream
+  // failed an `== 1` test at every second and could never produce a nap, and a
+  // 1 Hz stream lost every run that a single skipped second interrupted — both
+  // then published as a judged "no nap". A step inside one published epoch is
+  // the resolution the rule is defined at; anything longer is a real hole.
+  bool continuousAt(int k) {
+    final stepMs = series[k].tsMs - series[k - 1].tsMs;
+    return stepMs > 0 && stepMs <= vanHeesMaxCadenceSec * 1000;
+  }
+
+  bool stillAt(int k) => mask.deltaDeg[k] < thr && (k == 0 || continuousAt(k));
+
+  // Wall-clock seconds one sample stands for in the coverage gates below.
+  // Counting samples as seconds put a fully-measured 5 s stream at 20%
+  // coverage and rejected every bout as unmeasured. Floored so a sample is
+  // never credited with more time than the stream actually spaces them by, and
+  // exactly 1 at 1 Hz.
+  final cadenceFloor = (mask.cadenceSec ?? 1).floor();
+  final secPerSample = cadenceFloor < 1 ? 1 : cadenceFloor;
 
   final runs = <List<int>>[];
   var i = 0;
@@ -427,7 +447,7 @@ Metric<List<NapWindow>> detectNaps(
     // counts against it exactly as an invalid sample does).
     var accelSec = 0;
     for (var k = start; k < end; k++) {
-      if (series[k].valid) accelSec++;
+      if (series[k].valid) accelSec += secPerSample;
     }
     if (accelSec / tib < minNapAccelCoverage) {
       unobserved++;
@@ -445,7 +465,8 @@ Metric<List<NapWindow>> detectNaps(
     for (var k = start; k < end; k++) {
       if (hr[k] > 0) boutHr.add(hr[k]);
     }
-    final coverage = boutHr.length / tib;
+    final hrSec = boutHr.length * secPerSample;
+    final coverage = hrSec >= tib ? 1.0 : hrSec / tib;
     if (coverage < minNapHrCoverage) {
       unverifiable++;
       continue;

@@ -692,4 +692,77 @@ void main() {
       expect(m.value!.single.tibSec, greaterThan(40 * 60));
     });
   });
+
+  group('detectNaps — cadence other than an unbroken 1 Hz', () {
+    // The immobility mask measures the stream's cadence and accepts anything up
+    // to the published 5 s van Hees epoch. The nap run builder used to demand a
+    // step of exactly 1 s between samples, so every one of these days came back
+    // as a judged "no qualifying nap" despite a clear 40-minute still block
+    // with an HR dip.
+    ({List<AccelSample> accel, List<double> hr}) day(int stepSec,
+        {int dropEvery = 0, int holeAtMin = -1, int holeMin = 0}) {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var t = 0;
+      var k = 0;
+      void emit(double x, double z, double bpm) {
+        k++;
+        if (holeAtMin >= 0 && t == holeAtMin * 60) t += holeMin * 60;
+        if (dropEvery > 0 && k % dropEvery == 0) {
+          t += stepSec;
+          return;
+        }
+        accel.add(AccelSample(t * 1000.0, x, 0, z));
+        hr.add(bpm);
+        t += stepSec;
+      }
+
+      void active(int min) {
+        final end = t + min * 60;
+        while (t < end) {
+          final rad = (45 + 35 * math.sin(t * 0.4)) * math.pi / 180;
+          emit(math.cos(rad), math.sin(rad), 82);
+        }
+      }
+
+      void still(int min) {
+        final end = t + min * 60;
+        while (t < end) {
+          emit(0, 1, 54);
+        }
+      }
+
+      active(120);
+      still(40);
+      active(120);
+      return (accel: accel, hr: hr);
+    }
+
+    for (final step in [2, 5]) {
+      test('a 40-minute nap at a $step s cadence is detected', () {
+        final d = day(step);
+        final m = detectNaps(d.accel, d.hr);
+        expect(m.present, isTrue);
+        final nap = m.value!.single;
+        expect(nap.tibSec, closeTo(40 * 60, 6 * 60));
+      });
+    }
+
+    test('a skipped second at 1 Hz does not end the nap', () {
+      final d = day(1, dropEvery: 120);
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.value!.single.tibSec, closeTo(40 * 60, 6 * 60));
+    });
+
+    test('a real recording hole inside the still block still breaks it', () {
+      // 120 min active, then 20 min still, a 30-minute hole, 20 more still:
+      // neither half reaches the nap minimum on its own once the unobserved
+      // half hour is not read as stillness.
+      final d = day(2, holeAtMin: 140, holeMin: 30);
+      final m = detectNaps(d.accel, d.hr);
+      for (final nap in m.value ?? const <NapWindow>[]) {
+        expect(nap.tibSec, lessThan(30 * 60));
+      }
+    });
+  });
 }
