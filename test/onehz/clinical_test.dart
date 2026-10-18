@@ -2172,78 +2172,41 @@ void main() {
     });
   });
 
-  group('StrainScorer (Banister TRIMP → 0–100)', () {
-    test('trimpToStrain pins: 0→0, 7200→~100, monotone, 2dp', () {
-      expect(StrainScorer.trimpToStrain(0), 0.0);
-      // ln(7201)/ln(7201)=1 → 100.
-      expect(StrainScorer.trimpToStrain(7200), closeTo(100.0, 1e-9));
-      expect(StrainScorer.trimpToStrain(100) < StrainScorer.trimpToStrain(335),
-          isTrue);
-      // Rounded to 2 decimals.
-      final v = StrainScorer.trimpToStrain(123.456);
-      expect((v * 100).round() / 100, v);
-    });
-
-    test('REGRESSION: trimpToStrain is CLAMPED to maxStrain', () {
-      // Docstring says "Map accumulated TRIMP onto [0, 100]" but nothing
-      // clamped: 14400 → 107.8. (The sibling strainScore() always clamped.)
-      expect(StrainScorer.trimpToStrain(14400), 100.0);
-      expect(StrainScorer.trimpToStrain(1e9), StrainScorer.maxStrain);
-      expect(StrainScorer.trimpToStrain(7200), closeTo(100.0, 1e-9));
-      // Below the ceiling nothing changed.
-      expect(StrainScorer.trimpToStrain(335), lessThan(100.0));
-    });
-
+  group('StrainScorer (Banister TRIMP helpers)', () {
     test(
-        'REGRESSION: strain integrates PER-SAMPLE durations, not the first '
+        'REGRESSION: TRIMP integrates PER-SAMPLE durations, not the first '
         'inter-sample gap applied to everything', () {
       const bpmv = 150.0;
-      // (a) 21 samples over 20 min whose FIRST two are 1 s apart — exactly the
-      // sparse stream minSparseReadings admits. sampleDuration was 1 s for all
-      // 21 samples → strain 8.08 instead of ~47.
+      double trimp(List<double> ts, int n) => StrainScorer.banisterTRIMP(
+          List<double>.filled(n, bpmv),
+          50,
+          140,
+          StrainScorer.sampleDurationsMinutes(ts));
+      // (a) 21 samples over 20 min whose FIRST two are 1 s apart. The old
+      // single-interval duration credited 1 s to all 21 samples.
       final tsIrregular = <double>[
         0,
         1,
         for (var i = 1; i < 20; i++) 1 + i * 63.1
       ];
-      final bpm21 = List<double>.filled(21, bpmv);
-      final irregular =
-          StrainScorer.strain(bpm21, tsIrregular, maxHR: 190, restingHR: 50)!;
-      final uniform = StrainScorer.strain(
-          bpm21, [for (var i = 0; i < 21; i++) i * 60.0],
-          maxHR: 190, restingHR: 50)!;
-      expect(irregular, greaterThan(40.0));
-      expect(irregular, closeTo(uniform, 3.0),
-          reason: 'same HR over the same wall-clock span → similar strain');
+      final irregular = trimp(tsIrregular, 21);
+      final uniform = trimp([for (var i = 0; i < 21; i++) i * 60.0], 21);
+      expect(irregular, closeTo(uniform, uniform * 0.1),
+          reason: 'same HR over the same wall-clock span → similar TRIMP');
 
       // (b) The inverse: 700 samples at 1 Hz behind a 300 s leading gap. The
-      // 5-min first gap became every sample's duration → strain 104.25.
+      // 5-min first gap used to become every sample's duration.
       final tsGap = <double>[0, for (var i = 0; i < 699; i++) 300.0 + i];
-      final gapped = StrainScorer.strain(List<double>.filled(700, bpmv), tsGap,
-          maxHR: 190, restingHR: 50)!;
-      final dense = StrainScorer.strain(List<double>.filled(700, bpmv),
-          [for (var i = 0; i < 700; i++) i.toDouble()],
-          maxHR: 190, restingHR: 50)!;
-      expect(gapped, lessThanOrEqualTo(StrainScorer.maxStrain));
-      expect(gapped, closeTo(dense, 1.0),
+      final gapped = trimp(tsGap, 700);
+      final dense = trimp([for (var i = 0; i < 700; i++) i.toDouble()], 700);
+      expect(gapped, closeTo(dense, 1e-9),
           reason: 'a hole in the stream is not elapsed effort');
-      expect(gapped, lessThan(60.0));
 
       // Per-sample durations: gaps capped at the median cadence, tail gets it.
       final durs = StrainScorer.sampleDurationsMinutes(tsGap);
       expect(durs.length, 700);
       expect(durs.first, closeTo(1 / 60.0, 1e-12));
       expect(durs.reduce(math.max), closeTo(1 / 60.0, 1e-12));
-    });
-
-    test('MOT-11: no HRmax → no number, not a 220−age stand-in', () {
-      // `strain` used to fall back to defaultMaxHR() = 190 — a 30 y/o's
-      // ceiling applied to whoever's wrist arrived. The perimeter caught it;
-      // the source now does.
-      final bpm = List<double>.filled(700, 150.0);
-      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
-      expect(StrainScorer.strain(bpm, ts, maxHR: null), isNull);
-      expect(StrainScorer.strain(bpm, ts, maxHR: 190), isNotNull);
     });
 
     test('Banister monotonic increasing in intensity', () {
@@ -2274,56 +2237,6 @@ void main() {
       final (h2, src2) = StrainScorer.estimateHRmax(hist, 30);
       expect(src2, 'observed');
       expect(h2, greaterThan(StrainScorer.tanakaHRmax(30)));
-    });
-
-    test('gating: too few samples → null; spanning ≥600s with ≥20 → computes',
-        () {
-      // 30 samples but spanning only 30s → fails sparse-span gate → null.
-      final ts30 = [for (var i = 0; i < 30; i++) i.toDouble()];
-      expect(
-          StrainScorer.strain(List<double>.filled(30, 150), ts30,
-              maxHR: 190, restingHR: 50),
-          isNull);
-      // 20 samples spanning 600s → qualifies.
-      final tsSpan = [for (var i = 0; i < 20; i++) i * 32.0]; // 19*32=608s
-      final s = StrainScorer.strain(List<double>.filled(20, 150), tsSpan,
-          maxHR: 190, restingHR: 50);
-      expect(s, isNotNull);
-    });
-
-    test('maxHR ≤ restingHR → null (invalid HRR)', () {
-      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
-      expect(
-          StrainScorer.strain(List<double>.filled(700, 100), ts,
-              maxHR: 50, restingHR: 60),
-          isNull);
-    });
-
-    test(
-        'trimpStrain envelope: present/ESTIMATE on enough data, absent otherwise',
-        () {
-      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
-      final m = trimpStrain(List<double>.filled(700, 140), ts,
-          maxHr: 190, restingHr: 50);
-      expect(m.present, isTrue);
-      expect(m.tier, 'ESTIMATE');
-      expect(m.value!, greaterThan(0));
-      final absent = trimpStrain([100, 110], [0, 1], maxHr: 190, restingHr: 50);
-      expect(absent.present, isFalse);
-      expect(absent.confidence, 0);
-    });
-
-    test(
-        'trimpStrain is absent (not fabricated) when maxHr or restingHr is missing',
-        () {
-      final ts = [for (var i = 0; i < 700; i++) i.toDouble()];
-      final bpm = List<double>.filled(700, 140);
-      final noMax = trimpStrain(bpm, ts, restingHr: 50);
-      expect(noMax.present, isFalse);
-      expect(noMax.confidence, 0);
-      final noResting = trimpStrain(bpm, ts, maxHr: 190);
-      expect(noResting.present, isFalse);
-      expect(noResting.confidence, 0);
     });
   });
 

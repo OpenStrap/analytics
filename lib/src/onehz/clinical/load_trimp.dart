@@ -653,7 +653,7 @@ Metric<QuietLevel> personalQuietWakingHrr(List<double> priorDailyLevels) {
 // TRIMP.
 
 // ════════════════════════════════════════════════════════════════════════════
-// StrainScorer — Banister TRIMP → 0–100 strain ("Effort").
+// StrainScorer — Banister TRIMP building blocks.
 // Implementation of published exercise-physiology methods.
 //
 //   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
@@ -662,41 +662,24 @@ Metric<QuietLevel> personalQuietWakingHrr(List<double> priorDailyLevels) {
 //      from the real timestamps and capped at the stream's median cadence so a
 //      gap is never counted as effort): sample contributes dur × x × y(x), with
 //      y = 0.64·e^(1.92x) (men) / 0.86·e^(1.67x) (women).
-//   4. strain = 100 × ln(TRIMP + 1) / ln(D), D = 7201.
+//
+// There is no strain scale here. The one strain is the 0–21
+// `strainScoreFromSeries` / `strainFromNetTrimp` path above, which weights with
+// [StrainScorer.banisterY]. A 0–100 "Effort" map (`trimpToStrain` /
+// `StrainScorer.strain` / `trimpStrain`) used to sit on top of these helpers —
+// the second scale the file header says is gone. Nothing displayed it, yet its
+// existence let a cadence check pass while measuring a number no screen shows.
 //
 // References: Karvonen 1957; Banister 1991 (y = 0.64·e^(1.92x) men /
 // 0.86·e^(1.67x) women); Tanaka 2001 (HRmax = 208 − 0.7·age).
 //
-// NOTE (steps/active-energy floor): strain is PURELY HR-derived
-// (Edwards/Banister TRIMP → log map). Steps and active calories are computed as
-// SEPARATE, independent daily metrics and are NEVER fused into, nor floor, the
-// strain score.
+// NOTE (steps/active-energy floor): TRIMP here is PURELY HR-derived. Steps and
+// active calories are computed as SEPARATE, independent daily metrics and are
+// NEVER fused into, nor floor, the strain score.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// StrainScorer constants + the strain pipeline.
+/// StrainScorer constants + the Banister TRIMP helpers.
 class StrainScorer {
-  /// Minimum HR readings before computing strain on a DENSE stream (≈10 min @1Hz).
-  static const int minReadings = 600;
-
-  /// Sparse-stream acceptance (#482): a low-cadence strap also qualifies once the
-  /// HR series SPANS at least [minSpanSeconds] with a small sample floor.
-  static const int minSparseReadings = 20;
-
-  /// Wall-clock coverage (s) that qualifies a sparse stream (10 min).
-  static const int minSpanSeconds = 600;
-
-  /// Top of the strain ("Effort") scale (rescaled 21.0 → 100.0).
-  static const double maxStrain = 100.0;
-
-  /// Logarithmic-map denominator D = 7200 + 1.
-  ///
-  /// It was set from the Edwards daily ceiling (top weight 5 sustained 24 h =
-  /// 7200), and Edwards is gone (MOT-06). Kept unchanged anyway: the Banister
-  /// ceiling over the same 24 h is 1440 × 1 × y(1) = 6,293, within 15 % of it,
-  /// and this is a DISPLAY map — rescaling it would rescore every stored day for
-  /// no gain in truth.
-  static const double strainDenominator = 7201.0;
-
   /// Fallback per-sample duration (minutes) — 1 s at 1 Hz.
   static const double fallbackSampleMin = 1.0 / 60.0;
 
@@ -789,13 +772,14 @@ class StrainScorer {
   ///
   /// This replaces the old `sampleDurationMinutes`, which read ONE interval
   /// (the first two timestamps) and applied it to every sample — catastrophic
-  /// on exactly the sparse/irregular streams [minSparseReadings] admits: 21
-  /// samples over 20 min with the first two 1 s apart scored strain 8.08
-  /// instead of ~47, and a 1 Hz stream with a 5-min leading gap scored 104.
+  /// on sparse/irregular streams: 21 samples over 20 min with the first two
+  /// 1 s apart scored strain 8.08 instead of ~47, and a 1 Hz stream with a
+  /// 5-min leading gap scored 104.
   /// EMPTY when the stream's cadence cannot be measured — see
   /// [sampleCadenceSeconds]. Every duration here is a multiple of that cadence,
-  /// so an unmeasurable cadence is an unmeasurable effort, and [strain] turns
-  /// it into an absent metric rather than a small confident one.
+  /// so an unmeasurable cadence is an unmeasurable effort: a caller must turn
+  /// the empty list into an absent metric, never hand it to [banisterTRIMP]
+  /// (which credits [fallbackSampleMin] per sample when given no durations).
   static List<double> sampleDurationsMinutes(List<double> tsSec) {
     final n = tsSec.length;
     if (n == 0) return const [];
@@ -824,127 +808,6 @@ class StrainScorer {
     }
     return acc;
   }
-
-  // ── Logarithmic map ─────────────────────────────────────────────────────────
-
-  /// Map accumulated TRIMP onto [0, 100] via 100 × ln(TRIMP+1) / ln(D), 2 dp.
-  /// TRIMP ≤ 0 → 0; above the D−1 ceiling the score is CLAMPED at [maxStrain]
-  /// (it used to run off the top of its own documented range: TRIMP 14400 →
-  /// 107.8, while the sibling [strainScore] clamped correctly).
-  static double trimpToStrain(double trimp,
-      {double denominator = strainDenominator}) {
-    if (trimp <= 0) return 0;
-    final value = maxStrain * math.log(trimp + 1.0) / math.log(denominator);
-    final clamped = math.min(maxStrain, math.max(0.0, value));
-    return (clamped * 100).roundToDouble() / 100;
-  }
-
-  // ── TRIMP method ──────────────────────────────────────────────────────────────
-
-  /// Compute strain (0–100) from a time-ordered HR series. APPROXIMATE.
-  ///
-  /// [bpm] per-sample HR; [tsSec] their timestamps in SECONDS (same length).
-  /// Returns null when there isn't enough data to trust the number (fewer than
-  /// [minReadings] AND less than [minSpanSeconds] coverage), when [maxHR] is
-  /// missing, or when maxHR ≤ restingHR (invalid HRR).
-  ///
-  /// [maxHR] IS REQUIRED-AND-NULLABLE, and null means NO NUMBER (audit MOT-11).
-  /// It used to fall back to `defaultMaxHR()` = 190, a 220−age ceiling for a 30
-  /// y/o applied to whoever's wrist arrived — a fabricated anchor inside the
-  /// value, caught (if at all) by the caller. Honesty belongs at the source, so
-  /// that helper is gone too. `AutoWorkoutDetector` keeps its own 190 for the
-  /// "did you work out?" gate, which is a prompt, not a published number.
-  static double? strain(
-    List<double> bpm,
-    List<double> tsSec, {
-    required double? maxHR,
-    double restingHR = defaultRestingHR,
-    bool female = false,
-    double denominator = strainDenominator,
-  }) {
-    if (maxHR == null) return null;
-    final effMax = maxHR;
-    final bool enoughData;
-    if (bpm.length >= minReadings) {
-      enoughData = true;
-    } else if (bpm.length >= minSparseReadings) {
-      if (tsSec.isEmpty) {
-        enoughData = false;
-      } else {
-        var mn = tsSec[0], mx = tsSec[0];
-        for (final t in tsSec) {
-          if (t < mn) mn = t;
-          if (t > mx) mx = t;
-        }
-        enoughData = (mx - mn) >= minSpanSeconds;
-      }
-    } else {
-      enoughData = false;
-    }
-    if (!enoughData || effMax <= restingHR) return null;
-
-    final durations = sampleDurationsMinutes(tsSec);
-    // No measurable cadence ⇒ no durations ⇒ no effort. Must NOT fall through:
-    // `banisterTRIMP` credits `fallbackSampleMin` per sample when handed an
-    // empty list, which is the fabricated 1 s this abstention exists to stop.
-    if (durations.isEmpty) return null;
-    final trimp = banisterTRIMP(bpm, restingHR, effMax - restingHR, durations,
-        female: female);
-    return trimpToStrain(trimp, denominator: denominator);
-  }
-}
-
-/// Banister TRIMP strain ("Effort", 0–100) as a Metric, with the honesty
-/// envelope: absent when the gates fail (never fabricated).
-///
-/// [bpm] per-sample HR (bpm). [tsSec] timestamps (s), same length. [maxHr] /
-/// [restingHr] the personal anchors (HRmax resolved by the caller via
-/// [StrainScorer.estimateHRmax] / Tanaka). [sex] selects the Banister
-/// coefficient. The `method` parameter is gone with the Edwards path (MOT-06).
-Metric<double> trimpStrain(
-  List<double> bpm,
-  List<double> tsSec, {
-  double? maxHr,
-  double? restingHr,
-  Sex sex = Sex.male,
-}) {
-  const inputs = ['hr_series', 'resting_hr', 'max_hr'];
-  // used to fall back to StrainScorer.defaultRestingHR/defaultMaxHR when
-  // these were omitted, which fed a made-up anchor into a confident-looking
-  // ESTIMATE score with nothing telling anyone it wasn't a real anchor. those
-  // defaults are for AutoWorkoutDetector's internal gate, not for this public
-  // honesty-wrapped function - if we don't actually have the person's real
-  // anchors, we don't have a real number either.
-  if (maxHr == null || restingHr == null) {
-    return const Metric<double>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'needs a real maxHr and restingHr, not fabricated defaults',
-    );
-  }
-  final s = StrainScorer.strain(
-    bpm,
-    tsSec,
-    maxHR: maxHr,
-    restingHR: restingHr,
-    female: sex == Sex.female,
-  );
-  if (s == null) {
-    return const Metric<double>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note:
-          'strain needs ≥600 HR samples (or ≥20 spanning ≥600 s) and HRmax>RHR',
-    );
-  }
-  return Metric<double>(
-    value: s,
-    confidence: 0.6,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: 'Banister TRIMP → 0–100 strain '
-        '(100·ln(TRIMP+1)/ln(7201)); wrist-HR ESTIMATE, not clinical',
-  );
 }
 
 class LoadState {

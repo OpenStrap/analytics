@@ -71,7 +71,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `strainScoreFromSeries` | `clinical/load_trimp.dart` | **the headline 0-21 strain** from per-minute wake HR: `netTrimpAboveQuiet` log-mapped onto 0-21 | — |
 | `strainCurveFromSeries` | `clinical/load_trimp.dart` | cumulative 0-21 strain per minute, same arithmetic; last point == headline | — |
 | `strainScoreMetric` | `clinical/load_trimp.dart` | LUMP form (TRIMP minus wake-minutes × quiet cost) log-squashed onto 0-21; can debit exercise, kept only for rescaling a stored TRIMP with no per-minute series | — |
-| `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
 | `baevskyStressIndex` | `clinical/stress_si.dart` | Baevsky Stress Index, 5-min sliding RR-histogram | Baevsky & Berseneva 2008 |
 | `irregularBeatScreen` | `clinical/irregular_rhythm.dart` | Poincaré SD1/SD2 + pNN70 irregular-rhythm screen | — (screen, not a diagnosis; no ECG) |

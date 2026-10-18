@@ -94,10 +94,10 @@ foundation layers:
   baselines, inverse-variance fusion.
 - **`clinical/`** (Tier-1) — HRV time/frequency domain (RMSSD/SDNN/pNNx, Lomb-Scargle
   LF/HF), PRSA (deceleration/acceleration capacity), nocturnal RHR/dip, an illness-risk
-  CUSUM state machine, Plews ln-RMSSD readiness, Baevsky stress index, Banister/Edwards
-  TRIMP + CTL/ATL/TSB training load (the 0-21 day strain, `strainScoreMetric`, is scored
-  above the user's own quiet waking heart-rate level rather than a fixed population
-  reference; the 0-100 `trimpStrain` effort score is raw TRIMP with no such subtraction),
+  CUSUM state machine, Plews ln-RMSSD readiness, Baevsky stress index, Banister
+  TRIMP + CTL/ATL/TSB training load (the 0-21 day strain is scored above the user's own
+  quiet waking heart-rate level rather than a fixed population reference, and it is the
+  only strain scale),
   a Poincaré irregular-rhythm screen, cosinor circadian fitting, and real-time cardiac coherence for guided breathing sessions.
 - **`sleep/`** — van Hees z-angle segmentation feeding a cardiac/motion stager (the
   single source of truth for sleep staging), AASM hypnogram metrics, cardiopulmonary
