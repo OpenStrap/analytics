@@ -442,11 +442,12 @@ void main() {
       // 0.1 Hz Mayer wave. Only the skirt of the true peak is inside the
       // 9 br/min floor, so every sub-window agreed on ~9 br/min and it went
       // out at high confidence.
-      RespEstimate? run(double brpm) {
-        final rnd = math.Random(1);
+      RespEstimate? run(double brpm,
+          {double spanMs = 3600e3, double artifactFraction = 0, int seed = 1}) {
+        final rnd = math.Random(seed);
         final nn = <double>[], t = <double>[];
         var tMs = 0.0;
-        while (tMs < 3600e3) {
+        while (tMs < spanMs) {
           final s = tMs / 1000;
           final v = 1000 +
               30 * math.sin(2 * math.pi * brpm / 60 * s) +
@@ -456,7 +457,7 @@ void main() {
           nn.add(v);
           t.add(tMs);
         }
-        final m = rsaRespRate(nn, t, artifactFraction: 0);
+        final m = rsaRespRate(nn, t, artifactFraction: artifactFraction);
         if (m.present) return m.value;
         expect(m.note, isNotNull);
         return null;
@@ -469,6 +470,21 @@ void main() {
       // In-band rates are unaffected.
       expect(run(10.0)?.brpm, closeTo(10.0, 0.3));
       expect(run(12.0)?.brpm, closeTo(12.0, 0.3));
+
+      // A 3-min window has ~90 s sub-windows. The floor guard must not widen
+      // with the coarser resolution: a true 10 br/min is still a measurement
+      // there, while the slow-breathing skirt is still withheld.
+      for (var seed = 1; seed <= 5; seed++) {
+        final short10 =
+            run(10.0, spanMs: 180e3, artifactFraction: 0.15, seed: seed);
+        expect(short10?.brpm, closeTo(10.0, 0.5),
+            reason: 'seed $seed: 3-min true 10 br/min was ${short10?.brpm}');
+        final short8 =
+            run(8.0, spanMs: 180e3, artifactFraction: 0.15, seed: seed);
+        expect(short8, isNull,
+            reason: 'seed $seed: 3-min true 8 br/min reported as '
+                '${short8?.brpm}');
+      }
     });
 
     test('RSA: confidence scales with usable sub-windows', () {

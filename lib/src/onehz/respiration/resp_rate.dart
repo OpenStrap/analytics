@@ -311,10 +311,14 @@ Metric<RespEstimate> rsaRespRate(
     // above the floor. Every sub-window then lands near that one value, the
     // agreement gate passes, and ~9 br/min went out at confidence 0.8–0.9 for
     // a true 8. One resolution width (1/span) was not enough: noise on the
-    // skirt still put sub-windows at 9.2–10 br/min. Two widths withholds the
-    // whole skirt; the cost is that a true 9.0–9.4 is withheld too, which is
-    // an absence rather than a wrong number.
-    if (pk <= rsaLoHz + 2 / segSpan) {
+    // skirt still put sub-windows at 9.2–10 br/min. Two widths of a full
+    // [rsaSegmentSec] sub-window (0.4 br/min) withholds the whole skirt; the
+    // cost is that a true 9.0–9.4 is withheld too, which is an absence rather
+    // than a wrong number. The guard is capped at that width rather than
+    // scaling with 1/segSpan: on a short input (a 3-min window gives ~90 s
+    // sub-windows) 2/segSpan is 1.33 br/min and blanked a true 10 br/min,
+    // while the floor failure there already sits on the first bin.
+    if (pk <= rsaLoHz + math.min(2 / segSpan, 2 / rsaSegmentSec)) {
       atFloor++;
       continue;
     }
