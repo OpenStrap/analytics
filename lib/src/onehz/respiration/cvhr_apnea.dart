@@ -281,12 +281,14 @@ class CvhrDistribution {
   final List<double> quartiles;
 
   /// True when the recent nights sit clearly above the OLDER retained nights:
-  /// above their p75 and by more than their own spread allows for (see
-  /// [minReferenceNightsForCvhrComparison]). False, not absent, while there are
-  /// too few older nights to say. This is the ONLY comparative statement the
-  /// screen makes, and it is a statement about this user's own history, not
-  /// about apnea.
-  final bool aboveOwnUsual;
+  /// above their p75 and by more than their own spread allows for. False when
+  /// they do not. NULL while there are fewer than
+  /// [minReferenceNightsForCvhrComparison] older nights: a false there would be
+  /// read as "stayed inside your range" even for a jump from 5/h to 40/h, and
+  /// the honest answer is that no comparison exists yet. This is the ONLY
+  /// comparative statement the screen makes, and it is a statement about this
+  /// user's own history, not about apnea.
+  final bool? aboveOwnUsual;
 
   const CvhrDistribution({
     required this.nightsUsed,
@@ -345,14 +347,18 @@ const double _cvhrComparisonZ = 1.645;
 /// variance inflation for normal data), σ̂ = MAD×1.4826. Measuring the gap
 /// from the median instead let a stable user through 5-10% of the time; from
 /// p75 it stays at or below what the plain p75 test gave on long histories.
-bool _recentAboveReference({
+///
+/// Null, not false, when the reference is under the floor: there is nothing
+/// to compare against yet, and false would claim the recent nights stayed
+/// inside a range nobody measured.
+bool? _recentAboveReference({
   required double recentMean,
   required int recentNights,
   required List<double> reference,
 }) {
   if (reference.length < minReferenceNightsForCvhrComparison ||
       recentNights < 1) {
-    return false;
+    return null;
   }
   final p75 = percentile(reference, 75)!;
   final spread = math.max(mad(reference)!, minCvhrReferenceSpreadPerHour);

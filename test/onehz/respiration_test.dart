@@ -1172,7 +1172,7 @@ void _resp01Tests() {
         night(4, 5.3),
         night(5, 5.4),
       ]);
-      expect(noise.value!.aboveOwnUsual, isFalse);
+      expect(noise.value!.aboveOwnUsual, isNot(isTrue));
       // A single high newest night is not its own evidence, at the floor or
       // a few nights past it.
       for (final n in [5, 6, 8, 12]) {
@@ -1180,7 +1180,7 @@ void _resp01Tests() {
           for (var d = 1; d < n; d++) night(d, 5),
           night(n, 9),
         ]);
-        expect(oneHigh.value!.aboveOwnUsual, isFalse, reason: 'n=$n');
+        expect(oneHigh.value!.aboveOwnUsual, isNot(isTrue), reason: 'n=$n');
       }
       // Recent nights inside an older, noisier spread stay quiet.
       final spread = cvhrPersonalDistribution([
@@ -1200,7 +1200,9 @@ void _resp01Tests() {
         for (var d = 6; d <= 8; d++) night(d, 40),
       ]);
       expect(m.present, isTrue);
-      expect(m.value!.aboveOwnUsual, isFalse);
+      // null, not false: false would read as "stayed inside your range".
+      expect(m.value!.aboveOwnUsual, isNull);
+      expect(m.value!.toJson()['above_own_usual'], isNull);
       // one more older night and the same jump reads.
       final enough = cvhrPersonalDistribution([
         for (var d = 1; d <= 6; d++) night(d, 5),
