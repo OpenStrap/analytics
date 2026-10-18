@@ -220,6 +220,32 @@ Metric<List<NapWindow>> detectNaps(
   }
 
   final series = accel.length == n ? accel : accel.sublist(0, n);
+
+  // A day the band barely measured gravity on cannot be judged nap-free.
+  // Unmeasured seconds fail the still test (below), so with no decoded accel
+  // no bout ever forms, the per-bout coverage gate is never reached, and the
+  // day would fall through to an empty list that every caller reads as
+  // "judged, none" — e.g. an HR-only thin-record day or a long decode gap.
+  // Measured over the seconds outside the main sleep, since that is the only
+  // stretch a nap could have come from.
+  var outside = 0, outsideAccel = 0;
+  for (var k = 0; k < n; k++) {
+    if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) {
+      continue;
+    }
+    outside++;
+    if (series[k].valid) outsideAccel++;
+  }
+  if (outside > 0 && outsideAccel / outside < minNapAccelCoverage) {
+    return Metric<List<NapWindow>>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'accel decoded on $outsideAccel of $outside s outside the main '
+          'sleep (need ${(minNapAccelCoverage * 100).round()}%) — stillness '
+          'could not be observed, so naps cannot be judged',
+    );
+  }
+
   final mask = immobilityMask(series);
   final win = mask.sustainedSec;
   final thr = mask.thresholdDeg;

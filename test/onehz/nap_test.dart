@@ -691,6 +691,34 @@ void main() {
       final m = detectNaps(d.accel, d.hr);
       expect(m.value!.single.tibSec, greaterThan(40 * 60));
     });
+
+    test('a day with no decoded accel is NOT judged nap-free', () {
+      // HR on every second, including a dip that would corroborate a nap, but
+      // gravity decoded on none — an HR-only thin-record day. No still bout can
+      // ever form, so the per-bout coverage gate never runs. Pre-fix this came
+      // back present with an empty list ("judged, none") at confidence 0.3.
+      final d = _Day()
+        ..unmeasuredAccel(8 * 60, bpm: 74)
+        ..unmeasuredAccel(45, bpm: 52)
+        ..unmeasuredAccel(7 * 60, bpm: 74);
+
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.present, isFalse,
+          reason: 'nothing about stillness was observable on this day');
+    });
+
+    test('accel coverage is judged outside the main sleep only', () {
+      // The awake day is fully measured; the unmeasured stretch is the night,
+      // which naps are never drawn from. The day stays judged.
+      final d = _Day()
+        ..unmeasuredAccel(8 * 60, bpm: 55)
+        ..active(6 * 60);
+
+      final m = detectNaps(d.accel, d.hr,
+          mainSleep: const SleepWindowSpan(0, 8 * 3600));
+      expect(m.present, isTrue);
+      expect(m.value, isEmpty);
+    });
   });
 
   group('detectNaps — cadence other than an unbroken 1 Hz', () {
