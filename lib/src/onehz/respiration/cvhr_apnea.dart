@@ -312,14 +312,16 @@ const double minAnalyzedHoursPerNight = 4.0;
 /// And this many such nights must exist before the screen says anything.
 const int minNightsForCvhrDistribution = 5;
 
-/// Nights considered, newest-first, once the gates have run.
+/// Nights considered, newest-first, once the gates have run. Also the calendar
+/// span, in days ending on the newest night, that a night must fall inside.
 const int cvhrDistributionWindowNights = 30;
 
 /// RESP-01 — the 30-night personal CVHR distribution.
 ///
 /// [nights] in any order; the newest [cvhrDistributionWindowNights] retained
-/// nights are used. Returns ABSENT — never a partial number — until at least
-/// [minNightsForCvhrDistribution] nights clear both gates.
+/// nights that fall within [cvhrDistributionWindowNights] calendar days of the
+/// newest night are used. Returns ABSENT — never a partial number — until at
+/// least [minNightsForCvhrDistribution] nights clear both gates.
 Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
   const inputs = ['cvhr_apnea', 'irregular_rhythm_flag'];
   // Newest first, one row per day (a re-derive can leave two).
@@ -330,11 +332,26 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
   final sorted = byDay.values.toList()
     ..sort((a, b) => b.dayKey.compareTo(a.dayKey));
 
+  // Bounded by calendar days, not just by count: after a wear gap the newest
+  // 30 rows reach back months, and the "recent" third then mixes the first
+  // nights back with nights from before the gap. Anchored on the newest night,
+  // never the wall clock. A label that does not parse is not bounded, which is
+  // the old count-only behaviour.
+  final anchorDay =
+      sorted.isEmpty || DateTime.tryParse(sorted.first.dayKey) == null
+          ? null
+          : calendarDays([sorted.first.dayKey])[0];
+
   var excludedIrregular = 0;
   var excludedThin = 0;
   final kept = <CvhrNight>[];
   for (final n in sorted) {
     if (kept.length >= cvhrDistributionWindowNights) break;
+    if (anchorDay != null && DateTime.tryParse(n.dayKey) != null) {
+      final day = calendarDays([n.dayKey])[0];
+      // Newest-first, so every later night is older still.
+      if (anchorDay - day >= cvhrDistributionWindowNights) break;
+    }
     if (!n.cvhrPerHour.isFinite || !n.analyzedHours.isFinite) continue;
     // RESP-02 cross-gate FIRST: an AF night is not a thin night, and counting
     // it as one would misreport why the screen is quiet.
@@ -402,7 +419,8 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
     inputs_used: inputs,
     note: 'CVHR is a CARDIAC SURROGATE, not a breathing measurement: this is '
         'how often the pattern showed up across ${kept.length} of your own '
-        'nights, never an AHI, never a severity, never a per-night value. '
+        'nights in the last $cvhrDistributionWindowNights days, never an AHI, '
+        'never a severity, never a per-night value. '
         'It also fires on atrial fibrillation (those nights are excluded), on '
         'periodic breathing at altitude and on any fragmented night, and it is '
         'blunted by beta-blockers, autonomic neuropathy and diabetes — so a '

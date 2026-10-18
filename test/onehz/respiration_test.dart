@@ -1118,6 +1118,51 @@ void _resp01Tests() {
       expect(rising.toJson().toString(), isNot(contains('ahi')));
     });
 
+    test('a wear gap does not pull months-old nights into the window', () {
+      CvhrNight at(String day, double perHour) =>
+          CvhrNight(dayKey: day, cvhrPerHour: perHour, analyzedHours: 7);
+      final june = [
+        for (var d = 1; d <= 30; d++)
+          at('2026-06-${d.toString().padLeft(2, '0')}', 20),
+      ];
+      // Four nights back after three months off: too few to say anything,
+      // rather than 26 June nights standing in for "your usual".
+      final back = cvhrPersonalDistribution([
+        ...june,
+        for (var d = 1; d <= 4; d++) at('2026-10-0$d', 2),
+      ]);
+      expect(back.present, isFalse);
+      expect(back.note, contains('need_baseline:nights=4/5'));
+
+      // Once there are enough, the screen describes only the new nights.
+      final settled = cvhrPersonalDistribution([
+        ...june,
+        for (var d = 1; d <= 6; d++) at('2026-10-0$d', 2),
+      ]);
+      expect(settled.value!.nightsUsed, 6);
+      expect(settled.value!.recentWeightedMean, closeTo(2, 1e-9));
+      expect(settled.value!.quartiles, everyElement(closeTo(2, 1e-9)));
+      expect(settled.note, contains('in the last 30 days'));
+    });
+
+    test('the window spans 30 calendar days ending on the newest night', () {
+      final m = cvhrPersonalDistribution([
+        CvhrNight(dayKey: '2026-02-01', cvhrPerHour: 99, analyzedHours: 7),
+        for (var d = 3; d <= 7; d++)
+          CvhrNight(dayKey: '2026-03-0$d', cvhrPerHour: 10, analyzedHours: 7),
+      ]);
+      // 2026-02-01 is 34 days before 2026-03-07.
+      expect(m.value!.nightsUsed, 5);
+      expect(m.value!.weightedMean, closeTo(10, 1e-9));
+      final edge = cvhrPersonalDistribution([
+        CvhrNight(dayKey: '2026-02-06', cvhrPerHour: 40, analyzedHours: 7),
+        for (var d = 3; d <= 7; d++)
+          CvhrNight(dayKey: '2026-03-0$d', cvhrPerHour: 10, analyzedHours: 7),
+      ]);
+      // 2026-02-06 is 29 days before 2026-03-07: inside.
+      expect(edge.value!.nightsUsed, 6);
+    });
+
     test('a re-derived day counts once', () {
       final m = cvhrPersonalDistribution([
         for (var d = 1; d <= 5; d++) night(d, 10),
