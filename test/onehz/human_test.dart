@@ -290,19 +290,6 @@ void main() {
           'among your highest');
     });
 
-    test('record gated by MDC: tiny beat is NOT a record, big beat is', () {
-      final hist = List<double>.generate(30, (i) => 40.0 + (i % 10)); // spread
-      final priorMax = hist.reduce((a, b) => a > b ? a : b);
-      // Barely beats the max => within MDC noise => NOT a record.
-      final small =
-          personalRecord(priorMax + 0.01, hist, better: Better.higher);
-      expect(small.value!.isRecord, isFalse);
-      // Clearly beats it.
-      final big = personalRecord(priorMax + 50, hist, better: Better.higher);
-      expect(big.value!.isRecord, isTrue);
-      expect(big.value!.kind, 'high');
-    });
-
     test('short history => absent', () {
       final m = percentileOfYou(10, [1, 2, 3], better: Better.higher);
       expect(m.present, isFalse);

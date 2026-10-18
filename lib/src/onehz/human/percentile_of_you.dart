@@ -1,19 +1,18 @@
-// HUMAN LAYER — Percentile-of-you and records.
-// Catalog §D "Percentile-of-you + records" [PUB order-statistics]. The streak
-// half of that catalog line is deliberately NOT implemented: no streaks in this
-// product, so there is nothing here to wire one up from.
+// HUMAN LAYER — Percentile-of-you.
+// Catalog §D "Percentile-of-you + records" [PUB order-statistics]. Neither the
+// streak nor the records half of that catalog line is implemented: there are no
+// streaks in this product and no personal-record surface reads one, so an
+// unused detector would only be one more thing a baseline change has to keep
+// green.
 //
 // n-of-1 only: a value's rank is computed against the SAME USER's recent
-// history (a robust empirical CDF), never a population leaderboard. Records are
-// MDC-gated: a new high/low is only a "record" when it beats the prior extreme
-// by more than the metric's minimal detectable change — otherwise it is noise.
+// history (a robust empirical CDF), never a population leaderboard.
 //
 // HONESTY: within-user percentiles (catalog honesty rule), no validity
-// exposure, MDC-gated records, "—" when history is too short.
+// exposure, "—" when history is too short.
 
 import '../types.dart';
 import '../util.dart';
-import '../foundations/baseline.dart';
 
 /// Which direction is "better" for a metric. Required by every function here
 /// that puts a WORD on a number: a rank is direction-free, a label is not.
@@ -98,81 +97,4 @@ String _bandLabel(double pct, Better better) {
   if (good > 30) return 'typical for you';
   if (good > 10) return 'worse than usual';
   return 'among your worst';
-}
-
-class RecordCheck {
-  final bool isRecord; // beat the prior extreme by > MDC
-  final String kind; // 'high' | 'low' | 'none'
-  final double value;
-  final double? priorExtreme;
-  final double? margin; // |value - priorExtreme|
-  final double? mdc; // gate threshold used
-  const RecordCheck({
-    required this.isRecord,
-    required this.kind,
-    required this.value,
-    required this.priorExtreme,
-    required this.margin,
-    required this.mdc,
-  });
-  Map<String, dynamic> toJson() => {
-        'is_record': isRecord,
-        'kind': kind,
-        'value': round6(value),
-        if (priorExtreme != null) 'prior_extreme': round6(priorExtreme!),
-        if (margin != null) 'margin': round6(margin!),
-        if (mdc != null) 'mdc': round6(mdc!),
-      };
-}
-
-/// Is [value] a personal record vs [history], gated by MDC?
-///
-/// A record requires the value to beat the prior extreme (max for [Better.higher],
-/// min for [Better.lower]) by MORE than the metric's minimal detectable change,
-/// so regression-to-mean noise never gets celebrated. When no MDC can be
-/// established (degenerate/quantized scale) we refuse to call a record.
-Metric<RecordCheck> personalRecord(
-  double value,
-  List<double> history, {
-  required Better better,
-  double? typicalError,
-  int minN = 14,
-}) {
-  const inputs = ['metric_history'];
-  if (history.length < minN || better == Better.neither) {
-    return const Metric<RecordCheck>.absent(
-      tier: Tier.relative,
-      inputs_used: inputs,
-      note: 'records need history and a defined "better" direction',
-    );
-  }
-  final baseline = robustBaseline(history, minValid: minN);
-  final gate = mdc(baseline, typicalError: typicalError);
-  if (gate == null) {
-    return const Metric<RecordCheck>.absent(
-      tier: Tier.relative,
-      inputs_used: inputs,
-      note: 'no MDC (degenerate scale) — refusing to claim a record',
-    );
-  }
-  final prior = better == Better.higher
-      ? history.reduce((a, b) => a > b ? a : b)
-      : history.reduce((a, b) => a < b ? a : b);
-  final beats = better == Better.higher ? value - prior : prior - value;
-  final isRecord = beats > gate;
-  final kind = isRecord ? (better == Better.higher ? 'high' : 'low') : 'none';
-  return Metric<RecordCheck>(
-    value: RecordCheck(
-      isRecord: isRecord,
-      kind: kind,
-      value: value,
-      priorExtreme: prior,
-      margin: beats,
-      mdc: gate,
-    ),
-    confidence: (history.length / 60.0).clamp(0.3, 0.9),
-    tier: Tier.relative,
-    inputs_used: inputs,
-    note: 'record only if it beats your prior extreme by > MDC',
-  );
 }

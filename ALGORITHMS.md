@@ -133,7 +133,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `socialJetlag` / `chronotype` | `human/circadian_lifestyle.dart` | MSFsc-based social jetlag + chronotype | Wittmann & Roenneberg 2006; MCTQ |
 | `alcoholNightFlag` | `human/event_detection.dart` | dose-graded autonomic-stress signature — **reports state, never asserts a cause** | Pietilä et al. 2018 |
 | `roughNight` | `human/event_detection.dart` | neutral fallback descriptor when the signature is ambiguous | — |
-| `percentileOfYou` / `personalRecord` | `human/percentile_of_you.dart` | percentile-vs-your-own-history, miss-tolerant personal-record streaks | — |
+| `percentileOfYou` | `human/percentile_of_you.dart` | percentile-vs-your-own-history | — |
 | `glassBoxReadiness` | `human/readiness_glassbox.dart` | **deprecated** — kept only for its percentile-of-you breakdown + narrative and edge back-compat; `readinessComposite` is canonical | — |
 | `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | — |
 | `journalCorrelations` | `human/coaching.dart` | per-tag mean-difference correlation vs. logged outcomes, on-device, personal | — |
