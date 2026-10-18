@@ -61,8 +61,9 @@
 // TODO: re-run the DREAMT effect size for RMSSD at ±90 s and publish both
 // numbers side by side. DO NOT move the shipped weights on the strength of
 // this — it says the measurement is untrustworthy, not which way it moves.
-// Post: Webster continuity rescore (bridges brief arousals into sleep — this is
-// what kills the over-call) + consolidateSleepStages (no single-epoch flicker).
+// Post: arousal-bridging continuity smoother (bridges brief arousals into sleep
+// — this is what kills the over-call; it is NOT Webster's rescore, see
+// `_websterRescore`) + consolidateSleepStages (no single-epoch flicker).
 //
 // LOCAL vs WHOLE-NIGHT baselines (2026-07, real-data root cause): a real WHOOP-4
 // capture showed BOTH the motion and HR features have night-scale
@@ -1167,14 +1168,27 @@ List<double> cleanBeatDiffsInWindowForTest(
       rk: _windowRemFeatures(rrMs, rrTsMs, accel, s, t, _epochSec).rk,
     );
 
-/// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
-/// are re-labelled sleep (NREM). This is the published actigraphy step that
-/// prevents normal in-sleep repositioning from inflating WASO.
+/// Arousal-bridging continuity smoother: brief wake bouts flanked by enough
+/// sleep are re-labelled sleep (NREM), so in-sleep repositioning that the
+/// HR/motion wake spine over-calls does not inflate WASO.
+///
+/// This is NOT Webster's rescore and is not a published method. Webster et
+/// al. 1982 / Cole et al. 1992 run the other way: after >=4/10/15 min of
+/// scored WAKE the next 1/3/4 min of SLEEP become wake, and a sleep bout of
+/// <=6 (<=10) min with >=10 (>=20) min of wake on both sides becomes wake. Their
+/// pass only ever removes sleep; this one only ever adds it, borrowing the
+/// same minute values as its bounds. It is a deliberate bias toward TST: each
+/// rule row can hide a genuine awakening of up to that row's length.
+///
+/// Context is the LONGER of the two flanking sleep runs, not both. Requiring
+/// both sides was measured: on the Apple-Watch-labelled real night
+/// (real_night_cardio_stager_test, reference wake = 3 min) it raised wake from
+/// 26.0 to 41.5 min, i.e. the one-sided context is absorbing over-called wake
+/// on real data, not erasing real awakenings there.
 ///
 /// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
-/// hypnogram taken before the pass — Webster's rule scores each wake bout
-/// against the ORIGINAL surrounding sleep (Webster et al. 1982; Cole et al.
-/// 1992), not against sleep this same pass just manufactured. Reading the list
+/// hypnogram taken before the pass, not against sleep this same pass just
+/// manufactured. Reading the list
 /// being mutated let every bridged bout count as context for the next one, so
 /// bridging CASCADED: a fragmented night of short sleep bouts separated by long
 /// wake bouts collapsed into one continuous sleep block (WASO 0, efficiency
@@ -1215,9 +1229,10 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     return c;
   }
 
-  // Context (min sleep flanking) → max bridgeable wake (min). THE PUBLISHED
-  // TABLE, unmodified: Webster et al. 1982 / Cole et al. 1992 rescoring rules —
-  // 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15 bridges ≤4.
+  // Context (min sleep flanking) → max bridgeable wake (min). The minute values
+  // are Webster et al. 1982 / Cole et al. 1992's; the direction is not (see the
+  // doc comment) — 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15
+  // bridges ≤4.
   //
   // This used to run [15→10], [10→5], [4→2] — 2.5x the published bridge — on
   // the argument that the van Hees window had already certified the span as the

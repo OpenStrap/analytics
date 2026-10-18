@@ -1,4 +1,4 @@
-// SLEEP/CIRCADIAN — the shared staging POST-PROCESSING (Webster rescore +
+// SLEEP/CIRCADIAN — the shared staging POST-PROCESSING (arousal bridging +
 // stage-architecture consolidation) and the [StagerResult] shape both stagers
 // return.
 //
@@ -43,13 +43,17 @@ class StagerResult {
 void websterRescoreAutonomic(List<SleepStage> sm, int epochSec) =>
     _websterRescore(sm, epochSec);
 
-/// Webster/Cole-Kripke sleep-continuity rescoring (in place).
+/// Arousal-bridging sleep-continuity smoother (in place). NOT Webster's
+/// rescore: Webster et al. 1982 / Cole et al. 1992 turn SLEEP into WAKE after
+/// sustained wake and only ever remove sleep; this turns WAKE into SLEEP and
+/// only ever adds it. It borrows their minute values as bounds — see
+/// `cardio_stager.dart`'s `_websterRescore` for why it is kept.
 ///
 /// After sleep onset (first sleep epoch), a contiguous run of WAKE epochs that
 /// is short enough relative to the SUSTAINED sleep bracketing it is rescored to
 /// SLEEP (NREM) — it is an arousal, not real WASO. Runs longer than the
 /// allowed bout, or with insufficient surrounding sleep, are LEFT as wake (a
-/// genuine, sustained awakening). Rules (Webster, in epochs):
+/// genuine, sustained awakening). Rules (in epochs):
 ///   sleep-before ≥ 4 min  AND wake-run ≤ 1 min → sleep
 ///   sleep-before ≥10 min  AND wake-run ≤ 3 min → sleep
 ///   sleep-before ≥15 min  AND wake-run ≤ 5 min → sleep
@@ -61,9 +65,8 @@ void websterRescoreAutonomic(List<SleepStage> sm, int epochSec) =>
 /// so an arousal sandwiched between two long sleep bouts is bridged.
 ///
 /// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
-/// hypnogram taken before the pass — Webster's rule scores each wake bout
-/// against the ORIGINAL surrounding sleep (Webster et al. 1982; Cole et al.
-/// 1992), not against sleep this same pass just manufactured. Reading the list
+/// hypnogram taken before the pass, not against sleep this same pass just
+/// manufactured. Reading the list
 /// being mutated let every bridged bout count as context for the next one, so
 /// bridging CASCADED and a genuinely fragmented night collapsed into one
 /// continuous sleep block (WASO 0, efficiency 100%).

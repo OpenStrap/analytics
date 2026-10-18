@@ -270,10 +270,11 @@ void main() {
     test('cardio_stager: only the bout with REAL flanking sleep is bridged',
         () {
       // 15 min sleep, then 5 × (4 min wake + 1 min sleep). The rule table is
-      // now Webster's published one — ≥15 min of flanking sleep bridges ≤4 min
-      // of wake — so bout #1 legitimately bridges. Bouts #2-#5 are flanked by
-      // ONE minute of sleep and must survive: pre-fix each bridged bout was
-      // counted as context for the next, so all five collapsed and WASO hit 0.
+      // now bounded by Webster's minute values — ≥15 min of flanking sleep
+      // bridges ≤4 min of wake — so bout #1 legitimately bridges. Bouts #2-#5
+      // are flanked by ONE minute of sleep and must survive: pre-fix each
+      // bridged bout was counted as context for the next, so all five
+      // collapsed and WASO hit 0.
       //
       // RE-PINNED with the rule table: this used to use 10-min bouts, which the
       // old non-published [15 → 10] row bridged. Under Webster a 10-min bout is

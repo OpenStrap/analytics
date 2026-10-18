@@ -125,7 +125,8 @@ void main() {
     // 516.5 → 508.0. The old table was closer to this night's Apple Watch label
     // (wake=3) only because it was bridging up to 10 minutes of genuine
     // awakening into light sleep; one wrist-reference night is not a licence to
-    // deviate from Webster 1982 / Cole 1992.
+    // widen the bridge past the Webster 1982 / Cole 1992 minute values. (The
+    // bridging pass itself is not Webster's rescore — see `_websterRescore`.)
     expect(wakeMin, lessThan(35),
         reason: 'WAKE over-call regression guard (pre-fix: 294 min)');
     expect(remMin, greaterThan(100),
