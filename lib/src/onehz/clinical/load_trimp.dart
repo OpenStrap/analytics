@@ -295,8 +295,10 @@ double strainFromNetTrimp(double net) {
 
 /// Headline 0–21 strain as a Metric, alongside the raw TRIMP (EST tier).
 ///
-/// LUMP FORM — see [strainScore]. Kept for rescaling a stored TRIMP that has no
-/// per-minute series; anything holding the series uses [strainScoreFromSeries].
+/// LUMP FORM — see [strainScore]. The guarded entry point for rescaling a
+/// stored TRIMP that has no per-minute series; anything holding the series
+/// uses [strainScoreFromSeries]. Calling bare [strainScore] for that rescale
+/// skips the non-finite and above-[maxQuietHrr] refusals below.
 ///
 /// [trimp] the raw Banister TRIMP for the day/session, [wakeMinutes] the wake
 /// window it was accumulated over, [quietHrr] this user's quiet-waking level
@@ -356,19 +358,38 @@ Metric<double> strainScoreMetric(
           'the day\'s own training away',
     );
   }
-  return Metric<double>(
-    value: strainScore(trimp,
+  return _strainEstimate(
+    strainScore(trimp,
         wakeMinutes: wakeMinutes, quietHrr: quietHrr, female: female),
-    confidence: quietSettled ? 0.6 : 0.45,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: quietSettled
-        ? 'headline 0–21 strain = log map of TRIMP earned above the '
-            'quiet-waking baseline; wrist-HR estimate'
-        : 'calibrating: quiet-waking level from fewer than '
-            '$quietHrrSettledDays days',
+    inputs: inputs,
+    quietSettled: quietSettled,
+    settledNote: 'headline 0–21 strain = log map of TRIMP earned above the '
+        'quiet-waking baseline; wrist-HR estimate',
   );
 }
+
+/// The present-strain envelope shared by [strainScoreMetric] and
+/// [strainScoreFromSeries]. One place, because the two are the lump and
+/// guarded routes to the same headline: if the calibrating rule changed in one
+/// copy only, a backfilled day and a live day with the same quiet level would
+/// carry different confidence and the tests of the untouched copy would still
+/// pass.
+Metric<double> _strainEstimate(
+  double value, {
+  required List<String> inputs,
+  required bool quietSettled,
+  required String settledNote,
+}) =>
+    Metric<double>(
+      value: value,
+      confidence: quietSettled ? 0.6 : 0.45,
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: quietSettled
+          ? settledNote
+          : 'calibrating: quiet-waking level from fewer than '
+              '$quietHrrSettledDays days',
+    );
 
 /// %HRR at or above which a minute is EXERCISE for the strain floor: ACSM's
 /// moderate-intensity floor (40 % HRR). Deliberately the same number as
@@ -513,15 +534,12 @@ Metric<double> strainScoreFromSeries(
           'HRR in (0, $maxQuietHrr], and at least one worn minute',
     );
   }
-  return Metric<double>(
-    value: strainFromNetTrimp(n.net),
-    confidence: quietSettled ? 0.6 : 0.45,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: quietSettled
-        ? 'Banister TRIMP above your quiet-waking level, log-mapped to 0–21'
-        : 'calibrating: quiet-waking level from fewer than '
-            '$quietHrrSettledDays days',
+  return _strainEstimate(
+    strainFromNetTrimp(n.net),
+    inputs: inputs,
+    quietSettled: quietSettled,
+    settledNote:
+        'Banister TRIMP above your quiet-waking level, log-mapped to 0–21',
   );
 }
 
