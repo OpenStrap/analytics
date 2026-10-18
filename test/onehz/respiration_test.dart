@@ -435,6 +435,42 @@ void main() {
       expect(double.parse(nums.group(2) ?? '0'), inInclusiveRange(28.5, 30.0));
     });
 
+    test(
+        'RSA: slow breathing below the band floor is withheld, not published '
+        'as the floor', () {
+      // An hour of 7.5–9 br/min RSA (deep sleep / paced breathing) with a
+      // 0.1 Hz Mayer wave. Only the skirt of the true peak is inside the
+      // 9 br/min floor, so every sub-window agreed on ~9 br/min and it went
+      // out at high confidence.
+      RespEstimate? run(double brpm) {
+        final rnd = math.Random(1);
+        final nn = <double>[], t = <double>[];
+        var tMs = 0.0;
+        while (tMs < 3600e3) {
+          final s = tMs / 1000;
+          final v = 1000 +
+              30 * math.sin(2 * math.pi * brpm / 60 * s) +
+              10 * math.sin(2 * math.pi * 0.1 * s) +
+              (rnd.nextDouble() * 20 - 10);
+          tMs += v;
+          nn.add(v);
+          t.add(tMs);
+        }
+        final m = rsaRespRate(nn, t, artifactFraction: 0);
+        if (m.present) return m.value;
+        expect(m.note, isNotNull);
+        return null;
+      }
+
+      for (final slow in [7.5, 8.0, 8.5, 9.0]) {
+        final v = run(slow);
+        expect(v, isNull, reason: 'true $slow br/min reported as ${v?.brpm}');
+      }
+      // In-band rates are unaffected.
+      expect(run(10.0)?.brpm, closeTo(10.0, 0.3));
+      expect(run(12.0)?.brpm, closeTo(12.0, 0.3));
+    });
+
     test('RSA: confidence scales with usable sub-windows', () {
       final s = rsaNight(11);
       final c = correctRr(s.rr, rrTsMs: s.t);
