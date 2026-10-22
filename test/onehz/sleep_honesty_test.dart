@@ -224,6 +224,49 @@ void main() {
           forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 4 * 3600));
       expect(s.tstSec!, greaterThan((0.9 * 4 * 3600).round()));
     });
+
+    test(
+        'an awakening walled in by two accel holes is judged against the '
+        'night, not against itself (was: 25 min awake staged light/deep)', () {
+      // 8 h at ~55 bpm and still, with a 25 min awakening at ~78 bpm and more
+      // movement starting at 3 h, and a 2 min accel hole on each side of it.
+      // Each hole is past the 60 s carry-forward bound, so the awakening is a
+      // run of its own. Staged on its own, its HR baseline was its own awake
+      // HR, no epoch reached its own arousal cut, and the whole block fell
+      // through to NREM: {light: 1230, deep: 270} pre-fix, against
+      // {wake: 1500} for the same input without the holes.
+      final saved = cardioUserProfile;
+      cardioUserProfile = null; // a new user: no rolling profile to lean on
+      addTearDown(() => cardioUserProfile = saved);
+      final r = math.Random(7);
+      const span = 8 * 3600;
+      const wS = _t0 + 3 * 3600, wE = wS + 1500;
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      final rr = <RrTs>[];
+      for (var k = 0; k < span; k++) {
+        final ts = _t0 + k;
+        final awake = ts >= wS && ts < wE;
+        final hole = (ts >= wS - 120 && ts < wS) || (ts >= wE && ts < wE + 120);
+        final noise = awake ? 0.02 : 0.002;
+        double j() => noise * (r.nextDouble() - 0.5);
+        if (!hole) grav.add(GravTs(ts, 0.1 + j(), 0.2 + j(), 0.97 + j()));
+        final bpm = (awake ? 78.0 : 55.0) + 2 * (r.nextDouble() - 0.5);
+        if (hole) continue;
+        hr.add(HrTs(ts, bpm));
+        rr.add(RrTs(ts, 60000 / bpm + 20 * (r.nextDouble() - 0.5)));
+      }
+      final s =
+          AdvancedSleepStager.stageWindow(_t0, _t0 + span, grav, hr, rr: rr);
+      final inBlock = <String, int>{};
+      for (final seg in s.stages) {
+        final a = math.max(seg.start, wS), b = math.min(seg.end, wE);
+        if (b > a) inBlock[seg.stage] = (inBlock[seg.stage] ?? 0) + (b - a);
+      }
+      expect(inBlock['wake'] ?? 0, greaterThanOrEqualTo(1200),
+          reason: 'pre-fix: 0 s of the 1500 s awakening staged wake');
+      expect(inBlock['deep'] ?? 0, 0, reason: 'pre-fix: 270 s deep');
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
