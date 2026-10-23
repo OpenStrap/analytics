@@ -1,7 +1,9 @@
-import 'dart:math' as math;
+import 'dart:typed_data';
 
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
+import 'time_in_zone_aggregator.dart';
 
 /// One display heart-rate zone defined by a bpm interval.
 class HeartRateZone {
@@ -166,6 +168,9 @@ class HeartRateZones {
     return HeartRateZoneSet(zones: built, maxHr: maxHr, source: source);
   }
 
+  // Cadence validation, median-capped interval credit and tail credit are an
+  // internal rule, ESTIMATE with low confidence. Karvonen 1957 supports the
+  // HR-reserve zone option, not this duration-credit policy.
   /// Time-in-zone from a time-ordered HR stream.
   ///
   /// Each sample is credited with the duration until the next sample. The tail
@@ -181,34 +186,12 @@ class HeartRateZones {
     List<HrSample> hr,
     HeartRateZoneSet zoneSet,
   ) {
+    // Runs [timeInZoneAggregator] over the sorted stream in one slice: the
+    // aggregator holds the cadence rule, the credit bounding and the tail.
     final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
-    final zoneSeconds = List<double>.filled(5, 0);
-    var below = 0.0;
-
-    final tailSeconds =
-        sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
-    if (tailSeconds == null) return null;
-    for (var i = 0; i < sorted.length; i++) {
-      final sample = sorted[i];
-      if (!sample.valid) continue;
-      final durSeconds = i < sorted.length - 1
-          ? _boundedGapSeconds(sorted[i + 1].tsMs - sample.tsMs, tailSeconds)
-          : tailSeconds;
-      final zone = zoneSet.zoneNumber(sample.hr);
-      if (zone >= 1) {
-        zoneSeconds[zone - 1] += durSeconds;
-      } else {
-        below += durSeconds;
-      }
-    }
-    return TimeInHeartRateZone(seconds: zoneSeconds, belowZone1: below);
+    return timeInZoneAggregator(zoneSet).run(HrStream(
+      Float64List.fromList([for (final s in sorted) s.tsMs]),
+      Float64List.fromList([for (final s in sorted) s.hr]),
+    ));
   }
-
-  static double _boundedGapSeconds(double gapMs, double fallbackSeconds) {
-    final gapSeconds = gapMs / 1000.0;
-    return gapSeconds > 0
-        ? math.min(gapSeconds, fallbackSeconds)
-        : fallbackSeconds;
-  }
-
 }

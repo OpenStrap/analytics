@@ -36,12 +36,17 @@
 // Pure Dart, dart:math only.
 
 import 'dart:math' as math;
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
 import '../clinical/hrv_time.dart';
 import 'cardio_stager.dart' show cardioStager, minHrCoverage;
+import 'cardio_row_cache.dart';
 import 'accounting.dart' show SleepStage;
 import 'band_offset.dart';
+import 'hypnogram.dart';
+export 'hypnogram.dart';
+import 'hypnogram_aggregator.dart';
 
 /// Which per-session staging engine [AdvancedSleepStager] runs. See the file
 /// header for the 2026-07 comparison behind this choice. Do not switch the
@@ -97,86 +102,6 @@ class RespTs {
   final int ts;
   final double raw;
   const RespTs(this.ts, this.raw);
-}
-
-/// A scored stage span. [stage] ∈ {'wake','light','deep','rem'}.
-class StageSegment {
-  final int start;
-  final int end;
-  final String stage;
-  const StageSegment(this.start, this.end, this.stage);
-  Map<String, dynamic> toJson() => {'start': start, 'end': end, 'stage': stage};
-}
-
-/// One detected sleep session + its hypnogram.
-class SleepSession {
-  final int start;
-  final int end;
-  final double efficiency; // [0,1]
-  final List<StageSegment> stages;
-  final int? restingHr; // lowest 5-min rolling-mean HR (bpm)
-  final double? avgHrv; // mean RMSSD over 5-min windows (ms)
-  const SleepSession({
-    required this.start,
-    required this.end,
-    required this.efficiency,
-    required this.stages,
-    required this.restingHr,
-    required this.avgHrv,
-  });
-}
-
-/// AASM-style hypnogram metrics over a session.
-class HypnogramMetrics {
-  final int tibS;
-  final int tstS;
-  final int sptS;
-  /// Sleep-onset latency (s). NULL when NOTHING staged as sleep — reporting
-  /// the whole time in bed as "time to fall asleep" alongside TST 0 is a
-  /// fabricated measurement, not an abstention.
-  final int? solS;
-  final double remLatencyS; // NaN if no REM
-  final int wasoS;
-  final double efficiency; // [0,1]
-  final int disturbances;
-  final double deepMin;
-  final double remMin;
-  final double lightMin;
-  final double deepPct;
-  final double remPct;
-  final double lightPct;
-  const HypnogramMetrics({
-    required this.tibS,
-    required this.tstS,
-    required this.sptS,
-    required this.solS,
-    required this.remLatencyS,
-    required this.wasoS,
-    required this.efficiency,
-    required this.disturbances,
-    required this.deepMin,
-    required this.remMin,
-    required this.lightMin,
-    required this.deepPct,
-    required this.remPct,
-    required this.lightPct,
-  });
-  Map<String, dynamic> toJson() => {
-        'tib_s': tibS,
-        'tst_s': tstS,
-        'spt_s': sptS,
-        'sol_s': solS,
-        'rem_latency_s': remLatencyS.isNaN ? null : remLatencyS,
-        'waso_s': wasoS,
-        'efficiency': efficiency,
-        'disturbances': disturbances,
-        'deep_min': deepMin,
-        'rem_min': remMin,
-        'light_min': lightMin,
-        'deep_pct': deepPct,
-        'rem_pct': remPct,
-        'light_pct': lightPct,
-      };
 }
 
 /// Advanced sleep stager — constants + the full V1/V2 algorithm.
@@ -315,6 +240,7 @@ class AdvancedSleepStager {
     int tzOffsetSec = 0,
     int Function(int tsSec)? tzOffsetResolver,
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
     List<List<int>> wristOff = const [], // each [start,end]
     List<List<int>> bandSleepState = const [], // each [ts,state]
   }) {
@@ -387,7 +313,8 @@ class AdvancedSleepStager {
       }
 
       final stages = switch (method) {
-        StagingMethod.cardio => _stageSessionCardio(p.start, p.end, grav, hrS, rrS),
+        StagingMethod.cardio =>
+          _stageSessionCardio(p.start, p.end, grav, hrS, rrS, rowCache),
         StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
         StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
       };
@@ -444,9 +371,11 @@ class AdvancedSleepStager {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
   }) {
     final stages = switch (method) {
-      StagingMethod.cardio => _stageSessionCardio(startSec, endSec, gravity, hr, rr),
+      StagingMethod.cardio =>
+        _stageSessionCardio(startSec, endSec, gravity, hr, rr, rowCache),
       StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
       StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
     };
@@ -1455,7 +1384,8 @@ class AdvancedSleepStager {
   /// length, and not as 'wake' either: an abstained run can still carry HR, so
   /// `segmentSleep` would see it as observed and publish it as measured WASO.
   static List<StageSegment> _stageSessionCardio(int start, int end,
-      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
+      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
+      [CardioRowCache? rowCache]) {
     final span = end - start;
     if (span <= 0) return const <StageSegment>[];
     final epSec = epochS.round();
@@ -1558,6 +1488,7 @@ class AdvancedSleepStager {
         rrMs: rrMs,
         rrTsMs: rrTsMs,
         runStarts: runStarts,
+        rowCache: rowCache,
       );
       final stages = result.base.stages;
       // Empty = cardioStager abstained: everything stays 'unobserved'.
@@ -2011,59 +1942,7 @@ class AdvancedSleepStager {
 
   static HypnogramMetrics hypnogramMetrics(SleepSession session) {
     final segs = [...session.stages]..sort((a, b) => a.start.compareTo(b.start));
-    final tib = math.max(0, session.end - session.start);
-    final sleepSegs = segs
-        .where((s) => s.stage == 'light' || s.stage == 'deep' || s.stage == 'rem')
-        .toList();
-    var tst = 0, deepS = 0, remS = 0, lightS = 0;
-    for (final s in sleepSegs) {
-      final d = s.end - s.start;
-      tst += d;
-      if (s.stage == 'deep') deepS += d;
-      if (s.stage == 'rem') remS += d;
-      if (s.stage == 'light') lightS += d;
-    }
-    int onset, sptEnd;
-    int? sol;
-    if (sleepSegs.isNotEmpty) {
-      onset = sleepSegs.first.start;
-      sptEnd = sleepSegs.last.end;
-      sol = math.max(0, onset - session.start);
-    } else {
-      onset = session.end;
-      sptEnd = session.end;
-      sol = null; // never observed sleep — no latency to report
-    }
-    final remSegs = sleepSegs.where((s) => s.stage == 'rem').toList();
-    final remLatency =
-        remSegs.isNotEmpty ? (remSegs.first.start - onset).toDouble() : double.nan;
-    var waso = 0, disturbances = 0;
-    for (final s in segs.where((s) => s.stage == 'wake')) {
-      final w0 = math.max(s.start, onset);
-      final w1 = math.min(s.end, sptEnd);
-      if (w1 > w0) {
-        waso += w1 - w0;
-        disturbances++;
-      }
-    }
-    final se = tib > 0 ? tst / tib : 0.0;
-    double pct(int x) => tst > 0 ? x / tst * 100 : 0;
-    return HypnogramMetrics(
-      tibS: tib,
-      tstS: tst,
-      sptS: math.max(0, sptEnd - onset),
-      solS: sol,
-      remLatencyS: remLatency,
-      wasoS: waso,
-      efficiency: math.min(1.0, se),
-      disturbances: disturbances,
-      deepMin: deepS / 60,
-      remMin: remS / 60,
-      lightMin: lightS / 60,
-      deepPct: pct(deepS),
-      remPct: pct(remS),
-      lightPct: pct(lightS),
-    );
+    return HypnogramAggregator(session.start, session.end).runList(segs);
   }
 
   // ── shared math (population std, percentile) ──────────────────────────────

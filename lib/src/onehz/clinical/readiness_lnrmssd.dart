@@ -68,37 +68,84 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   int windowDays = 7,
   int minNights = readinessLnRmssdMinNights,
 }) {
-  const inputs = ['ln_rmssd_history'];
   if (historyLnRmssd.length < minNights) {
-    return Metric<ReadinessLnRmssd>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: needBaselineNote(have: historyLnRmssd.length, need: minNights),
-    );
+    return _tooShort(historyLnRmssd.length, minNights);
   }
-  final today = historyLnRmssd.last;
   final n = historyLnRmssd.length;
   final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
-  // this used to be historyLnRmssd.sublist(start), which runs to the END of
-  // the list - including tonight's own value in its own baseline. that
-  // pulls the mean/sd toward tonight, understating how far off a genuinely
-  // suppressed/elevated night actually is, worst right when the window is
-  // smallest (minNights). the baseline has to be strictly prior nights.
-  final List<double> priorWindow;
   // all-or-nothing: calendarDays falls back to the row index for a label it
   // can't parse, and an index compared against epoch days is meaningless.
   if (dates != null &&
       dates.length == n &&
       dates.every((d) => DateTime.tryParse(d) != null)) {
     final day = calendarDays(dates);
-    priorWindow = [
-      for (var i = 0; i < n - 1; i++)
-        if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
-          historyLnRmssd[i]
-    ];
-  } else {
-    priorWindow = historyLnRmssd.sublist(start, n - 1);
+    return readinessLnRmssdFromSuffix(
+      n,
+      [
+        for (var i = 0; i < n - 1; i++)
+          if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
+            historyLnRmssd[i],
+        historyLnRmssd.last,
+      ],
+      meanNnTodayMs: meanNnTodayMs,
+      windowDays: windowDays,
+      minNights: minNights,
+    );
   }
+  if (windowDays >= 0) {
+    return readinessLnRmssdFromSuffix(
+      n,
+      historyLnRmssd.sublist(start, n),
+      meanNnTodayMs: meanNnTodayMs,
+      windowDays: windowDays,
+      minNights: minNights,
+    );
+  }
+  // A negative window cannot be built as a suffix block, so it keeps the old
+  // path: otherwise sublist(start, n - 1) with start > n - 1 throws RangeError,
+  // as it always did.
+  final priorWindow = historyLnRmssd.sublist(start, n - 1);
+  return readinessLnRmssdFromSuffix(
+    n,
+    [...priorWindow, historyLnRmssd.last],
+    meanNnTodayMs: meanNnTodayMs,
+    windowDays: windowDays,
+    minNights: minNights,
+  );
+}
+
+const _inputs = ['ln_rmssd_history'];
+
+/// The absent result for a history shorter than [minNights].
+Metric<ReadinessLnRmssd> _tooShort(int n, int minNights) =>
+    Metric<ReadinessLnRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: _inputs,
+      note: needBaselineNote(have: n, need: minNights),
+    );
+
+/// Shared by [readinessLnRmssd] and the aggregator (not public API): the
+/// arithmetic after the length check, given the history length [n] and its
+/// last min(windowDays + 1, n) values [suffix] (tonight last).
+// Plews et al. 2013, as implemented by readinessLnRmssd(). Retains the history
+// count and relevant prior-night suffix, then calls identical scoring
+// arithmetic. The aggregator uses positional history; calendar-date filtering
+// remains in the batch wrapper.
+Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
+  int n,
+  List<double> suffix, {
+  double? meanNnTodayMs,
+  required int windowDays,
+  required int minNights,
+}) {
+  const inputs = _inputs;
+  final today = suffix.last;
+  // this used to be historyLnRmssd.sublist(start), which runs to the END of
+  // the list - including tonight's own value in its own baseline. that
+  // pulls the mean/sd toward tonight, understating how far off a genuinely
+  // suppressed/elevated night actually is, worst right when the window is
+  // smallest (minNights). the baseline has to be strictly prior nights.
+  final priorWindow = suffix.sublist(0, suffix.length - 1);
   if (priorWindow.isEmpty || priorWindow.length < minNights - 1) {
     // empty only if minNights got set to 1 somewhere; short when a wear gap
     // left too few nights inside the calendar window. either way there's no
