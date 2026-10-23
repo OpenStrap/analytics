@@ -64,6 +64,85 @@ double? percentile(List<double> values, double p) =>
 /// Median (linear-interpolated), or null if empty.
 double? median(List<double> xs) => percentile(xs, 50);
 
+/// Linear-interpolated median of every clipped, centred [halfWin] window.
+///
+/// `out[j]` is exactly
+/// `median(xs.sublist(max(0, j - halfWin), min(xs.length - 1, j + halfWin) + 1))`.
+/// In particular, ordering is [double.compareTo] ordering (including NaN last),
+/// and an even-sized window uses [percentileSorted]'s interpolation. The input
+/// is not changed.
+///
+/// One sorted window is grown, then updated by binary insertion/removal; it
+/// therefore avoids a fresh window allocation and sort at every position.
+// Hyndman, R. J., Fan, Y. (1996). Sample quantiles in statistical packages.
+// The American Statistician 50(4):361-365.
+// percentileSorted implements type 7: zero-based rank = (n - 1) * p / 100.
+// These clipped-window medians use that same adjacent-rank interpolation.
+// Exact reformulation of clipped-window medians: insertion/removal preserves
+// List.sort total order; percentileSorted retains the same ranks and
+// interpolation.
+List<double> slidingMedians(List<double> xs, int halfWin) {
+  if (xs.isEmpty) return <double>[];
+  if (halfWin < 0) {
+    throw ArgumentError.value(halfWin, 'halfWin', 'must be non-negative');
+  }
+
+  final n = xs.length;
+  var lo = 0;
+  var hi = math.min(n, halfWin + 1); // exclusive
+  final sorted = <double>[];
+  for (var i = lo; i < hi; i++) {
+    _insertSorted(sorted, xs[i]);
+  }
+  final out = List<double>.filled(n, 0);
+  for (var j = 0; j < n; j++) {
+    out[j] = percentileSorted(sorted, 50)!;
+    if (j + 1 == n) break;
+
+    final nextLo = math.max(0, j + 1 - halfWin);
+    final nextHi = math.min(n, j + 1 + halfWin + 1); // exclusive
+    while (lo < nextLo) {
+      _removeSorted(sorted, xs[lo]);
+      lo++;
+    }
+    while (hi < nextHi) {
+      _insertSorted(sorted, xs[hi]);
+      hi++;
+    }
+  }
+  return out;
+}
+
+void _insertSorted(List<double> sorted, double value) {
+  var lo = 0;
+  var hi = sorted.length;
+  while (lo < hi) {
+    final mid = lo + (hi - lo) ~/ 2;
+    if (sorted[mid].compareTo(value) < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  sorted.insert(lo, value);
+}
+
+void _removeSorted(List<double> sorted, double value) {
+  var lo = 0;
+  var hi = sorted.length;
+  while (lo < hi) {
+    final mid = lo + (hi - lo) ~/ 2;
+    if (sorted[mid].compareTo(value) < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  // [value] is known to be in the active window. A compare-equal duplicate is
+  // interchangeable for percentile arithmetic, including NaN and signed zero.
+  sorted.removeAt(lo);
+}
+
 /// Median absolute deviation, scaled to be a consistent estimator of σ for
 /// normal data (× 1.4826). Returns null if empty. NOTE: on quantized data the
 /// raw MAD can be 0 — callers must guard division (see [robustZ]).
@@ -326,6 +405,12 @@ class LombScargle {
 ///
 /// This operates on NATIVE sample times — no resampling — which is exactly why
 /// it's the correct PSD for unevenly-sampled beat-time RR.
+///
+/// PRECISION: every trig argument is built from `t - t.first`, never the raw
+/// [t]. On epoch seconds (~1.8e9) the argument `2π·f·t` reaches ~1e10 rad, where
+/// a double is only good to ~1e-6 rad, which cost up to ~5e-6 relative error in
+/// the PSD. The spectrum is time-shift invariant, so the shift changes nothing
+/// but that error (≈1e-13 after it).
 LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   final n = t.length;
   if (n < 4 || y.length != n || freqsHz.isEmpty) return null;
@@ -345,6 +430,7 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   }
   final span = tMax - tMin;
   if (span <= 0) return null;
+  final t0 = t[0];
   // One-sided periodogram → density: 2·Δt, with Δt the MEAN sample interval.
   final psdScale = 2.0 * span / (n - 1);
 
@@ -358,14 +444,14 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
     // τ: phase reference for time-shift invariance.
     var sin2 = 0.0, cos2 = 0.0;
     for (final ti in t) {
-      sin2 += math.sin(2 * w * ti);
-      cos2 += math.cos(2 * w * ti);
+      sin2 += math.sin(2 * w * (ti - t0));
+      cos2 += math.cos(2 * w * (ti - t0));
     }
     final tau = math.atan2(sin2, cos2) / (2 * w);
 
     var cNum = 0.0, cDen = 0.0, sNum = 0.0, sDen = 0.0;
     for (var i = 0; i < n; i++) {
-      final arg = w * (t[i] - tau);
+      final arg = w * ((t[i] - t0) - tau);
       final c = math.cos(arg);
       final s = math.sin(arg);
       cNum += yc[i] * c;

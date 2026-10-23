@@ -45,6 +45,7 @@ import 'van_hees.dart';
 import 'accounting.dart' show SleepStage;
 import 'advanced_stager.dart';
 import 'band_offset.dart';
+import 'cardio_row_cache.dart';
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
 const int _minQualifyingSleepSec = 3 * 3600;
@@ -431,6 +432,7 @@ SleepSegmentation segmentSleep(
   /// creates, extends or stages a night. (AdvancedSleepStager.detectSleep takes
   /// the same signal as [ts,state] pairs; not forwarded here.)
   List<int>? bandSleepState,
+  CardioRowCache? rowCache,
 }) {
   final n = math.min(accel.length, hr1hz.length);
   // A forced window (manual entry / user confirmation, Approach 1) is asserted
@@ -498,7 +500,8 @@ SleepSegmentation segmentSleep(
     if (offsetSec <= onsetSec) return SleepSegmentation.absent;
     // Stage the user-asserted window directly — no detection, no gates.
     final session =
-        AdvancedSleepStager.stageWindow(onsetSec, offsetSec, grav, hr, rr: rr);
+        AdvancedSleepStager.stageWindow(onsetSec, offsetSec, grav, hr,
+            rr: rr, rowCache: rowCache);
     chosen = _SleepGroup(
       sessions: [session],
       start: onsetSec,
@@ -511,6 +514,7 @@ SleepSegmentation segmentSleep(
       hr,
       rr: rr,
       tzOffsetResolver: tzAt,
+      rowCache: rowCache,
     );
     if (sessions.isEmpty) return SleepSegmentation.absent;
 

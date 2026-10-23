@@ -36,12 +36,16 @@
 // Pure Dart, dart:math only.
 
 import 'dart:math' as math;
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
 import '../clinical/hrv_time.dart';
-import 'cardio_stager.dart' show cardioStager;
-import 'accounting.dart' show SleepStage;
+import 'epoch_rows.dart';
+import 'cardio_row_cache.dart';
 import 'band_offset.dart';
+import 'hypnogram.dart';
+export 'hypnogram.dart';
+import 'hypnogram_aggregator.dart';
 
 /// Which per-session staging engine [AdvancedSleepStager] runs. See the file
 /// header for the 2026-07 comparison behind this choice. Do not switch the
@@ -97,86 +101,6 @@ class RespTs {
   final int ts;
   final double raw;
   const RespTs(this.ts, this.raw);
-}
-
-/// A scored stage span. [stage] ∈ {'wake','light','deep','rem'}.
-class StageSegment {
-  final int start;
-  final int end;
-  final String stage;
-  const StageSegment(this.start, this.end, this.stage);
-  Map<String, dynamic> toJson() => {'start': start, 'end': end, 'stage': stage};
-}
-
-/// One detected sleep session + its hypnogram.
-class SleepSession {
-  final int start;
-  final int end;
-  final double efficiency; // [0,1]
-  final List<StageSegment> stages;
-  final int? restingHr; // lowest 5-min rolling-mean HR (bpm)
-  final double? avgHrv; // mean RMSSD over 5-min windows (ms)
-  const SleepSession({
-    required this.start,
-    required this.end,
-    required this.efficiency,
-    required this.stages,
-    required this.restingHr,
-    required this.avgHrv,
-  });
-}
-
-/// AASM-style hypnogram metrics over a session.
-class HypnogramMetrics {
-  final int tibS;
-  final int tstS;
-  final int sptS;
-  /// Sleep-onset latency (s). NULL when NOTHING staged as sleep — reporting
-  /// the whole time in bed as "time to fall asleep" alongside TST 0 is a
-  /// fabricated measurement, not an abstention.
-  final int? solS;
-  final double remLatencyS; // NaN if no REM
-  final int wasoS;
-  final double efficiency; // [0,1]
-  final int disturbances;
-  final double deepMin;
-  final double remMin;
-  final double lightMin;
-  final double deepPct;
-  final double remPct;
-  final double lightPct;
-  const HypnogramMetrics({
-    required this.tibS,
-    required this.tstS,
-    required this.sptS,
-    required this.solS,
-    required this.remLatencyS,
-    required this.wasoS,
-    required this.efficiency,
-    required this.disturbances,
-    required this.deepMin,
-    required this.remMin,
-    required this.lightMin,
-    required this.deepPct,
-    required this.remPct,
-    required this.lightPct,
-  });
-  Map<String, dynamic> toJson() => {
-        'tib_s': tibS,
-        'tst_s': tstS,
-        'spt_s': sptS,
-        'sol_s': solS,
-        'rem_latency_s': remLatencyS.isNaN ? null : remLatencyS,
-        'waso_s': wasoS,
-        'efficiency': efficiency,
-        'disturbances': disturbances,
-        'deep_min': deepMin,
-        'rem_min': remMin,
-        'light_min': lightMin,
-        'deep_pct': deepPct,
-        'rem_pct': remPct,
-        'light_pct': lightPct,
-      };
 }
 
 /// Advanced sleep stager — constants + the full V1/V2 algorithm.
@@ -315,6 +239,7 @@ class AdvancedSleepStager {
     int tzOffsetSec = 0,
     int Function(int tsSec)? tzOffsetResolver,
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
     List<List<int>> wristOff = const [], // each [start,end]
     List<List<int>> bandSleepState = const [], // each [ts,state]
   }) {
@@ -387,7 +312,8 @@ class AdvancedSleepStager {
       }
 
       final stages = switch (method) {
-        StagingMethod.cardio => _stageSessionCardio(p.start, p.end, grav, hrS, rrS),
+        StagingMethod.cardio =>
+          _stageSessionCardio(p.start, p.end, grav, hrS, rrS, rowCache),
         StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
         StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
       };
@@ -438,9 +364,11 @@ class AdvancedSleepStager {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
   }) {
     final stages = switch (method) {
-      StagingMethod.cardio => _stageSessionCardio(startSec, endSec, gravity, hr, rr),
+      StagingMethod.cardio =>
+        _stageSessionCardio(startSec, endSec, gravity, hr, rr, rowCache),
       StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
       StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
     };
@@ -1424,125 +1352,47 @@ class AdvancedSleepStager {
   /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
-  /// DEFAULT staging path — delegates to `cardioStager` (cardio_stager.dart).
-  /// See the file header for why this is the default. `cardioStager` expects
-  /// per-SECOND-indexed [AccelSample]/HR arrays (index i == second i from
-  /// [start]), not the sparse timestamped [GravTs]/[HrTs] lists this file
-  /// otherwise uses — so this builds that dense array explicitly: accel gaps
-  /// carry the last-known vector forward for at most
-  /// [maxAccelCarryForwardSec]; HR gaps fill with 0, which `cardioStager`
-  /// already documents as its own "off-skin" contract — no fabrication either
-  /// way.
-  ///
-  /// HONESTY: seconds with no usable accelerometer are NOT staged. The window
-  /// is split at those gaps and each contiguous usable RUN is staged on its own
-  /// (so a dropout cannot pollute the neighbouring run's night baselines
-  /// either); the gap seconds, runs too short to stage, and a window where
-  /// `cardioStager` itself abstains all come back as 'unobserved' — the "stay
-  /// unstaged" contract [stageWindow] documents. They must NEVER come back as
-  /// 'light', which is what a zero-data window used to report for its entire
-  /// length, and not as 'wake' either: an abstained run can still carry HR, so
-  /// `segmentSleep` would see it as observed and publish it as measured WASO.
+  // Dart's List.sort is not stable; index breaks ties so equal timestamps keep
+  // list order.
+  static List<T> _stableByTs<T>(List<T> xs, int Function(T) ts) {
+    final idx = List<int>.generate(xs.length, (i) => i)
+      ..sort((a, b) {
+        final c = ts(xs[a]).compareTo(ts(xs[b]));
+        return c != 0 ? c : a.compareTo(b);
+      });
+    return [for (final i in idx) xs[i]];
+  }
+
+  /// Default staging path: 30 s epochs anchored at the session onset (the first
+  /// valid accelerometer sample at or after [start], phase 0), as before the
+  /// combined bump. Samples outside [start, end) are not read, so features are
+  /// clipped at the session edges. A usable run that follows a dropout the 60 s
+  /// carry-forward cannot bridge re-anchors at its own first sample. Other gaps
+  /// and abstained runs remain unobserved.
   static List<StageSegment> _stageSessionCardio(int start, int end,
-      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
-    final span = end - start;
-    if (span <= 0) return const <StageSegment>[];
-    final epSec = epochS.round();
-    final minStageableSec = 3 * epSec;
-    if (span < minStageableSec) return [StageSegment(start, end, 'unobserved')];
-
-    // Invalid samples are NOT samples: they must not seed `usable`, and they
-    // must not become the source of a carry-forward. A second with only an
-    // undecoded vector falls through to the same unstaged→unobserved path as a
-    // second with no row at all (cardioStager itself never reads
-    // [AccelSample.valid], so it can only be protected here).
-    final gByTs = <int, GravTs>{
-      for (final g in grav)
-        if (g.valid && g.ts >= start && g.ts < end) g.ts: g
-    };
-    final hByTs = <int, HrTs>{for (final h in hr) if (h.ts >= start && h.ts < end) h.ts: h};
-    final accel = List<AccelSample>.filled(
-        span, AccelSample(start * 1000.0, 0, 0, 1.0));
-    final hr1hz = List<double>.filled(span, 0.0);
-    // usable[i] — second i has a real accel sample or a BOUNDED carry-forward.
-    final usable = List<bool>.filled(span, false);
-    var lastRealIdx = -1;
-    for (var i = 0; i < span; i++) {
-      final ts = start + i;
-      final g = gByTs[ts];
-      if (g != null) {
-        accel[i] = AccelSample(ts * 1000.0, g.x, g.y, g.z);
-        lastRealIdx = i;
-        usable[i] = true;
-      } else if (lastRealIdx >= 0 && (i - lastRealIdx) <= maxAccelCarryForwardSec) {
-        // Bounded carry-forward — see [maxAccelCarryForwardSec]. The TIMESTAMP
-        // is this second's, not the stale sample's: cardioStager centres its RR
-        // windows on `accel[mid].tsMs`, so copying the old sample wholesale
-        // mis-centred every RMSSD/LF-HF window inside a gap.
-        final p = accel[i - 1];
-        accel[i] = AccelSample(ts * 1000.0, p.x, p.y, p.z);
-        usable[i] = true;
-      }
-      hr1hz[i] = hByTs[ts]?.bpm ?? 0.0; // 0 = off-skin, cardioStager's own contract.
+      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
+      [CardioRowCache? rowCache]) {
+    if (end <= start) return const [];
+    final g = [for (final g in grav) if (g.ts >= start && g.ts < end) g];
+    int? onset;
+    for (final x in g) {
+      if (x.valid && (onset == null || x.ts < onset)) onset = x.ts;
     }
-
-    final rSeg = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
-    final rrMs = [for (final r in rSeg) r.rrMs];
-    final rrTsMs = [for (final r in rSeg) r.ts * 1000.0];
-
-    // Everything not staged below stays 'unobserved' — no stage, no wake.
-    final perSec = List<String>.filled(span, 'unobserved');
-    var i = 0;
-    while (i < span) {
-      if (!usable[i]) {
-        i++;
-        continue;
-      }
-      var j = i;
-      while (j < span && usable[j]) {
-        j++;
-      }
-      if ((j - i) >= minStageableSec) {
-        final result = cardioStager(
-          hr1hz.sublist(i, j),
-          accel.sublist(i, j),
-          rrMs: rrMs,
-          rrTsMs: rrTsMs,
-        );
-        final nEpoch = result.base.stages.length;
-        for (var e = 0; e < nEpoch; e++) {
-          final label = switch (result.base.stages[e]) {
-            SleepStage.wake => 'wake',
-            SleepStage.rem => 'rem',
-            SleepStage.nrem => (e < result.deepFlag.length && result.deepFlag[e])
-                ? 'deep'
-                : 'light',
-          };
-          final lo = i + e * epSec;
-          // The last epoch absorbs the run's sub-epoch remainder, exactly as
-          // [_buildSegments] extends the final segment to the window end.
-          final hi = e == nEpoch - 1 ? j : math.min(j, lo + epSec);
-          for (var k = lo; k < hi; k++) {
-            perSec[k] = label;
-          }
-        }
-      }
-      i = j;
-    }
-
-    // Coalesce the per-second labels into contiguous [StageSegment]s tiling
-    // [start, end) — same segment semantics [_buildSegments] produces.
-    final segments = <StageSegment>[];
-    var k = 0;
-    while (k < span) {
-      var m = k;
-      while (m < span && perSec[m] == perSec[k]) {
-        m++;
-      }
-      segments.add(StageSegment(start + k, start + m, perSec[k]));
-      k = m;
-    }
-    return segments;
+    final rows = EpochRows(
+        rowCache: rowCache, anchorMs: onset == null ? null : onset * 1000);
+    final beats = _stableByTs(
+        [for (final r in rr) if (r.ts >= start && r.ts < end) r], (r) => r.ts);
+    rows.fold(
+      // Stable by time: equal timestamps keep list order (the oracle's last-wins).
+      hr: [for (final h in _stableByTs([
+        for (final h in hr) if (h.ts >= start && h.ts < end) h
+      ], (h) => h.ts)) HrSample(h.ts * 1000.0, h.bpm)],
+      accel: [for (final x in _stableByTs(g, (x) => x.ts)) AccelSample(x.ts * 1000.0, x.x, x.y, x.z, valid: x.valid)],
+      rrMs: [for (final r in beats) r.rrMs],
+      rrTsMs: [for (final r in beats) r.ts * 1000.0],
+      throughMs: end * 1000 - 1, // the session end closes the data, as a clip
+    );
+    return rows.stageWindow(start, end);
   }
 
   static List<StageSegment> _stageSession(int start, int end, List<GravTs> grav,
@@ -1955,59 +1805,7 @@ class AdvancedSleepStager {
 
   static HypnogramMetrics hypnogramMetrics(SleepSession session) {
     final segs = [...session.stages]..sort((a, b) => a.start.compareTo(b.start));
-    final tib = math.max(0, session.end - session.start);
-    final sleepSegs = segs
-        .where((s) => s.stage == 'light' || s.stage == 'deep' || s.stage == 'rem')
-        .toList();
-    var tst = 0, deepS = 0, remS = 0, lightS = 0;
-    for (final s in sleepSegs) {
-      final d = s.end - s.start;
-      tst += d;
-      if (s.stage == 'deep') deepS += d;
-      if (s.stage == 'rem') remS += d;
-      if (s.stage == 'light') lightS += d;
-    }
-    int onset, sptEnd;
-    int? sol;
-    if (sleepSegs.isNotEmpty) {
-      onset = sleepSegs.first.start;
-      sptEnd = sleepSegs.last.end;
-      sol = math.max(0, onset - session.start);
-    } else {
-      onset = session.end;
-      sptEnd = session.end;
-      sol = null; // never observed sleep — no latency to report
-    }
-    final remSegs = sleepSegs.where((s) => s.stage == 'rem').toList();
-    final remLatency =
-        remSegs.isNotEmpty ? (remSegs.first.start - onset).toDouble() : double.nan;
-    var waso = 0, disturbances = 0;
-    for (final s in segs.where((s) => s.stage == 'wake')) {
-      final w0 = math.max(s.start, onset);
-      final w1 = math.min(s.end, sptEnd);
-      if (w1 > w0) {
-        waso += w1 - w0;
-        disturbances++;
-      }
-    }
-    final se = tib > 0 ? tst / tib : 0.0;
-    double pct(int x) => tst > 0 ? x / tst * 100 : 0;
-    return HypnogramMetrics(
-      tibS: tib,
-      tstS: tst,
-      sptS: math.max(0, sptEnd - onset),
-      solS: sol,
-      remLatencyS: remLatency,
-      wasoS: waso,
-      efficiency: math.min(1.0, se),
-      disturbances: disturbances,
-      deepMin: deepS / 60,
-      remMin: remS / 60,
-      lightMin: lightS / 60,
-      deepPct: pct(deepS),
-      remPct: pct(remS),
-      lightPct: pct(lightS),
-    );
+    return HypnogramAggregator(session.start, session.end).runList(segs);
   }
 
   // ── shared math (population std, percentile) ──────────────────────────────
