@@ -1,0 +1,44 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790046670,
+        "narHash": "sha256-MYiI+CzL0tuWgRPjGsKCDHqYs2T3OzMlMQWOYWG0qso=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "6774f7bc253789b113a4f39285dc0fa100abeacc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-flutter": {
+      "locked": {
+        "lastModified": 1774840819,
+        "narHash": "sha256-V9TPFnbTQx9bDyVKuHpYi/0fC5qTgxDeHkST0RNAuTk=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "27dfede99da61fd1ead9d4a2fa92bc9c242e83d2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "27dfede99da61fd1ead9d4a2fa92bc9c242e83d2",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-flutter": "nixpkgs-flutter"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

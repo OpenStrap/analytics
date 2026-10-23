@@ -85,6 +85,10 @@ if (hrv.value != null) {
 Every metric function in the package follows this shape: plain `List<double>` (or a
 small typed input class for the composite ones) in, `Metric<T>` out.
 
+For repeated updates, [incremental calculation states](docs/INCREMENTAL_USAGE.md)
+retain contributions while checking the complete current inputs for revisions.
+The [math audit](docs/INCREMENTAL_MATH.md) explains the algebra and rebuild rules.
+
 ## What's actually in here
 
 Eight families, each its own subdirectory with its own sub-barrel, built on two shared
@@ -100,9 +104,9 @@ foundation layers:
   reference; the 0-100 `trimpStrain` effort score is raw TRIMP with no such subtraction),
   a Poincaré irregular-rhythm screen, cosinor circadian fitting, and real-time cardiac coherence for guided breathing sessions.
 - **`sleep/`** — van Hees z-angle segmentation feeding a cardiac/motion stager (the
-  single source of truth for sleep staging), AASM hypnogram metrics, cardiopulmonary
-  coupling, fractal sleep-cycle detection, circadian non-parametric indices
-  (IS/IV/RA/L5/M10).
+  single source of truth for sleep staging), a causal (online, abstaining) wake/NREM/REM
+  stager for live decisions, AASM hypnogram metrics, cardiopulmonary coupling, fractal
+  sleep-cycle detection, circadian non-parametric indices (IS/IV/RA/L5/M10).
 - **`respiration/`** — RSA-derived respiratory rate fused with motion-modulated RIIV,
   CVHR-based apnea screening, a relative (never absolute) oxygen-desaturation ratio.
 - **`motion/`** — ENMO/MAD activity metrics, a 100 Hz AN-2554-derived live pedometer
@@ -138,8 +142,9 @@ assertion out.
 
 ## Validation
 
-`tool/` has four harnesses that score shipped detectors against labelled corpora, not
-synthetic fixtures — run one before touching the logic it covers:
+`tool/` has five harnesses that score shipped detectors against labelled corpora (or, for
+the causal stager, the one recorded night in-tree) rather than synthetic fixtures — run one
+before touching the logic it covers:
 
 - `dart run tool/oxwalk_validate.dart <path-to-OxWalk_Dec2022>` — the pedometer against
   OxWalk (Oxford, CC BY): 39 subjects, camera-annotated heel strikes.
@@ -147,6 +152,10 @@ synthetic fixtures — run one before touching the logic it covers:
   against a PSG-labelled corpus (e.g. DREAMT), reporting Cohen's kappa.
 - `dart run tool/nap_harness.dart <fixture.json>` — the nap detector against hand-labelled
   days.
+- `dart run tool/causal_stager_validate.dart` — replays the in-tree real night through the
+  causal (online) stager and scores agreement, false- and late-trigger behaviour for the
+  "wake during REM" use case against the offline stager. There is no PSG-labelled night
+  in-tree, so this is agreement, not accuracy; see `docs/CAUSAL_STAGER.md`.
 - `dart run tool/whoop_proportions.dart <dir-of-night-json>` — sweeps sleep-stage cutoffs
   against normative stage proportions on real device captures.
 
