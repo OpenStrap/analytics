@@ -77,7 +77,9 @@
 // tier ESTIMATE; confidence reflects RR coverage (RMSSD drives REM/deep).
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
+import 'cardio_row_cache.dart';
 import '../util.dart';
 import 'accounting.dart' show SleepStage;
 import 'stager.dart' show StagerResult, consolidateSleepStages;
@@ -88,7 +90,26 @@ class CardioStagerResult {
   final StagerResult base;
   final List<bool> deepFlag;
   final double confidence;
-  const CardioStagerResult(this.base, this.deepFlag, this.confidence);
+
+  /// Per-epoch REM / deep scores as the classify loop computed them, BEFORE
+  /// the mode filter, Webster rescore and consolidation. Null where the epoch
+  /// was decided wake first (no score taken) or no axis was measurable. Same
+  /// length as `base.stages`, or empty when the stager abstained or the result
+  /// was built without them. Read through `epochEvidence` (stage_ranges.dart).
+  final List<double?> remScores;
+  final List<double?> deepScores;
+
+  /// Per-epoch: the epoch carried at least one valid HR sample.
+  final List<bool> hrCovered;
+
+  const CardioStagerResult(
+    this.base,
+    this.deepFlag,
+    this.confidence, {
+    this.remScores = const [],
+    this.deepScores = const [],
+    this.hrCovered = const [],
+  });
 }
 
 const int _epochSec = 30;
@@ -115,6 +136,13 @@ const double _wRemRk = 0.43;
 const double _wRemSdnn = 0.32;
 const double _wRemHrSd = 0.27;
 const double _wRemLfhf = 0.12;
+
+/// The REM axis weights, exposed (read-only) for [CausalStager], which scores
+/// REM from the SAME measured effect sizes instead of re-declaring them.
+const double kRemWeightRk = _wRemRk;
+const double kRemWeightSdnn = _wRemSdnn;
+const double kRemWeightHrSd = _wRemHrSd;
+const double kRemWeightLfhf = _wRemLfhf;
 
 const double _wDeepRk = 0.53;
 const double _wDeepHrSd = 0.43;
@@ -382,10 +410,56 @@ CardioStagerResult cardioStager(
   SleepUserProfile? userProfile,
   double remScoreCut = _remScoreCut,
   double deepScoreCut = _deepScoreCut,
+  CardioRowCache? rowCache,
 }) {
-  // Explicit arg wins (unit tests); else the ambient profile the edge set for
-  // this staging pass; else null ⇒ pure per-night-local (cold-start behavior).
-  final profile = userProfile ?? cardioUserProfile;
+  return classifyCardioEpochs(
+    cardioEpochFeatures(
+      hr1hz,
+      accel,
+      rrMs: rrMs,
+      rrTsMs: rrTsMs,
+      epochSec: epochSec,
+      rowCache: rowCache,
+    ),
+    epochSec: epochSec,
+    userProfile: userProfile ?? cardioUserProfile,
+    remScoreCut: remScoreCut,
+    deepScoreCut: deepScoreCut,
+  );
+}
+
+/// Extracts the raw per-epoch inputs consumed by [classifyCardioEpochs].
+///
+/// The returned rows cover `[startEpoch, endEpoch)`, clamped to the session's
+/// complete epoch grid. A row for epoch `e` depends on: its own `perEpoch`
+/// samples of [hr1hz] and [accel]; accel magnitudes from `300 s / 2` on either
+/// side of that epoch's start/end for its local 1 g median (clipped at the
+/// session bounds); [rrMs]/[rrTsMs] in the inclusive ±150 s window centred on
+/// the epoch for RMSSD/SDNN; and those inputs in the inclusive ±90 s window
+/// for LF/HF and R(k). It also depends on the full input's measured accel
+/// cadence, its clipped length, [epochSec], and the absolute accel timestamps
+/// that define the RR windows. No row depends on neighbouring feature rows or
+/// any user profile/classification setting.
+///
+/// [rrTsMs] must be non-decreasing when it is paired with [rrMs]. Invalid grid
+/// inputs return zero rows, as does a session with fewer than three epochs.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
+CardioEpochFeatures cardioEpochFeatures(
+  List<double> hr1hz,
+  List<AccelSample> accel, {
+  List<double> rrMs = const [],
+  List<double> rrTsMs = const [],
+  int epochSec = _epochSec,
+  int startEpoch = 0,
+  int? endEpoch,
+  CardioRowCache? rowCache,
+}) {
   // `_cleanBeatsInWindow` binary-searches this, so it has to be non-decreasing.
   // The producer guarantees it — beats inherit their record's second and the
   // records are sorted, and the one path that folds in loose live beats
@@ -415,7 +489,7 @@ CardioStagerResult cardioStager(
   // the Webster/Cole-Kripke continuity rules below are specified at this epoch
   // length. Stretching `epochSec` to fit the device would make a number appear
   // where the evidence for it does not; abstain instead.
-  if (cadenceSec == null || cadenceSec > epochSec) return _abstain(epochSec);
+  if (cadenceSec == null || cadenceSec > epochSec) return _emptyCardioFeatures;
   final perEpoch = math.max(1, (epochSec / cadenceSec).round());
   // `perEpoch` samples at this cadence must actually SPAN `epochSec` — a
   // cadence that does not divide it evenly (4 s against a 30 s epoch rounds
@@ -427,9 +501,34 @@ CardioStagerResult cardioStager(
   // Abstain rather than publish a grid whose real spacing does not match its
   // own label.
   if ((perEpoch * cadenceSec - epochSec).abs() > 1e-6)
-    return _abstain(epochSec);
+    return _emptyCardioFeatures;
   final nEpoch = n ~/ perEpoch;
-  if (nEpoch < 3) return _abstain(epochSec);
+  if (nEpoch < 3) return _emptyCardioFeatures;
+
+  final firstEpoch = startEpoch.clamp(0, nEpoch);
+  final lastEpoch = (endEpoch ?? nEpoch).clamp(firstEpoch, nEpoch);
+  final rows = lastEpoch - firstEpoch;
+
+  // The cache is deliberately inserted before the acceleration magnitude and
+  // median work. A hit avoids the Lomb–Scargle calculation AND all of the
+  // otherwise per-pass feature extraction. A miss range delegates back to this
+  // exact routine with the same full arrays, so its local median's clipped
+  // bounds and every floating-point operation remain byte-for-byte unchanged.
+  if (rowCache != null) {
+    return _cachedCardioEpochFeatures(
+      hr1hz,
+      accel,
+      rrMs,
+      rrTsMs,
+      epochSec,
+      n,
+      cadenceSec,
+      perEpoch,
+      firstEpoch,
+      lastEpoch,
+      rowCache,
+    );
+  }
 
   // ── per-second ENMO (motion) against a LOCALLY-ADAPTIVE 1 g reference ──────
   // A single whole-night gravity-magnitude reference (the old approach) is
@@ -458,70 +557,225 @@ CardioStagerResult cardioStager(
   const int _gRefWinSec = 300; // 5 min window, centered per epoch
   // …in SAMPLES at the measured cadence. 300 at 1 Hz, unchanged.
   final gRefHalf = math.max(1, (_gRefWinSec / cadenceSec).round()) ~/ 2;
-  final gRefByEpoch = List<double>.filled(nEpoch, 1.0);
-  for (var e = 0; e < nEpoch; e++) {
-    final es = e * perEpoch;
-    final lo = math.max(0, es - gRefHalf);
-    final hi = math.min(n, es + perEpoch + gRefHalf);
-    gRefByEpoch[e] = median(mag.sublist(lo, hi)) ?? 1.0;
-  }
+  final gRefByEpoch = _epochGRefMedians(
+      mag, perEpoch, gRefHalf, firstEpoch, lastEpoch);
 
   // ── per-epoch features ─────────────────────────────────────────────────────
-  final motion = List<double>.filled(nEpoch, 0);
-  final hr = List<double>.filled(nEpoch, double.nan);
-  final hrSd = List<double>.filled(nEpoch, 0);
-  final rmssd = List<double>.filled(nEpoch, double.nan);
-  final sdnn = List<double>.filled(nEpoch, double.nan);
+  final motion = List<double>.filled(rows, 0);
+  final hr = List<double>.filled(rows, double.nan);
+  final hrSd = List<double>.filled(rows, 0);
+  final rmssd = List<double>.filled(rows, double.nan);
   // REM autonomic features (P1): LF/HF from the RR spectrum + R(k) = rolling
   // mean |ΔIHR|. REM's signature at 1 Hz beat-timing is a SYMPATHETIC shift —
   // LF/HF rises, RR variability drops (low RMSSD), and instantaneous HR gets
   // "jittery" (elevated |ΔIHR|). The old REM rule leaned only on the RMSSD drop
   // and under-called REM; these two independent axes recover it (OR-combined
   // below), gated by atonia + an HR floor so a plain arousal is not miscalled.
-  final lfhf = List<double>.filled(nEpoch, double.nan);
-  final rk = List<double>.filled(nEpoch, double.nan);
+  final sdnn = List<double>.filled(rows, double.nan);
+  final lfhf = List<double>.filled(rows, double.nan);
+  final rk = List<double>.filled(rows, double.nan);
 
-  for (var e = 0; e < nEpoch; e++) {
+  for (var e = firstEpoch; e < lastEpoch; e++) {
+    final row = e - firstEpoch;
     final s = e * perEpoch, t = math.min(s + perEpoch, n);
     // motion = mean ENMO over the epoch, against THIS epoch's local reference.
-    final gRefE = gRefByEpoch[e];
+    final gRefE = gRefByEpoch[row];
     var ms = 0.0;
     for (var i = s; i < t; i++) {
       final d = mag[i] - gRefE;
       ms += d > 0 ? d : 0.0;
     }
-    motion[e] = ms / (t - s);
+    motion[row] = ms / (t - s);
     // hr mean/sd over valid (>0) seconds
     final hv = <double>[
       for (var i = s; i < t; i++)
         if (hr1hz[i] > 0) hr1hz[i]
     ];
-    if (hv.isNotEmpty) hr[e] = mean(hv)!;
-    if (hv.length >= 2) hrSd[e] = stddev(hv) ?? 0;
+    if (hv.isNotEmpty) hr[row] = mean(hv)!;
+    if (hv.length >= 2) hrSd[row] = stddev(hv) ?? 0;
     // rmssd over RR beats within a ±2.5-min window centred on the epoch
-    rmssd[e] = _windowRmssd(rrMs, rrTsMs, accel, s, t, epochSec);
-    sdnn[e] = _windowSdnn(rrMs, rrTsMs, accel, s, t, epochSec);
+    rmssd[row] = _windowRmssd(rrMs, rrTsMs, accel, s, t, epochSec);
+    sdnn[row] = _windowSdnn(rrMs, rrTsMs, accel, s, t, epochSec);
     // LF/HF + R(k) over a ±90-s RR window centred on the epoch.
     final rem = _windowRemFeatures(rrMs, rrTsMs, accel, s, t, epochSec);
-    if (rem.lfhf != null) lfhf[e] = rem.lfhf!;
-    if (rem.rk != null) rk[e] = rem.rk!;
+    if (rem.lfhf != null) lfhf[row] = rem.lfhf!;
+    if (rem.rk != null) rk[row] = rem.rk!;
   }
 
-  return classifyCardioEpochs(
-    CardioEpochFeatures(
-      motion: motion,
-      hr: hr,
-      hrSd: hrSd,
-      rmssd: rmssd,
-      lfhf: lfhf,
-      rk: rk,
-      sdnn: sdnn,
-    ),
-    epochSec: epochSec,
-    userProfile: profile,
-    remScoreCut: remScoreCut,
-    deepScoreCut: deepScoreCut,
+  return CardioEpochFeatures(
+    motion: motion,
+    hr: hr,
+    hrSd: hrSd,
+    rmssd: rmssd,
+    lfhf: lfhf,
+    rk: rk,
+    sdnn: sdnn,
   );
+}
+
+/// Cache-aware extraction. The key's context is intentionally the contiguous
+/// usable run supplied to this stager, not the caller's larger record: samples
+/// outside that run cannot influence [cardioEpochFeatures].
+CardioEpochFeatures _cachedCardioEpochFeatures(
+  List<double> hr1hz,
+  List<AccelSample> accel,
+  List<double> rrMs,
+  List<double> rrTsMs,
+  int epochSec,
+  int n,
+  double cadenceSec,
+  int perEpoch,
+  int firstEpoch,
+  int lastEpoch,
+  CardioRowCache cache,
+) {
+  final count = lastEpoch - firstEpoch;
+  final keys = List<CardioRowKey>.filled(
+      count, const CardioRowKey(0, 0, 0));
+  final values = List<CardioEpochRow?>.filled(count, null);
+  final missing = List<bool>.filled(count, false);
+  final gRefHalf = math.max(1, (300 / cadenceSec).round()) ~/ 2;
+  for (var e = firstEpoch; e < lastEpoch; e++) {
+    final row = e - firstEpoch;
+    final key = _cardioRowKey(
+        hr1hz, accel, rrMs, rrTsMs, epochSec, n, cadenceSec, perEpoch, e, gRefHalf);
+    keys[row] = key;
+    final value = cache.lookup(key);
+    values[row] = value;
+    missing[row] = value == null;
+  }
+
+  // One recursive feature extraction per contiguous cold span. It keeps the
+  // old vectorized median path intact and avoids turning a changed handful of
+  // rows into a handful of Lomb–Scargle setup passes.
+  var row = 0;
+  while (row < count) {
+    if (!missing[row]) {
+      row++;
+      continue;
+    }
+    final first = row;
+    while (row < count && missing[row]) {
+      row++;
+    }
+    final features = cardioEpochFeatures(
+      hr1hz,
+      accel,
+      rrMs: rrMs,
+      rrTsMs: rrTsMs,
+      epochSec: epochSec,
+      startEpoch: firstEpoch + first,
+      endEpoch: firstEpoch + row,
+    );
+    for (var i = first; i < row; i++) {
+      final f = i - first;
+      final value = CardioEpochRow(
+        features.motion[f],
+        features.hr[f],
+        features.hrSd[f],
+        features.rmssd[f],
+        features.lfhf[f],
+        features.rk[f],
+        features.sdnn[f],
+      );
+      values[i] = value;
+      cache.insert(keys[i], value);
+    }
+  }
+  return CardioEpochFeatures(
+    motion: [for (final value in values) value!.motion],
+    hr: [for (final value in values) value!.hr],
+    hrSd: [for (final value in values) value!.hrSd],
+    rmssd: [for (final value in values) value!.rmssd],
+    lfhf: [for (final value in values) value!.lfhf],
+    rk: [for (final value in values) value!.rk],
+    sdnn: [for (final value in values) value!.sdnn],
+  );
+}
+
+const int _fnvOffset64 = 0xcbf29ce484222325;
+const int _fnvPrime64 = 0x100000001b3;
+const int _u64Mask = (1 << 64) - 1;
+
+/// Exact-bit fingerprint of the data one row can observe. The clipped run
+/// length never enters a row as a global scalar: it only changes an epoch whose
+/// 300-s gravity reference window touches a run edge. The explicit clip
+/// distances below capture precisely that dependency while rows away from both
+/// edges survive a moved session boundary.
+CardioRowKey _cardioRowKey(
+  List<double> hr,
+  List<AccelSample> accel,
+  List<double> rr,
+  List<double> rrTs,
+  int epochSec,
+  int n,
+  double cadenceSec,
+  int perEpoch,
+  int epoch,
+  int gRefHalf,
+) {
+  var hash = _fnvOffset64;
+  void word(int value) {
+    hash ^= value & _u64Mask;
+    hash = (hash * _fnvPrime64) & _u64Mask;
+  }
+  void number(double value) {
+    final bytes = ByteData(8)..setFloat64(0, value, Endian.little);
+    word(bytes.getUint64(0, Endian.little));
+  }
+
+  final s = epoch * perEpoch;
+  final t = math.min(s + perEpoch, n);
+  final lo = math.max(0, s - gRefHalf);
+  final hi = math.min(n, t + gRefHalf);
+  word(0x43415244494f31); // domain separator: CARDIO1
+  word(epochSec);
+  word(perEpoch);
+  number(cadenceSec);
+  // Only an actually clipped edge is length-sensitive. A stable marker for an
+  // unclipped side means shifting a far-away session edge preserves the row.
+  word(lo == 0 ? gRefHalf - s : -1);
+  word(hi == n ? t + gRefHalf - n : -1);
+  word(hi - lo);
+  for (var i = lo; i < hi; i++) {
+    final a = accel[i];
+    number(a.tsMs);
+    number(a.x);
+    number(a.y);
+    number(a.z);
+  }
+  word(t - s);
+  for (var i = s; i < t; i++) {
+    number(hr[i]);
+  }
+  // RR has no influence at all for an unpaired input, matching the feature
+  // extractor's early exit. Otherwise include every raw beat in the widest
+  // (±150 s), inclusive window; the ±90 s REM window is a subset.
+  if (rr.length != rrTs.length) {
+    word(0);
+  } else {
+    word(1);
+    final mid = (s + t) ~/ 2;
+    final centre = accel[mid].tsMs;
+    final low = centre - 150000.0, high = centre + 150000.0;
+    var a = 0, b = rrTs.length;
+    while (a < b) {
+      final m = (a + b) >> 1;
+      if (rrTs[m] < low) {
+        a = m + 1;
+      } else {
+        b = m;
+      }
+    }
+    var count = 0;
+    for (var i = a; i < rrTs.length && rrTs[i] <= high; i++) {
+      number(rrTs[i]);
+      number(rr[i]);
+      count++;
+    }
+    word(count);
+  }
+  return CardioRowKey((accel[s].tsMs / 1000.0).round(), epochSec, hash);
 }
 
 /// Per-epoch feature vectors — the ONLY thing the staging DECISION layer sees.
@@ -581,6 +835,86 @@ class CardioEpochFeatures {
       ].reduce(math.min);
 }
 
+const _emptyCardioFeatures = CardioEpochFeatures(
+  motion: <double>[],
+  hr: <double>[],
+  hrSd: <double>[],
+  rmssd: <double>[],
+  lfhf: <double>[],
+  rk: <double>[],
+  sdnn: <double>[],
+);
+
+/// The 1 g reference windows advance by an epoch, rather than one sample, and
+/// have an even length at the normal 1 Hz / 30 s grid. That is not the centred
+/// odd-width shape accepted by [slidingMedians], but it uses the same one
+/// sorted-window binary-insert/remove algorithm and percentile arithmetic.
+List<double> _epochGRefMedians(
+  List<double> mag,
+  int perEpoch,
+  int halfWin,
+  int firstEpoch,
+  int lastEpoch,
+) {
+  final rows = lastEpoch - firstEpoch;
+  if (rows == 0) return <double>[];
+
+  final n = mag.length;
+  var lo = math.max(0, firstEpoch * perEpoch - halfWin);
+  var hi = math.min(n, firstEpoch * perEpoch + perEpoch + halfWin);
+  final sorted = <double>[];
+  for (var i = lo; i < hi; i++) {
+    _insertEpochSorted(sorted, mag[i]);
+  }
+
+  final out = List<double>.filled(rows, 1.0);
+  for (var row = 0; row < rows; row++) {
+    out[row] = percentileSorted(sorted, 50) ?? 1.0;
+    if (row + 1 == rows) break;
+
+    final epoch = firstEpoch + row + 1;
+    final nextLo = math.max(0, epoch * perEpoch - halfWin);
+    final nextHi = math.min(n, epoch * perEpoch + perEpoch + halfWin);
+    while (lo < nextLo) {
+      _removeEpochSorted(sorted, mag[lo]);
+      lo++;
+    }
+    while (hi < nextHi) {
+      _insertEpochSorted(sorted, mag[hi]);
+      hi++;
+    }
+  }
+  return out;
+}
+
+void _insertEpochSorted(List<double> sorted, double value) {
+  var lo = 0;
+  var hi = sorted.length;
+  while (lo < hi) {
+    final mid = lo + (hi - lo) ~/ 2;
+    if (sorted[mid].compareTo(value) < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  sorted.insert(lo, value);
+}
+
+void _removeEpochSorted(List<double> sorted, double value) {
+  var lo = 0;
+  var hi = sorted.length;
+  while (lo < hi) {
+    final mid = lo + (hi - lo) ~/ 2;
+    if (sorted[mid].compareTo(value) < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  sorted.removeAt(lo);
+}
+
 /// The staging DECISION layer: per-epoch features → stages + deep flags.
 ///
 /// Extracted from [cardioStager] verbatim (no behavioural change) so the rules
@@ -590,6 +924,13 @@ class CardioEpochFeatures {
 /// [remScoreCut] / [deepScoreCut] default to the shipped constants and exist so
 /// a calibration harness can sweep them on a DEVELOPMENT split and report the
 /// held-out result. Production callers should not pass them.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 CardioStagerResult classifyCardioEpochs(
   CardioEpochFeatures f, {
   int epochSec = _epochSec,
@@ -794,6 +1135,10 @@ CardioStagerResult classifyCardioEpochs(
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
   final deepFlag = List<bool>.filled(nEpoch, false);
+  // Evidence only: recorded for stageMinuteRanges, never read back here, so
+  // the labels below are unchanged by keeping them.
+  final remScores = List<double?>.filled(nEpoch, null);
+  final deepScores = List<double?>.filled(nEpoch, null);
   for (var e = 0; e < nEpoch; e++) {
     final hrMed = hrMedLocal[e];
     final hrArousal = hrArousalLocal[e];
@@ -867,18 +1212,7 @@ CardioStagerResult classifyCardioEpochs(
     final hrSdZ =
         (sleepHrSd.length >= 4 && hrSd[e] > 0) ? hrSdScale?.z(hrSd[e]) : null;
 
-    // Weighted mean over the axes that are actually MEASURABLE this epoch, so
-    // a night with no usable RR falls back to the hrSd axis alone instead of
-    // silently scoring every epoch as if the missing axes voted "no".
-    double? score(List<(double?, double)> terms) {
-      var num = 0.0, den = 0.0;
-      for (final (z, w) in terms) {
-        if (z == null || z.isNaN) continue;
-        num += z * w;
-        den += w.abs();
-      }
-      return den == 0 ? null : num / den;
-    }
+    final score = weightedAxisScore;
 
     final remScore = score([
       (rkZ, _wRemRk),
@@ -892,6 +1226,8 @@ CardioStagerResult classifyCardioEpochs(
       (sdnnZ, -_wDeepSdnn),
       (lfhfZ, -_wDeepLfhf),
     ]);
+    remScores[e] = remScore;
+    deepScores[e] = deepScore;
 
     // Atonia and the HR floor are RETAINED as gates, not folded into the score:
     // they are not weak evidence for REM, they are preconditions. A large
@@ -985,7 +1321,24 @@ CardioStagerResult classifyCardioEpochs(
     ),
     deepFlag,
     conf,
+    remScores: remScores,
+    deepScores: deepScores,
+    hrCovered: [for (var e = 0; e < nEpoch; e++) !hr[e].isNaN],
   );
+}
+
+/// Weighted mean of robust-z axis terms over the axes that are actually
+/// MEASURABLE this epoch, so a night with no usable RR falls back to the hrSd
+/// axis alone instead of silently scoring every epoch as if the missing axes
+/// voted "no". Null when no axis is measurable. Shared with [CausalStager].
+double? weightedAxisScore(List<(double?, double)> terms) {
+  var num = 0.0, den = 0.0;
+  for (final (z, w) in terms) {
+    if (z == null || z.isNaN) continue;
+    num += z * w;
+    den += w.abs();
+  }
+  return den == 0 ? null : num / den;
 }
 
 /// Honest "cannot stage this window" result: NO epochs, no deep flags, zero
@@ -1071,7 +1424,26 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   final mid = (s + t) ~/ 2;
   if (mid >= accel.length) return empty;
   final centreMs = accel[mid].tsMs;
-  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
+  return cleanRrBeatsBetween(
+      rrMs, rrTsMs, centreMs - halfWinMs, centreMs + halfWinMs);
+}
+
+/// The physiologic-gated RR beats whose time falls in `[loMs, hiMs]`
+/// (INCLUSIVE at both ends), with each beat's time rebased to [loMs] in seconds.
+///
+/// The body of [_cleanBeatsInWindow], lifted out so [CausalStager] gathers its
+/// trailing windows through the SAME gate (300-2000 ms, successive jump
+/// <= 200 ms) instead of a second copy. [rrTsMs] must be non-decreasing and the
+/// same length as [rrMs]; an empty or mismatched pair yields no beats.
+({List<double> beats, List<double> tsSec, List<bool> seam}) cleanRrBeatsBetween(
+  List<double> rrMs,
+  List<double> rrTsMs,
+  double loMs,
+  double hiMs,
+) {
+  const empty = (beats: <double>[], tsSec: <double>[], seam: <bool>[]);
+  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
+  final lo = loMs, hi = hiMs;
   // [rrTsMs] is ascending, so lower-bound into it and stop at the far edge
   // instead of walking every beat of the night once per epoch per feature.
   //
@@ -1266,8 +1638,15 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   // one; see [_cleanBeatsInWindow].
   final win =
       _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: 90 * 1000);
-  final beats = win.beats; // clean RR (ms)
-  final beatTsSec = win.tsSec; // matching beat times (s), rebased to window
+  return remFeaturesFromBeats(win.beats, win.tsSec, win.seam);
+}
+
+/// LF/HF and R(k) from already-gated beats ([beats] in ms, [beatTsSec] their
+/// times in seconds, any common origin, [seam] as [cleanRrBeatsBetween] marks
+/// it). The numeric half of [_windowRemFeatures], shared with [CausalStager];
+/// nulls when fewer than 16 beats (the spectral stability gate).
+({double? lfhf, double? rk}) remFeaturesFromBeats(
+    List<double> beats, List<double> beatTsSec, List<bool> seam) {
   if (beats.length < 16)
     return (lfhf: null, rk: null); // spectral stability gate
   // R(k): mean absolute successive difference of instantaneous HR (bpm).
@@ -1276,7 +1655,7 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   double? prevIhr;
   for (var k = 0; k < beats.length; k++) {
     final ihr = 60000.0 / beats[k];
-    if (prevIhr != null && !win.seam[k]) {
+    if (prevIhr != null && !seam[k]) {
       rkSum += (ihr - prevIhr).abs();
       rkCnt++;
     }

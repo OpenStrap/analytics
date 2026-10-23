@@ -17,9 +17,11 @@
 // HONESTY: anchor circadian phase on the nocturnal trough (L5), never the
 // daytime peak — L5 is the trough-anchored marker the catalog requires.
 
-import 'dart:math' as math;
+import 'dart:typed_data';
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
+import 'circadian_np_aggregator.dart';
 
 class CircadianNp {
   final double interdailyStability; // IS
@@ -60,112 +62,11 @@ Metric<CircadianNp> circadianNonparametric(
   int? m10Epochs,
   int? l5Epochs,
 }) {
-  const inputs = ['activity_or_hr_epochs'];
-  final n = x.length;
-  if (epochsPerDay <= 0 || n < epochsPerDay) {
-    return const Metric<CircadianNp>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'need ≥1 full day of epochs for circadian metrics',
-    );
-  }
-  // M10 = 10 h, L5 = 5 h scaled to the epoch resolution.
-  final mEp = m10Epochs ?? (epochsPerDay * 10 ~/ 24);
-  final lEp = l5Epochs ?? (epochsPerDay * 5 ~/ 24);
-
-  final grand = mean(x)!;
-  var ssTot = 0.0;
-  for (final v in x) {
-    final d = v - grand;
-    ssTot += d * d;
-  }
-  if (ssTot == 0) {
-    return const Metric<CircadianNp>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'no variance in activity series',
-    );
-  }
-
-  // IS: between-epoch-of-day variance vs total variance.
-  final p = epochsPerDay;
-  final hourMeans = List<double>.filled(p, 0);
-  final hourCounts = List<int>.filled(p, 0);
-  for (var i = 0; i < n; i++) {
-    final h = i % p;
-    hourMeans[h] += x[i];
-    hourCounts[h]++;
-  }
-  for (var h = 0; h < p; h++) {
-    if (hourCounts[h] > 0) hourMeans[h] /= hourCounts[h];
-  }
-  var ssHour = 0.0;
-  for (var h = 0; h < p; h++) {
-    final d = hourMeans[h] - grand;
-    ssHour += d * d;
-  }
-  final is_ = (n * ssHour) / (p * ssTot);
-
-  // IV: mean-squared successive difference vs variance.
-  var ssDiff = 0.0;
-  for (var i = 1; i < n; i++) {
-    final d = x[i] - x[i - 1];
-    ssDiff += d * d;
-  }
-  final iv = (n * ssDiff) / ((n - 1) * ssTot);
-
-  // M10 / L5: best contiguous window over the AVERAGE day profile (hourMeans),
-  // circularly, so a window straddling midnight is allowed.
-  final m10 = _bestWindow(hourMeans, mEp, maximize: true);
-  final l5 = _bestWindow(hourMeans, lEp, maximize: false);
-  final ra = (m10.value + l5.value) > 0
-      ? (m10.value - l5.value) / (m10.value + l5.value)
-      : 0.0;
-
-  final days = n / epochsPerDay;
-  final conf = (days / 7.0).clamp(0.3, 0.95);
-  return Metric<CircadianNp>(
-    value: CircadianNp(
-      interdailyStability: is_.clamp(0, 1),
-      intradailyVariability: math.max(0, iv),
-      m10: m10.value,
-      l5: l5.value,
-      relativeAmplitude: ra.clamp(0, 1),
-      m10StartEpoch: m10.start,
-      l5StartEpoch: l5.start,
-    ),
-    confidence: conf,
-    tier: Tier.high,
-    inputs_used: inputs,
-    note: 'IS/IV/RA/L5/M10 (van Someren 1999); circadian phase anchored on the '
-        'L5 nocturnal trough, not the daytime peak',
-  );
-}
-
-class _Window {
-  final double value;
-  final int start;
-  const _Window(this.value, this.start);
-}
-
-/// Best (max or min) mean over a contiguous circular window of length [w].
-_Window _bestWindow(List<double> profile, int w, {required bool maximize}) {
-  final p = profile.length;
-  if (w >= p) {
-    return _Window(mean(profile) ?? 0, 0);
-  }
-  double? best;
-  var bestStart = 0;
-  for (var s = 0; s < p; s++) {
-    var sum = 0.0;
-    for (var k = 0; k < w; k++) {
-      sum += profile[(s + k) % p];
-    }
-    final m = sum / w;
-    if (best == null || (maximize ? m > best : m < best)) {
-      best = m;
-      bestStart = s;
-    }
-  }
-  return _Window(best ?? 0, bestStart);
+  // Runs [circadianNpAggregator] over the whole series in one slice. IS is the
+  // between-epoch-of-day variance over the total variance, IV the mean-squared
+  // successive difference over the variance, and M10 / L5 the best circular
+  // window over the average day profile (so a window may straddle midnight).
+  return circadianNpAggregator(epochsPerDay,
+          m10Epochs: m10Epochs, l5Epochs: l5Epochs)
+      .run(EpochSeries(Float64List.fromList(x)));
 }
