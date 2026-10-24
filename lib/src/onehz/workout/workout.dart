@@ -5,7 +5,8 @@
 ///
 ///   * [AutoWorkoutDetector] — opt-in "did you just work out?" SUGGESTION
 ///     detector (HR ≥ max(RHR+40, RHR+0.45·HRR) sustained ≥12 min, brief dips
-///     tolerated, optional motion confirmation, overlap-excluded). Never writes
+///     tolerated, rests ≤15 min bridged while HR stays above RHR+0.15·HRR,
+///     optional motion confirmation, overlap-excluded). Never writes
 ///     a row, and is the ONLY bout detector here. → auto_detect.dart
 ///   * [Calories] — Keytel 2005 + Harris–Benedict per-bout energy. → calories.dart
 ///
