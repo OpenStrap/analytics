@@ -21,7 +21,7 @@
 /// physically impossible on the 1 Hz substrate (Nyquist 0.5 Hz < gait
 /// 1.4–2.5 Hz), so:
 ///   * [livePedometer] counts REAL steps on the ~100 Hz foreground accel
-///     (R10 / 0x2B) — adaptive-threshold peak detection (AN-2554 family).
+///     (R10 / 0x2B) — stride-periodicity gait detection + measured cadence.
 ///   * [dailyActiveMinutes] reports MINUTES OF SUSTAINED WRIST MOVEMENT from
 ///     the 1 Hz substrate — the only quantity resolvable there — and emits NO
 ///     step count: at the wrist, arm work out-accelerates walking, so movement

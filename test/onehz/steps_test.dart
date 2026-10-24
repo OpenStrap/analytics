@@ -123,44 +123,60 @@ void main() {
     });
   });
 
-  // These pin the numbers the 2026-08-16 audit measured, so the +10.6% gain
-  // cannot be re-derived from a comment and the physiological interval bounds
-  // cannot be quietly dropped again. Every expectation below is a MEASUREMENT
-  // of the shipping algorithm, not a target.
-  group('Tier A — the gain is 1.00 and the raw count is already exact', () {
+  // Every expectation below is a MEASUREMENT of the shipping algorithm, not a
+  // target. Synthetic gait is the easy case; the real-world numbers are the
+  // OxWalk block further down.
+  group('Tier A — synthetic gait is counted from the measured cadence', () {
+    int stepsAt(double spm, double durationS,
+        {double amp = 0.25, double fs = 100, double? tellRate}) {
+      final (x, y, z) = _walk(durationS, spm / 60.0, fs: fs, ampG: amp);
+      return livePedometer(x, y, z, sampleRateHz: tellRate ?? fs).steps;
+    }
+
     test('gain is 1.00 — the default is not a population fudge factor', () {
-      // Was 1.11, claiming to fix "raw 90 -> ~100". Measured, it manufactured
-      // a +10.6% over-count on gait the raw counter already got right.
+      // Was 1.11 once and manufactured a +10.6% over-count.
       expect(StepParams.gain, 1.00);
     });
 
-    test('raw/truth is 1.00 at 60, 80, 100, 120, 140 and 180 spm', () {
-      // The whole basis for removing the gain: there is no under-count to
-      // correct anywhere in the human cadence range. Exact figures measured on
-      // 300 s of _walk at 0.25 g, 100 Hz.
-      for (final (spm, want) in const [
-        (60, 299),
-        (80, 399),
-        (100, 498),
-        (120, 598),
-        (140, 698),
-        (180, 898),
-      ]) {
-        final truth = (300 * spm / 60).round();
-        final (x, y, z) = _walk(300.0, spm / 60.0);
-        final got = livePedometer(x, y, z).steps;
-        expect(got, want, reason: '$spm spm');
-        expect(got / truth, closeTo(1.00, 0.005), reason: '$spm spm raw/truth');
+    test('raw/truth is 1.00 from 70 to 220 spm', () {
+      for (final spm in const [70, 80, 100, 120, 140, 180, 220]) {
+        final truth = 300 * spm / 60;
+        final got = stepsAt(spm.toDouble(), 300);
+        expect(got / truth, closeTo(1.00, 0.01), reason: '$spm spm');
       }
     });
 
-    test('the residual deficit is a FLAT -0.9% chunk-boundary loss, not a gain',
-        () {
+    test('the documented misreads at both ends of the cadence band', () {
+      // Slower than ~67 spm with ONLY a step fundamental (P >= strideS) is
+      // read as a stride: 40 spm counts double. Real wrists swing the arm
+      // once per stride, and on OxWalk this population was empty — but a
+      // synthetic signal hits it, so it is pinned rather than hidden.
+      expect(stepsAt(40, 300), 400);
+      // Below that, no periodicity inside the peak band: nothing counted.
+      expect(stepsAt(25, 300), 0);
+      // A 300 spm sprint's step period (0.2 s) is under StepParams.stepLoS,
+      // so the stride (0.4 s) is taken as the step: half the true count. A
+      // documented limit — the edge never lets the strap count sprints.
+      expect(stepsAt(300, 120), 300);
+    });
+
+    test('rate-agnostic: 50 Hz and 25 Hz count like 100 Hz', () {
+      // The old counter's constants were in SAMPLES and it read ~8% of truth
+      // at 25 Hz (OxWalk). Every constant is in seconds now.
+      expect(stepsAt(110, 300, fs: 50) / 550, closeTo(1.0, 0.01));
+      expect(stepsAt(110, 300, fs: 25) / 550, closeTo(1.0, 0.02));
+    });
+
+    test('a mislabelled rate barely moves the count inside the band', () {
+      // Duration and step period both scale with the assumed rate, so their
+      // ratio — the count — does not. Only the 60-240 spm band edges shift.
+      expect(
+          stepsAt(110, 300, fs: 50, tellRate: 100) / 550, closeTo(1.0, 0.02));
+    });
+
+    test('per-minute chunking costs at most a few steps per boundary', () {
       // still -> N steps at 110 spm -> still, counted in 60 s chunks the way
-      // calcSteps does. A gain error would scale with N and an offset would
-      // shrink with it; this does neither, because it is ~2 steps lost per
-      // minute boundary while the state machine re-earns CONFIRM. It is 0.9%,
-      // it is known, and it is deliberately not chased.
+      // calcSteps and the edge's live path do.
       int chunked(int n) {
         final walkS = n / (110 / 60.0);
         final (wx, wy, wz) = _walk(walkS, 110 / 60.0);
@@ -177,118 +193,80 @@ void main() {
         return calcSteps(minutes);
       }
 
-      expect(chunked(100), 100); // one chunk, no boundary, no loss
-      expect(chunked(1000), 991); // -0.9%
-      expect(chunked(10000), 9910); // -0.9% — flat, 10x the bout
+      expect(chunked(1000) / 1000, closeTo(1.0, 0.02));
+      expect(chunked(10000) / 10000, closeTo(1.0, 0.02));
+    });
+
+    test('a walk shorter than the minimum run is not credited', () {
+      // StepParams.minRun seconds of periodic signal is what makes it gait.
+      expect(stepsAt(120, 5), 0);
+      expect(stepsAt(120, 20), inInclusiveRange(36, 42));
+    });
+
+    test('one weak footfall does not reset the run', () {
+      // The old counter dropped its whole confirm run on one sub-threshold
+      // pair — the main reason it under-counted real walking.
+      final (x, y, z) = _walk(60, 2.0);
+      for (var i = 3000; i < 3050; i++) {
+        z[i] = 1.0; // ~half a step flattened
+      }
+      expect(livePedometer(x, y, z).steps, inInclusiveRange(114, 122));
     });
   });
 
-  group('Tier A — step-interval bounds (0.2-2.0 s, from AN-2554)', () {
-    int stepsAt(double spm, double durationS,
-        {double amp = 0.30, double fs = 100, double? tellRate}) {
-      final (x, y, z) = _walk(durationS, spm / 60.0, fs: fs, ampG: amp);
-      return livePedometer(x, y, z, sampleRateHz: tellRate ?? fs).steps;
-    }
-
-    test('the bounds are the ones the note states, and they are named', () {
-      expect(StepParams.minStepIntervalS, 0.2); // max ~5 steps/s
-      expect(StepParams.maxStepIntervalS, 2.0); // min ~0.5 steps/s
-    });
-
-    test('faster than 5 steps/s is rejected outright', () {
-      // PRE-FIX these counted at raw/truth 1.00 (320 spm -> 638/640) and 0.95
-      // (350 spm -> 666/700): nothing bounded the rhythm, and the only thing
-      // that eventually broke lock was the width of the centred peak window.
-      expect(stepsAt(305, 120), 0);
-      expect(stepsAt(320, 120), 0);
-      expect(stepsAt(350, 120), 0);
-    });
-
-    test('the ceiling sits exactly at the stated 5 steps/s, not below it', () {
-      // A sprint cadence a human can actually produce must still count — the
-      // guard is physiology, not a convenient way to lose the hard cases.
-      expect(stepsAt(250, 120), 498);
-      expect(stepsAt(300, 120), 598);
-    });
-
-    test('40 spm still counts — it is inside physiology, so nothing rejects it',
-        () {
-      // The audit flagged "1.00 at 40 spm with no floor". 40 spm is 0.67
-      // steps/s, above the note's 0.5 steps/s minimum, so the correct floor
-      // does NOT reject it. Pinning that so the bound does not get tightened
-      // into a slow-walk deleter.
-      expect(stepsAt(40, 600, fs: 50), 399);
-    });
-
-    test('slower than 0.5 steps/s is rejected — at the buffer\'s REAL rate', () {
-      // This is the case that proves the bounds are computed from the sample
-      // rate rather than a hardcoded 100. `maxMinTimeout` is 120 SAMPLES, so
-      // it already covers the slow end at 100 Hz but stretches to 2.4 s at
-      // 50 Hz and lets 20-28 spm through. Told the truth, the 2.0 s bound
-      // rejects them; told "100 Hz" about a 50 Hz buffer, the same signal
-      // reads a full 250 steps.
-      expect(stepsAt(25, 600, fs: 50), 0);
-      expect(stepsAt(28, 600, fs: 50), 0);
-      expect(stepsAt(25, 600, fs: 50, tellRate: 100), 250);
-    });
-
-    test('the bounds cost nothing inside the walking band', () {
-      // The guards must not pay for themselves with real steps.
-      expect(stepsAt(110, 600, fs: 50, amp: 0.25), 1098);
-      expect(stepsAt(120, 300, amp: 0.25), 598);
-    });
-  });
-
-  // ── OxWalk: the first ground truth this counter has ever met ──────────────
+  // ── OxWalk: real free-living wrist ground truth ───────────────────────────
   //
-  // Measured 2026-08-17 with `dart run tool/oxwalk_validate.dart` against
+  // Measured 2026-10-23 with `dart run tool/oxwalk_validate.dart` against
   // OxWalk (Small, von Fritsch, Doherty, Khalid, Price; Oxford, Dec 2022,
   // CC BY) — 39 adults, unscripted free living, dominant wrist + hip, camera
-  // ground truth. Chunked exactly as production does (`_minuteSamples = 6000`).
-  // Full write-up: edge/docs/internal/OXWALK_VALIDATION.md.
+  // ground truth. Chunked exactly as production does (60 s), raw, gain 1.00.
   //
-  //   Wrist 100 Hz   MAPE 33.0%   bias -13.6%   median -19.5%   totals -19.8%
-  //                  per-participant ratio 0.33 - 3.00, only 5/39 within +-10%
-  //   Hip   100 Hz   MAPE 29.5%   bias -29.2%   totals -17.6%
-  //   Wrist  25 Hz   MAPE 91.9%                 totals -87.5%   <- dead
-  //   Hip    25 Hz   MAPE 94.5%                 totals -93.6%   <- dead
-  //   rate cliff (100 Hz wrist decimated): 50 Hz -27.0%, 33 Hz -60.1%,
-  //                                        25 Hz -86.5%, 20 Hz -89.9%
-  //   chunk sweep (wrist 100 Hz, MAPE):  25 s 37.4 | 30 s 34.5 | 60 s 33.0
-  //                                      | 2 min 34.3 | 5 min 37.7 | 1 h 55.1
-  //   best single gain 1.18 -> MAPE 27.9% (from 33.0%). Not applied: the error
-  //   is not multiplicative — see the doc.
+  //                  previous peak counter     this counter
+  //   Wrist 100 Hz   MAPE 33.0%  5/39 ±10%     MAPE 16.7%  21/39 ±10%
+  //                  walkers bias -25.4%       walkers bias -10.4%
+  //                  totals -19.8%             totals -7.3%
+  //   Wrist  50 Hz   MAPE 33.6%                MAPE 16.9%   (/2 decimated)
+  //   Wrist  25 Hz   MAPE 91.9%  <- dead       MAPE 17.3%
+  //   Hip   100 Hz   MAPE 29.5%                MAPE 17.6%
+  //   worst over-count: P28 (rhythmic arm work) 258 true -> 696 counted
+  //   chunking cost: -2.4% vs one contiguous buffer
   //
-  // The dataset is 290 MB and is deliberately not committed, so nothing here
-  // re-measures it. What this pins is the CONFIGURATION those numbers describe:
-  // change any of it and the recorded numbers are stale, which is exactly when
-  // you want to be told.
-  group('Tier A — OxWalk-measured configuration (2026-08-17)', () {
+  // The gate thresholds (ampG, regHi, regLo, minRun) were chosen by grid
+  // search with leave-one-participant-out validation: the held-out MAPE was
+  // 17.5%, and 38 of 39 folds picked this same configuration.
+  //
+  // The dataset is 290 MB and deliberately not committed, so nothing here
+  // re-measures it. What this pins is the CONFIGURATION those numbers describe.
+  group('Tier A — OxWalk-measured configuration (2026-10-23)', () {
     test('the parameters OxWalk was measured against have not moved', () {
-      const why = 'OxWalk numbers in edge/docs/internal/OXWALK_VALIDATION.md '
-          'were measured against this exact configuration. If you changed it '
-          'deliberately, re-run tool/oxwalk_validate.dart on the 39 '
-          'participants and update BOTH the doc and this test.';
+      const why = 'The OxWalk numbers above were measured against this exact '
+          'configuration. If you changed it deliberately, re-run '
+          'tool/oxwalk_validate.dart on the 39 participants and update the '
+          'numbers here and in StepParams.';
       expect(StepParams.gain, 1.00, reason: why);
-      expect(StepParams.sens, 0.10, reason: why);
-      expect(StepParams.confirm, 8, reason: why);
-      expect(StepParams.filter, 8, reason: why);
-      expect(StepParams.window, 33, reason: why);
-      expect(StepParams.thrOrder, 4, reason: why);
-      expect(StepParams.maxMinTimeout, 120, reason: why);
-      expect(StepParams.minStepIntervalS, 0.2, reason: why);
-      expect(StepParams.maxStepIntervalS, 2.0, reason: why);
+      expect(StepParams.winS, 4.0, reason: why);
+      expect(StepParams.hopS, 1.0, reason: why);
+      expect(StepParams.decimateAboveHz, 50, reason: why);
+      expect(StepParams.lagLoS, 0.2, reason: why);
+      expect(StepParams.lagHiS, 2.0, reason: why);
+      expect(StepParams.peakLoS, 0.25, reason: why);
+      expect(StepParams.peakHiS, 1.6, reason: why);
+      expect(StepParams.harmonic, 0.8, reason: why);
+      expect(StepParams.strideS, 0.9, reason: why);
+      expect(StepParams.halfAc, -0.4, reason: why);
+      expect(StepParams.stepLoS, 0.25, reason: why);
+      expect(StepParams.stepHiS, 1.0, reason: why);
+      expect(StepParams.ampG, 0.04, reason: why);
+      expect(StepParams.regHi, 0.6, reason: why);
+      expect(StepParams.regLo, 0.2, reason: why);
+      expect(StepParams.minRun, 8, reason: why);
     });
 
-    test('gain stays 1.00 — OxWalk found no single multiplier that works', () {
-      // Tempting and wrong. 1.18 minimises MAPE across the 39 and recovers only
-      // 5 points of a 33-point error, and the sign of the error FLIPS with
-      // activity level: participants with >=600 true steps/h under-count by a
-      // uniform -25.4%, while the 17 with <600 average +1.7% bias around a
-      // 42.9% MAPE because two of them over-count by 3x (P18: 217 true, 650
-      // counted; P28: 258 true, 685 counted). Multiplying by 1.18 improves the
-      // walkers slightly and pushes those two from +200%/+166% to +254%/+214%.
-      // A gain cannot fix an error whose sign depends on the input.
+    test('gain stays 1.00 — a population multiplier is not a calibration', () {
+      // OxWalk's best single gain is 1.03 (MAPE 16.7% -> 15.7%), inside the
+      // noise of 39 participants, and the residual error is not
+      // multiplicative: the 45-81 age band is near zero bias while the others
+      // under-count ~7%.
       expect(StepParams.gain, 1.00);
     });
   });
@@ -869,8 +847,8 @@ void main() {
     test('#43: the day and the bout bill the same minute the same way', () {
       // They used to disagree by 8–35 bpm: the day gated at 0.65·HRmax, the
       // bout at rest + 0.30·HRR. Same stream, same minute, two answers.
-      const profile = WorkoutUserProfile(
-          weightKg: 72, heightCm: 178, age: 34, sex: 'male');
+      const profile =
+          WorkoutUserProfile(weightKg: 72, heightCm: 178, age: 34, sex: 'male');
       const hrmax = 184.2, rhr = 55.0;
       final gate = Calories.activeGateHr(hrmax, rhr)!;
       expect(gate, closeTo(106.68, 0.01));
@@ -914,8 +892,8 @@ void main() {
       // CADENCE-Adults publishes the cadence↔MET line for exactly this
       // region. Minutes the HR gate refuses are billed from cadence instead —
       // never both, and never from a cadence nobody measured.
-      const profile = WorkoutUserProfile(
-          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const profile =
+          WorkoutUserProfile(weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       const hrmax = 190.0, rhr = 60.0;
       final basalPerMin =
           Calories.mifflinBmrKcalDay(80, 180, 30, 'male') / 1440.0;
@@ -1034,8 +1012,8 @@ void main() {
       // `hr < NaN` is false for EVERY hr — so the day used to bill every single
       // minute at the Keytel active rate and publish a silently enormous kcal
       // figure instead of failing visibly.
-      const profile = WorkoutUserProfile(
-          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const profile =
+          WorkoutUserProfile(weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       final hr = List<double>.filled(1440, 70.0);
       final ts = List<int>.generate(60, (i) => i);
 
@@ -1070,8 +1048,8 @@ void main() {
     });
 
     test('a non-finite HR sample is dropped, not billed', () {
-      const profile = WorkoutUserProfile(
-          weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const profile =
+          WorkoutUserProfile(weightKg: 80, heightCm: 180, age: 30, sex: 'male');
       final clean = List<double>.filled(60, 150.0);
       final dirty = [...clean, double.nan, double.infinity];
       final a = Calories.dailyEnergy(clean,
