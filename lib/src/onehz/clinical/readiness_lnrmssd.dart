@@ -17,12 +17,16 @@ import '../util.dart';
 class ReadinessLnRmssd {
   final double lnRmssdToday;
   final double rolling7Mean;
+
   /// The window's MEDIAN — the centre z/SWC/band are taken against.
   final double rolling7Median;
   final double cvPct; // CV of lnRMSSD over the window
   final double? z; // (today - rollingMedian)/robustSD
   final double? swc; // smallest worthwhile change (0.5×robust SD, Plews-style)
-  final String band; // 'suppressed' | 'normal' | 'elevated' (tonight vs centre ± 1 spread)
+  /// 'suppressed' | 'normal' | 'elevated': tonight against centre ± spread ×
+  /// [_lnRmssdBandWidening] of the prior-window size (wider than ± 1 spread on
+  /// short windows, see that function).
+  final String band;
   final bool saturationFlag;
   const ReadinessLnRmssd({
     required this.lnRmssdToday,

@@ -114,8 +114,8 @@ foundation layers:
 - **`wellness/`** — the canonical composite readiness score, multivariate (Mahalanobis)
   anomaly detection, CUSUM changepoint detection, temperature-based illness flagging.
 - **`human/`** — sleep regularity index, social jetlag/chronotype, single-night event
-  detection (never names a specific cause — more on that below), percentile-of-you/
-  personal records, and the deterministic coaching layer.
+  detection (never names a specific cause — more on that below), percentile-of-you,
+  and the deterministic coaching layer.
 
 ## The rule that matters most: never name a cause
 
