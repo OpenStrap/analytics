@@ -88,8 +88,20 @@ Metric<PrsaResult> _prsa(
   List<num>? nnTimesMs,
 }) {
   final kind = deceleration ? 'DC' : 'AC';
-  final inputs = const ['rr_cleaned'];
   final n = nnMs.length;
+  final inputs = nnTimesMs == null
+      ? const ['rr_cleaned']
+      : const ['rr_cleaned', 'beat_times'];
+  // Beat times that do not line up with the intervals cannot place a seam, and
+  // falling back to the untimed path would anchor across exactly the holes
+  // the caller passed them to guard against.
+  if (nnTimesMs != null && nnTimesMs.length != n) {
+    return Metric<PrsaResult>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: 'PRSA ($kind): beat times not aligned with intervals',
+    );
+  }
   if (l < 2) {
     // Bauer 2006 quantifies PRSA with the Haar contrast at wavelet scale s = 2:
     // DC = [X(0) + X(1) − X(−1) − X(−2)]/4, which needs TWO profile points on
@@ -118,12 +130,15 @@ Metric<PrsaResult> _prsa(
   // such pair used to anchor on its own and publish a DC built from beats an
   // hour apart. Same seam test as hrv_time.dart: a pair is contiguous iff the
   // elapsed time between the two beat times is the interval itself.
-  final gapAware = nnTimesMs != null && nnTimesMs.length == n;
-  // seamBefore[j] = the step from beat j-1 to beat j crosses a hole.
+  final gapAware = nnTimesMs != null;
+  // seamBefore[j] = the step from beat j-1 to beat j crosses a hole. A beat
+  // time that runs backwards is a break in the record too; equal times are
+  // left contiguous (whole-second source clocks repeat them).
   final seamBefore = List<bool>.filled(n, false);
   if (gapAware) {
     for (var j = 1; j < n; j++) {
-      seamBefore[j] = nnTimesMs[j] - nnTimesMs[j - 1] > nnMs[j] + 0.5;
+      final dt = nnTimesMs[j] - nnTimesMs[j - 1];
+      seamBefore[j] = dt < 0 || dt > nnMs[j] + 0.5;
     }
   }
   final anchors = <int>[];

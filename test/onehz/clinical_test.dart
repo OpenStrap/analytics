@@ -1060,6 +1060,47 @@ void main() {
       expect(dc.present, isFalse);
       expect(dc.note, contains('no valid PRSA anchors'));
     });
+    // Two steady runs whose only deceleration is the pair joining them, so DC
+    // is present exactly when that pair is allowed to anchor.
+    (List<double>, List<double>) twoRuns({required double jumpMs}) {
+      final rr = <double>[], ts = <double>[];
+      var t = 1.7e12;
+      for (var i = 0; i < 600; i++) {
+        t += 1000;
+        rr.add(1000);
+        ts.add(t);
+      }
+      t += jumpMs;
+      for (var i = 0; i < 600; i++) {
+        t += 1040;
+        rr.add(1040);
+        ts.add(t);
+      }
+      return (rr, ts);
+    }
+
+    test('REGRESSION: beat times that run backwards are a seam', () {
+      final (rr, ts) = twoRuns(jumpMs: -60 * 60 * 1000);
+      expect(decelerationCapacity(rr).present, isTrue);
+      final dc = decelerationCapacity(rr, nnTimesMs: ts);
+      expect(dc.present, isFalse);
+      expect(dc.note, contains('no valid PRSA anchors'));
+    });
+    test('REGRESSION: misaligned beat times abstain instead of going untimed',
+        () {
+      final (rr, ts) = twoRuns(jumpMs: 40 * 60 * 1000);
+      final dc = decelerationCapacity(rr, nnTimesMs: ts.sublist(1));
+      expect(dc.present, isFalse);
+      expect(dc.note, contains('not aligned'));
+      expect(
+          accelerationCapacity(rr, nnTimesMs: ts.sublist(1)).present, isFalse);
+    });
+    test('beat times are reported in inputs_used when they are used', () {
+      final (rr, ts) = twoRuns(jumpMs: 0);
+      expect(decelerationCapacity(rr).inputs_used, ['rr_cleaned']);
+      expect(decelerationCapacity(rr, nnTimesMs: ts).inputs_used,
+          ['rr_cleaned', 'beat_times']);
+    });
     test('beat times on a contiguous record change nothing', () {
       final rr = <double>[
         for (var i = 0; i < 400; i++) 1000 + 20 * math.sin(2 * math.pi * i / 20)
