@@ -489,6 +489,18 @@ void main() {
       expect(early.note, 'need_baseline:have=3,need=$personalDynFloorMinDays');
     });
 
+    test(
+        'REGRESSION: an unusable floor past the history gate is not a met '
+        'need_baseline note', () {
+      for (final floor in [double.nan, 0.0, null]) {
+        final m = dailyActiveMinutes(day(120, 30),
+            personalDynFloorG: floor,
+            historyDaysAvailable: enrollmentDaysForFrozenFloor + 6);
+        expect(m.present, isFalse);
+        expect(m.note, isNot(startsWith('need_baseline')), reason: '$floor');
+      }
+    });
+
     test('an off-wrist HOUR between moving minutes does not make one bout', () {
       // an-motion-2. Four isolated moving minutes an hour apart. enmoSeries
       // emits NO MotionMinute for a fully-absent minute, so the old test

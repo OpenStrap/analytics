@@ -764,10 +764,15 @@ Metric<DailyMovementEstimate> dailyActiveMinutes(
     return Metric<DailyMovementEstimate>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: needBaselineNote(
-        have: historyDaysAvailable,
-        need: requiredHistoryDays,
-      ),
+      // With the history gate already met, a missing or unusable floor is
+      // not a baseline shortfall; a met `need_baseline` note would read as
+      // "unlocked" on a metric that is still absent.
+      note: historyDaysAvailable < requiredHistoryDays
+          ? needBaselineNote(
+              have: historyDaysAvailable,
+              need: requiredHistoryDays,
+            )
+          : 'no usable personal movement floor',
     );
   }
   // NO CEILING. A `floor x 3` upper bound used to reject "vigorous non-gait"
