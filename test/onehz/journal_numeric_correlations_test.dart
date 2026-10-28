@@ -82,6 +82,23 @@ void main() {
   });
 
   group('journalNumericCorrelations', () {
+    test('REGRESSION: fdrAlpha 0 admits nothing instead of throwing', () {
+      final dates = _dates(12);
+      final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6];
+      final out = journalNumericCorrelations(
+        fieldLagDays: const {},
+        journal: [
+          for (var i = 0; i < dates.length; i++)
+            JournalNumericDay(dates[i], {'caffeine': caffeine[i]}),
+        ],
+        dates: dates,
+        outcomes: {
+          'rmssd': [for (final c in caffeine) 80.0 - 6 * c]
+        },
+        fdrAlpha: 0,
+      );
+      expect(_effect(out, 'caffeine', 'rmssd').meaningful, isFalse);
+    });
     test('finds a strong monotone relationship and signs it correctly', () {
       final dates = _dates(12);
       final caffeine = <double>[1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6];

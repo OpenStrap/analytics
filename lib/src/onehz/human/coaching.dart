@@ -1132,8 +1132,11 @@ List<JournalNumericCorrelation> journalNumericCorrelations({
   // note that no amount of logging could satisfy, since that term does not
   // depend on n. 2m/alpha keeps the sampling floor at half the BH budget, and
   // the cap only bounds the cost for a journal with hundreds of fields.
+  // A non-positive alpha admits nothing, and 2m/0 is not a shuffle count
+  // (ceil() of infinity throws), so it takes the cap.
+  final want = fdrAlpha > 0 ? 2 * m / fdrAlpha : double.infinity;
   final b = math.max(
-      permutations, math.min(_maxPermutations, (2 * m / fdrAlpha).ceil()));
+      permutations, want >= _maxPermutations ? _maxPermutations : want.ceil());
   final ps = [for (final r in rows) r.pAt?.call(b)];
   final qs = benjaminiHochberg(ps);
   final byField = <String, List<JournalNumericEffect>>{};
