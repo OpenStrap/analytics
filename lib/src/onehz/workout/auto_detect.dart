@@ -4,8 +4,8 @@
 // DELIBERATELY conservative (low sensitivity): a sustained ≥12-min elevation of
 // HR ≥ max(RHR+[elevatedMarginBPM], RHR+[hrrFloorFraction]·HRR) — RHR+59 at
 // RHR 60 / HRmax 190 — brief (≤90 s) dips tolerated, near windows merged,
-// rests of up to 15 min bridged while HR stays above resting (see
-// [restBridgeMaxS]), optional motion confirmation, overlap-excluded against
+// observed rests of up to 15 min bridged when their mean HR stays above
+// resting (see [restBridgeMaxS]), optional motion confirmation, overlap-excluded against
 // saved spans.
 // (The header and the note used to quote "RHR+30", the margin this detector
 // deliberately abandoned: see [hrrFloorFraction] for the 30 false windows on a
@@ -282,17 +282,39 @@ class AutoWorkoutDetector {
     // HRmax can't make bridging stricter than the bout definition.
     final bridgeFloor = math.min(
         floor, (rhr + restBridgeHrrFraction * (hrMax - rhr)).round());
-    final merged = <_Window>[];
-    var cur = _Window(spans[0][0], spans[0][1]);
+    // Two passes. The unconditional < mergeGapS merge runs first, exactly as
+    // it always has; bridging then works on its output. Done the other way
+    // round, a short gap after a bridge would grow the window past
+    // maxWorkoutMin with no cap check and the whole window, efforts that used
+    // to stand on their own included, would be thrown away.
+    final joined = <List<int>>[];
+    var curStart = spans[0][0], curEnd = spans[0][1];
     for (var k = 1; k < spans.length; k++) {
       final next = spans[k];
+      if (next[0] - curEnd < mergeGapS) {
+        curEnd = math.max(curEnd, next[1]);
+      } else {
+        joined.add([curStart, curEnd]);
+        curStart = next[0];
+        curEnd = next[1];
+      }
+    }
+    joined.add([curStart, curEnd]);
+
+    final merged = <_Window>[];
+    var cur = _Window(joined[0][0], joined[0][1]);
+    for (var k = 1; k < joined.length; k++) {
+      final next = joined[k];
       final gap = next[0] - cur.end;
-      if (gap < mergeGapS) {
-        cur.end = math.max(cur.end, next[1]);
-      } else if (gap <= restBridgeMaxS &&
+      if (gap <= restBridgeMaxS &&
           // Never bridge into a window maxWorkoutMin would then throw away
           // whole: two honest suggestions beat none.
           next[1] - cur.start <= maxWorkoutMin * 60 &&
+          // Nor across a saved workout: the overlap check below would drop
+          // the bridged window whole, taking the effort the user never saved
+          // with it. Kept apart, only the saved one is excluded.
+          !savedSpans.any(
+              (s) => _overlaps(cur.start, next[1], s.startSec, s.endSec)) &&
           _restBridgeHolds(ts, bpm, cur.end, next[0], bridgeFloor)) {
         cur.rests.add([cur.end, next[0]]);
         cur.end = math.max(cur.end, next[1]);

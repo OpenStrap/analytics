@@ -45,11 +45,14 @@ class _Series {
     }
   }
 
-  List<DetectedWorkout> detect() => AutoWorkoutDetector.detect(
+  List<DetectedWorkout> detect(
+          {List<SavedWorkoutSpan> savedSpans = const []}) =>
+      AutoWorkoutDetector.detect(
         hrTs: ts,
         hrBpm: bpm,
         restingBpm: _rhr,
         maxBpm: _hrMax,
+        savedSpans: savedSpans,
       );
 }
 
@@ -97,6 +100,15 @@ void main() {
           greaterThan(AutoWorkoutDetector.mergeGapS));
       expect(secondHalfStart - firstHalfEnd,
           lessThanOrEqualTo(AutoWorkoutDetector.restBridgeMaxS));
+
+      // And the detector itself splits there: span-building only sees
+      // at-gate vs below-gate, so pulling the sit-down's below-gate samples
+      // under the bridge floor leaves the spans untouched and takes away
+      // only the bridge. That must give the two halves back.
+      for (var k = 0; k < s.ts.length; k++) {
+        if (s.ts[k] > firstHalfEnd && s.ts[k] < secondHalfStart) s.bpm[k] = 70;
+      }
+      expect(s.detect(), hasLength(2));
     });
 
     test('two sessions 2 h apart stay TWO workouts', () {
@@ -160,6 +172,51 @@ void main() {
         ..flat(50, 140)
         ..flat(10, 70);
       expect(s.detect(), hasLength(2));
+    });
+
+    test('a short pause after a bridge cannot push it past maxWorkoutMin', () {
+      // 20 play / 8 sit / 60 play / 3 off / 35 play. The 3-min pause joins
+      // the last two efforts (98 min) as it always has; bridging the first
+      // one on as well would make 126 min, so it is refused and both
+      // suggestions survive instead of the whole window being dropped.
+      final s = _Series()..flat(10, 70);
+      final firstStart = s.now;
+      s.flat(20, 140);
+      final firstEnd = s.now - 1;
+      s.recover(8, 140, 90);
+      final secondStart = s.now;
+      s
+        ..flat(60, 140)
+        ..flat(3, 65)
+        ..flat(35, 140);
+      final secondEnd = s.now - 1;
+      s.flat(10, 70);
+
+      final w = s.detect();
+      expect(w, hasLength(2));
+      expect(w[0].startSec, firstStart);
+      // The first effort ends where the sit-down's recovery crosses the gate.
+      expect(w[0].endSec, inInclusiveRange(firstEnd, firstEnd + 60));
+      expect(w[1].startSec, secondStart);
+      expect(w[1].endSec, secondEnd);
+    });
+
+    test('a saved workout over one half does not hide the other half', () {
+      final s = _Series()..flat(10, 70);
+      final firstStart = s.now;
+      s.flat(20, 140);
+      final firstEnd = s.now - 1;
+      s.recover(8, 140, 90);
+      final secondStart = s.now;
+      s.flat(30, 140);
+      final secondEnd = s.now - 1;
+      s.flat(20, 70);
+
+      final w = s.detect(
+          savedSpans: [SavedWorkoutSpan(firstStart, firstEnd)]);
+      expect(w, hasLength(1));
+      expect(w.single.startSec, secondStart);
+      expect(w.single.endSec, secondEnd);
     });
 
     test('a short (< 5 min) pause still merges as before', () {
