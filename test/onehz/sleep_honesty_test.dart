@@ -601,6 +601,31 @@ void main() {
       expect(r.series.any((p) => p['t'] == onset), isFalse);
     });
 
+    test('the cycle inside an island between two RR holes is kept', () {
+      // A 90-min RMSSD rhythm with contact lost for minutes 60-89 and 250-279.
+      // The island between them holds two peaks (~112 and ~202 min). The
+      // taller one walks into a hole on both sides; it used to be skipped
+      // outright, which left the island one peak and no cycle at all.
+      const onset = _t0;
+      const nMin = 480;
+      for (var seed = 1; seed <= 6; seed++) {
+        final rnd = math.Random(seed);
+        final rr = <double>[], ts = <double>[];
+        for (var s = 0; s < nMin * 60; s++) {
+          final m = s ~/ 60;
+          if ((m >= 60 && m < 90) || (m >= 250 && m < 280)) continue;
+          final amp = 20 + 15 * math.sin(2 * math.pi * (m - 90) / 90);
+          rr.add(1000 + amp * (rnd.nextBool() ? 1 : -1) * 0.7);
+          ts.add((onset + s) * 1000.0);
+        }
+        final r = detectSleepCycles(rr, ts, onset, onset + nMin * 60);
+        final inIsland =
+            r.cycles.where((c) => c.startMin >= 90 && c.endMin < 250).toList();
+        expect(inIsland, hasLength(1), reason: 'seed $seed');
+        expect(inIsland.single.lenMin, inInclusiveRange(70, 110));
+      }
+    });
+
     test('a cycle never spans a long RR hole', () {
       // 8 h with a 90-min RMSSD rhythm, then no RR at all for minutes 100-259
       // (contact loss). Pre-fix the peak before the hole and the peak after it

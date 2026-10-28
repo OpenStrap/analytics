@@ -201,7 +201,10 @@ List<int> _findPeaks(
     if (b != null && yi <= b) continue;
     // Walk each side until a higher point, the array edge, or a hole. A side
     // that runs into a hole has no observed base beyond it, so it does not
-    // contribute to the prominence; if both sides do, there is no base at all.
+    // contribute to the prominence. When BOTH sides do, the peak is the
+    // tallest point of an island between two holes; skipping it dropped that
+    // peak and every cycle beside it, so the island's own minima stand in
+    // for the base, as they would at the array edges.
     var l = i;
     var lHole = false;
     while (l > 0) {
@@ -224,7 +227,6 @@ List<int> _findPeaks(
       if (v >= yi) break;
       r++;
     }
-    if (lHole && rHole) continue;
     var lmin = yi, rmin = yi;
     for (var k = l; k <= i; k++) {
       final v = y[k];
@@ -234,7 +236,9 @@ List<int> _findPeaks(
       final v = y[k];
       if (v != null && v < rmin) rmin = v;
     }
-    final base = lHole ? rmin : (rHole ? lmin : math.max(lmin, rmin));
+    final base = lHole == rHole
+        ? math.max(lmin, rmin)
+        : (lHole ? rmin : lmin);
     if (yi - base >= minProm) cand.add([i.toDouble(), yi]);
   }
   cand.sort((p, q) => q[1].compareTo(p[1])); // tallest first
