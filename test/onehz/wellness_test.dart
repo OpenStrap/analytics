@@ -301,6 +301,33 @@ void main() {
       expect(out.last.z, isNull);
       expect(out.last.confidence, 0);
     });
+
+    test('a short unscored gap carries the elevated run', () {
+      // Fever nights with an unscored night between each (strap re-seated,
+      // ambient-excluded): the run must survive the holes.
+      final temp = <double?>[
+        for (var i = 0; i < 14; i++) 2000.0 + (i.isEven ? 3 : -3),
+        2060, null, 2065, null, 2070,
+      ];
+      final out = tempIllnessFlag(dates(temp.length), temp,
+          baselineDays: 21, zThresh: 2.0, persistDays: 2, minBaseline: 7);
+      expect(out[14].flag, TempFlag.normal);
+      expect(out[15].z, isNull);
+      expect(out[16].flag, TempFlag.elevated);
+      expect(out[18].flag, TempFlag.elevated);
+    });
+
+    test('a long unscored gap still ends the elevated run', () {
+      final temp = <double?>[
+        for (var i = 0; i < 14; i++) 2000.0 + (i.isEven ? 3 : -3),
+        2060, null, null, null, 2065,
+      ];
+      final out = tempIllnessFlag(dates(temp.length), temp,
+          baselineDays: 21, zThresh: 2.0, persistDays: 2, minBaseline: 7);
+      // Gap of 4 calendar days > 1 + maxGapNights: a fresh single night.
+      expect(out.last.z, isNotNull);
+      expect(out.last.flag, TempFlag.normal);
+    });
   });
 
   // -------------------------------------------------------------------------

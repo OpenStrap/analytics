@@ -61,7 +61,8 @@ class TempIllnessDay {
 /// is the canonical producer. Null = missing night. [luteal] OPTIONAL per-night
 /// luteal-phase flag (true => suppress). [baselineDays] trailing robust-baseline
 /// window; [zThresh] flag elevation above this robust z; [persistDays]
-/// consecutive elevated nights required.
+/// consecutive elevated nights required. [maxGapNights] unscored nights in a
+/// row that carry the run instead of breaking it (as in `illnessCusum`).
 ///
 /// DO NOT PASS A Z-SCORE. This function standardises internally against its own
 /// trailing window (`robustBaseline(...).modZ`), so a pre-standardised series
@@ -85,6 +86,7 @@ List<TempIllnessDay> tempIllnessFlag(
   double zThresh = 2.0,
   int persistDays = 2,
   int minBaseline = tempIllnessMinBaseline,
+  int maxGapNights = 2,
 }) {
   final n = nightlyTemp.length;
   final out = <TempIllnessDay>[];
@@ -109,7 +111,8 @@ List<TempIllnessDay> tempIllnessFlag(
           : null;
       out.add(
           TempIllnessDay(dates[i], TempFlag.normal, null, lut, 0.0, need: need));
-      elevatedRun = 0;
+      // An unscored night carries the run; the gap check below decides when
+      // the calendar break is long enough to end it.
       continue;
     }
     final base = robustBaseline(window, minValid: minBaseline);
@@ -117,11 +120,16 @@ List<TempIllnessDay> tempIllnessFlag(
     if (zz == null) {
       // Can't standardize honestly -> stay normal, confidence 0.
       out.add(TempIllnessDay(dates[i], TempFlag.normal, null, lut, 0.0));
-      elevatedRun = 0;
       continue;
     }
-    // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows.
-    if (day[i] - lastScoredDay > 1) elevatedRun = 0;
+    // "N nights running" means CONSECUTIVE NIGHTS, not consecutive rows — but
+    // a gap of one or two unscored nights is not a break. Skin temp goes
+    // unscored exactly when someone is ill: the strap gets re-seated (the
+    // night never settles), sleep goes undetected, or a warm room fails the
+    // ambient check. Resetting on every such night meant three fever nights in
+    // four, or any alternate-night pattern, could never reach [persistDays].
+    // A short gap neither advances nor resets the run; a long one ends it.
+    if (day[i] - lastScoredDay > 1 + maxGapNights) elevatedRun = 0;
     lastScoredDay = day[i];
     final elevated = zz >= zThresh;
     if (elevated) {
