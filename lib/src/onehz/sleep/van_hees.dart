@@ -250,9 +250,21 @@ ImmobilityMask immobilityMask(
   // as sustained rest. Differencing the smoothed angle across one smoothing
   // epoch is the sliding form of the epoch-to-epoch comparison, so a slow roll
   // is judged by the full change it makes over 5 s.
+  //
+  // The rolling median carries NaN only at the unmeasured second itself, so an
+  // unmeasured second strictly INSIDE the compared span left the difference of
+  // its two measured endpoints finite: the arm could have moved and come back
+  // there unobserved. Any unmeasured second in the span makes the change NaN.
+  final invalidBefore = List<int>.filled(n + 1, 0);
+  for (var i = 0; i < n; i++) {
+    invalidBefore[i + 1] = invalidBefore[i] + (accel[i].valid ? 0 : 1);
+  }
   final dAng = List<double>.filled(n, 0);
   for (var i = 1; i < n; i++) {
-    dAng[i] = (ang[i] - ang[math.max(0, i - smoothSamples)]).abs();
+    final from = math.max(0, i - smoothSamples);
+    dAng[i] = invalidBefore[i + 1] - invalidBefore[from] > 0
+        ? double.nan
+        : (ang[i] - ang[from]).abs();
   }
   final immobile = List<bool>.filled(n, false);
   final immobileUnknown = List<bool>.filled(n, false);

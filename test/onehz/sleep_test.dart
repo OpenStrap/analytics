@@ -255,6 +255,24 @@ void main() {
       expect(m.value!.onsetIdx, greaterThanOrEqualTo(57 * 60),
           reason: 'pre-fix: onset at 0 — the restless hour was annexed');
     });
+
+    test('an unmeasured second inside the compared span is not stillness', () {
+      // One undecoded second at index 100 between measured seconds at the same
+      // orientation. The rolling median NaNs only index 100, so the change
+      // from 97 to 102 used to read as a finite 0° across a second nobody saw.
+      final accel = [
+        for (var i = 0; i < 600; i++)
+          i == 100
+              ? AccelSample(i * 1000.0, 0, 0, 0, valid: false)
+              : AccelSample(i * 1000.0, 0, 0, 1)
+      ];
+      final mask = immobilityMask(accel);
+      for (var i = 101; i <= 105; i++) {
+        expect(mask.deltaDeg[i].isNaN, isTrue, reason: 'second $i');
+      }
+      expect(mask.deltaDeg[99].isNaN, isFalse);
+      expect(mask.deltaDeg[106].isNaN, isFalse);
+    });
   });
 
   // ---------------------------------------------------------------------- SRI
