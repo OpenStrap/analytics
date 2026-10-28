@@ -272,6 +272,29 @@ void main() {
       }
       expect(mask.deltaDeg[99].isNaN, isFalse);
       expect(mask.deltaDeg[106].isNaN, isFalse);
+      for (var i = 101; i <= 104; i++) {
+        expect(mask.immobile[i], isFalse, reason: 'second $i');
+        expect(mask.immobileUnknown[i], isTrue, reason: 'second $i');
+      }
+    });
+
+    test('movement after an unmeasured second in the window is decided', () {
+      // Still until an undecoded second at 100, then a 90° turn at 110. The
+      // window starting at 50 contains both: the turn already fails the
+      // sustained rule on measured data, so that second is not immobile and
+      // not undecidable either.
+      final accel = [
+        for (var i = 0; i < 1200; i++)
+          i == 100
+              ? AccelSample(i * 1000.0, 0, 0, 0, valid: false)
+              : i < 110
+                  ? AccelSample(i * 1000.0, 0, 0, 1)
+                  : AccelSample(i * 1000.0, 1, 0, 0)
+      ];
+      final mask = immobilityMask(accel);
+      expect(mask.immobile[50], isFalse);
+      expect(mask.immobileUnknown[50], isFalse,
+          reason: 'the scan stopped at the gap and never saw the turn');
     });
   });
 

@@ -286,9 +286,11 @@ ImmobilityMask immobilityMask(
   //     record it in `immobileUnknown` rather than guessing either way.
   //
   // A window containing an UNMEASURED second lands in the same two cases, for
-  // the same reason: movement already seen decides it (the sustained rule has
-  // failed on the data in hand), otherwise the arm could have moved where we
-  // were not looking ⇒ undecidable, never asserted rest.
+  // the same reason: movement seen anywhere in the window decides it (the
+  // sustained rule has failed on the data in hand), otherwise the arm could
+  // have moved where we were not looking ⇒ undecidable, never asserted rest.
+  // The scan therefore keeps going past a gap: stopping there missed measured
+  // movement later in the same window and reported it as undecidable.
   for (var i = 0; i < n; i++) {
     final hi = math.min(n, i + winSamples);
     var maxd = 0.0;
@@ -299,7 +301,7 @@ ImmobilityMask immobilityMask(
       // moved there, so it is a gap, not stillness.
       if (!accel[k].valid || dAng[k].isNaN) {
         gap = true;
-        break;
+        continue;
       }
       if (dAng[k] > maxd) {
         maxd = dAng[k];
