@@ -431,6 +431,14 @@ SleepSegmentation segmentSleep(
   /// creates, extends or stages a night. (AdvancedSleepStager.detectSleep takes
   /// the same signal as [ts,state] pairs; not forwarded here.)
   List<int>? bandSleepState,
+
+  /// True when the caller cut [accel]/[hr1hz] out of a longer record and data
+  /// carries on past the last sample here (e.g. a calendar-day slice ending at
+  /// local midnight). AUTO path only: a sleep still going at the cut has no
+  /// knowable end, so it is deferred to the slice that sees it finish instead
+  /// of being published as a night that ended at the cut. See
+  /// [kUnfinishedNightEdgeSec].
+  bool recordContinues = false,
 }) {
   final n = math.min(accel.length, hr1hz.length);
   // A forced window (manual entry / user confirmation, Approach 1) is asserted
@@ -514,8 +522,14 @@ SleepSegmentation segmentSleep(
     );
     if (sessions.isEmpty) return SleepSegmentation.absent;
 
+    var groups = _bridgeAdjacentSessions(sessions);
+    if (recordContinues) {
+      final lastTs = grav.fold<int>(grav.first.ts, (m, g) => math.max(m, g.ts));
+      groups = _dropUnfinishedGroups(groups, lastTs);
+      if (groups.isEmpty) return SleepSegmentation.absent;
+    }
     chosen = _pickMainSleepGroup(
-      _bridgeAdjacentSessions(sessions),
+      groups,
       tzAt,
       habitualMidsleepSec: habitualMidsleepSec,
     );
@@ -827,6 +841,38 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
     }
   }
   return out;
+}
+
+/// A sleep group ending this close to the last sample of a record that
+/// continues may still be going. The still/active classifier works over a
+/// [AdvancedSleepStager.stillWindowMin] window, so a wake inside the final
+/// window cannot be told apart from sleep that runs on past the cut.
+const int kUnfinishedNightEdgeSec = AdvancedSleepStager.stillWindowMin * 60;
+
+/// Drops every group that is still going at [lastTs], plus any group chained
+/// to one within the detector's own continuation gap. Walking backward
+/// matters: a short awakening splits tonight into two groups and only the
+/// trailing one touches the cut, but the leading one is the same unfinished
+/// night and would otherwise be published for the day that is ending and then
+/// counted again inside the full night by the next slice.
+List<_SleepGroup> _dropUnfinishedGroups(List<_SleepGroup> groups, int lastTs) {
+  const chainGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+  final unfinished = List<bool>.filled(groups.length, false);
+  for (var g = groups.length - 1; g >= 0; g--) {
+    if (lastTs - groups[g].end <= kUnfinishedNightEdgeSec) {
+      unfinished[g] = true;
+      continue;
+    }
+    if (g + 1 < groups.length &&
+        unfinished[g + 1] &&
+        groups[g + 1].start - groups[g].end <= chainGapSec) {
+      unfinished[g] = true;
+    }
+  }
+  return [
+    for (var g = 0; g < groups.length; g++)
+      if (!unfinished[g]) groups[g],
+  ];
 }
 
 _SleepGroup? _pickMainSleepGroup(
