@@ -423,7 +423,7 @@ void main() {
 
       active(2 * 3600); // 16:00-18:00
       sleep(6 * 3600); // 18:00-00:00  → night A
-      active(90 * 60, bpm: 90); // 00:00-01:30 (>60 min ⇒ A and B never bridge)
+      active(90 * 60, bpm: 90); // 00:00-01:30 (detected gap ~95 min > 90 ⇒ never bridged)
       sleep(2 * 3600); // 01:30-03:30  ┐
       active(45 * 60, bpm: 90); //     │ night B — three fragments bridged
       sleep(2 * 3600); // 04:15-06:15  │ across two <60 min gaps
@@ -443,6 +443,81 @@ void main() {
       expect(onsetSod, closeTo(1 * 3600 + 32 * 60, 120),
           reason: 'pre-fix the early midpoint made night A (18:02) win');
       expect(s.inBedSec!, greaterThan(7 * 3600));
+    });
+
+    // detectSleep chains a night across any awakening up to
+    // nightContinuationGapMin (90 min). segmentSleep used to bridge only gaps
+    // under 60 min, so a 60-90 min awakening split one night into two groups
+    // and only one half was published.
+    void Function(int, {double bpm}) feeder(
+        List<AccelSample> accel, List<double> hr, int start,
+        {required bool still}) {
+      return (int secs, {double bpm = 0}) {
+        final base = accel.length;
+        for (var k = 0; k < secs; k++) {
+          final t = (start + base + k) * 1000.0;
+          if (still) {
+            accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+            hr.add(bpm + 1.5 * math.sin(k / 1800.0));
+          } else {
+            final ph = math.sin(k * 0.5);
+            accel.add(AccelSample(t, 0.3 * ph, 0.3, 0.9 * (1 - 0.2 * ph)));
+            hr.add(bpm + 2 * math.sin(k / 600.0));
+          }
+        }
+      };
+    }
+
+    test('a 75-min awakening keeps both halves of the night', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 21 * 3600; // 21:00
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(2 * 3600, bpm: 76); // 21:00-23:00
+      sleep(210 * 60, bpm: 50); // 23:00-02:30
+      active(75 * 60, bpm: 90); // 02:30-03:45 up with the baby
+      sleep(225 * 60, bpm: 50); // 03:45-07:30
+      active(2 * 3600, bpm: 76); // 07:30-09:30
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      final onset = s.window!.onsetMs! ~/ 1000;
+      final offset = s.window!.offsetMs! ~/ 1000;
+      // Pre-fix: only the 03:45-07:30 half was published (~3.7 h in bed).
+      expect(onset, lessThan(_midnight + 86400 - 30 * 60),
+          reason: 'onset must be the 23:00 block, not 03:45');
+      expect(offset, greaterThan(_midnight + 86400 + 7 * 3600));
+      expect(s.inBedSec!, greaterThan(8 * 3600));
+      // The awakening is inside the window and is counted as wake.
+      expect(s.wasoSec!, greaterThan(60 * 60));
+      expect(s.tstSec!, greaterThan(5 * 3600));
+    });
+
+    test('a short tail after a 70-min awakening is not lost', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 20 * 3600 + 30 * 60; // 20:30
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(2 * 3600, bpm: 76); // 20:30-22:30
+      sleep(390 * 60, bpm: 50); // 22:30-05:00
+      active(70 * 60, bpm: 90); // 05:00-06:10
+      sleep(40 * 60, bpm: 50); // 06:10-06:50 night tail
+      active(2 * 3600, bpm: 76); // 06:50-08:50
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      final offset = s.window!.offsetMs! ~/ 1000;
+      // Pre-fix the window ended ~05:00 and the tail counted nowhere (nap
+      // detection discards it as a night tail).
+      expect(offset, greaterThan(_midnight + 86400 + 6 * 3600 + 30 * 60));
     });
   });
 

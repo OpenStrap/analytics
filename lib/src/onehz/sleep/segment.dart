@@ -782,7 +782,13 @@ class _SleepGroup {
 List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
   if (sessions.isEmpty) return const [];
   final sorted = [...sessions]..sort((a, b) => a.start.compareTo(b.start));
-  const bridgeGapSec = 60 * 60;
+  // Must be the same rule detectSleep chains a night on. With a narrower bridge
+  // (this was a flat `< 60 min`) a 60-90 min awakening left detectSleep
+  // returning both halves as one night while this split them into two groups;
+  // the selector then published one half and silently dropped the other from
+  // TST, stages and the HRV/RHR windows (or let it surface as a "nap"). The
+  // gap's seconds are scored below as wake where observed, unobserved where not.
+  const bridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
   final out = <_SleepGroup>[];
   for (final session in sorted) {
     final asleepMin = AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0;
@@ -799,7 +805,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
     }
     final last = out.removeLast();
     final gap = session.start - last.end;
-    if (gap >= 0 && gap < bridgeGapSec) {
+    if (gap >= 0 && gap <= bridgeGapSec) {
       out.add(
         _SleepGroup(
           sessions: [...last.sessions, session],
