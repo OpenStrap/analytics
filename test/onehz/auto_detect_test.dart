@@ -193,4 +193,38 @@ void main() {
       expect(_detect(hr), hasLength(2));
     });
   });
+
+  group('HRmax', () {
+    test('absent ceiling abstains instead of assuming 190', () {
+      final hr = _sharpBout();
+      expect(_detect(hr), hasLength(1));
+      expect(
+        AutoWorkoutDetector.detect(
+            hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: _rhr, maxBpm: null),
+        isEmpty,
+      );
+      final m = autoDetectWorkouts(
+          hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: _rhr, maxBpm: null);
+      expect(m.value, isNull);
+      expect(m.note, 'need_input:hr_max');
+    });
+
+    test("the gate follows the caller's ceiling", () {
+      // RHR 62, HRmax 165: gate = max(102, round(62 + 0.45·103)) = 108, so a
+      // 25-min bout at 115 is a suggestion. A 190 ceiling would put the gate
+      // at 120 and drop it.
+      final hr = _Hr()
+        ..flat(0, 3600, 70)
+        ..flat(3600, 5100, 115)
+        ..flat(5100, 9000, 70);
+      final out = AutoWorkoutDetector.detect(
+          hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: 62, maxBpm: 165);
+      expect(out, hasLength(1));
+      expect(
+        AutoWorkoutDetector.detect(
+            hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: 62, maxBpm: 190),
+        isEmpty,
+      );
+    });
+  });
 }
