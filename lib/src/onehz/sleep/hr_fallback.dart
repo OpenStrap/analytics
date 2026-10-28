@@ -16,6 +16,8 @@
 // "is this right?" prompt — never as a confirmed auto detection.
 
 import '../util.dart';
+import 'advanced_stager.dart' show AdvancedSleepStager;
+import 'segment.dart' show kUnfinishedNightEdgeSec;
 
 /// A proposed in-bed window (epoch seconds). Returned by [hrLedSleepWindow].
 class HrLedWindow {
@@ -39,6 +41,13 @@ class HrLedWindow {
 ///
 /// Returns the longest qualifying low-HR run (≥ [minDurationSec], brief
 /// arousals < [bridgeGapSec] bridged), or null when no convincing dip exists.
+///
+/// [recordContinues]: the caller cut this slice out of a longer record (a
+/// calendar day ending at local midnight). A dip still going at the last sample
+/// has no knowable end, so it is never proposed — the same deferral
+/// `segmentSleep(recordContinues: true)` applies, and for the same reason: a
+/// fallback run over the slice the detector just deferred would otherwise
+/// propose exactly that cut-off stretch as a finished night.
 HrLedWindow? hrLedSleepWindow(
   List<double> hr1hz,
   List<int> tsSec, {
@@ -47,6 +56,7 @@ HrLedWindow? hrLedSleepWindow(
   int bridgeGapSec = 30 * 60,
   double smoothSec = 300,
   int maxSampleGapSec = 5 * 60,
+  bool recordContinues = false,
 }) {
   final n = hr1hz.length < tsSec.length ? hr1hz.length : tsSec.length;
   if (n < minDurationSec ~/ 2) return null;
@@ -79,7 +89,7 @@ HrLedWindow? hrLedSleepWindow(
   bool low(int i) => smooth[i] > 0 && smooth[i] < threshold!;
 
   // 4. Longest low run, bridging brief arousals (gap-aware via real timestamps).
-  var bestStart = -1, bestEnd = -1, bestDur = 0;
+  final runs = <({int start, int end, int dur})>[];
   var i = 0;
   while (i < n) {
     if (!low(i)) {
@@ -118,12 +128,37 @@ HrLedWindow? hrLedSleepWindow(
       }
     }
     final dur = tsSec[(j - 1).clamp(0, n - 1)] - tsSec[i];
-    if (dur > bestDur) {
-      bestDur = dur;
-      bestStart = i;
-      bestEnd = j;
-    }
+    runs.add((start: i, end: j, dur: dur));
     i = j + 1;
+  }
+
+  // 5. Defer a dip still going at the cut, and any dip chained to it within
+  //    the detector's own night-continuation gap (a long arousal splits
+  //    tonight in two; only the trailing half touches the cut).
+  final deferred = List<bool>.filled(runs.length, false);
+  if (recordContinues) {
+    const chainGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+    final lastTs = tsSec[n - 1];
+    for (var r = runs.length - 1; r >= 0; r--) {
+      final endTs = tsSec[(runs[r].end - 1).clamp(0, n - 1)];
+      if (lastTs - endTs <= kUnfinishedNightEdgeSec) {
+        deferred[r] = true;
+      } else if (r + 1 < runs.length &&
+          deferred[r + 1] &&
+          tsSec[runs[r + 1].start] - endTs <= chainGapSec) {
+        deferred[r] = true;
+      }
+    }
+  }
+
+  var bestStart = -1, bestEnd = -1, bestDur = 0;
+  for (var r = 0; r < runs.length; r++) {
+    if (deferred[r]) continue;
+    if (runs[r].dur > bestDur) {
+      bestDur = runs[r].dur;
+      bestStart = runs[r].start;
+      bestEnd = runs[r].end;
+    }
   }
 
   if (bestStart < 0 || bestDur < minDurationSec) return null;

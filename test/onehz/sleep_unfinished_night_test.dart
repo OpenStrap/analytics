@@ -47,6 +47,62 @@ void main() {
     expect(s.present, isFalse);
     expect(s.tstSec, isNull);
     expect(s.inBedSec, isNull);
+    // A deferral, not "no sleep": the caller must be able to tell them apart
+    // or it goes looking for a window by the HR-led route instead.
+    expect(s.unfinished, isTrue);
+    expect(s.absenceReason, kAbsenceNightUnfinished);
+  });
+
+  test('an empty slice is plain absent, not unfinished', () {
+    final r = _record(_midnight + 12 * 3600, _midnight + 86400, const []);
+    final s = segmentSleep(r.accel, r.hr, tzOffsetSec: 0, recordContinues: true);
+    expect(s.present, isFalse);
+    expect(s.unfinished, isFalse);
+  });
+
+  // The edge runs the HR-led fallback whenever the accel path comes back
+  // without a night. Over the same cut-off slice it proposed the same evening
+  // as a finished night, so deferring in segmentSleep alone changed nothing.
+  group('hrLedSleepWindow over a slice cut at midnight', () {
+    List<int> ts(List<AccelSample> a) => [for (final x in a) x.tsMs ~/ 1000];
+
+    test('without the flag it proposes the cut-off evening (the bug)', () {
+      final w = hrLedSleepWindow(evening.hr, ts(evening.accel),
+          hrBaseline: const [85.0]);
+      expect(w, isNotNull);
+      expect(w!.offsetSec, greaterThan(_midnight + 86400 - 5 * 60));
+    });
+
+    test('record continues: the still-going dip is not proposed', () {
+      final w = hrLedSleepWindow(evening.hr, ts(evening.accel),
+          hrBaseline: const [85.0], recordContinues: true);
+      expect(w, isNull);
+    });
+
+    test('record continues: a finished dip earlier in the slice still wins', () {
+      final r = _record(_midnight - 4 * 3600, _midnight + 86400, [
+        (_midnight - 3600, _midnight + 7 * 3600),
+        (_midnight + 20 * 3600 + 30 * 60, _midnight + 86400),
+      ]);
+      final w = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0], recordContinues: true);
+      expect(w, isNotNull);
+      expect(w!.offsetSec, lessThan(_midnight + 8 * 3600));
+      expect(w.offsetSec, greaterThan(_midnight + 6 * 3600));
+    });
+
+    test('a dip that ended well before the cut is unchanged by the flag', () {
+      final r = _record(_midnight - 4 * 3600, _midnight + 12 * 3600, [
+        (_midnight - 3600, _midnight + 7 * 3600),
+      ]);
+      final a = hrLedSleepWindow(r.hr, ts(r.accel), hrBaseline: const [85.0]);
+      final b = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0], recordContinues: true);
+      expect(a, isNotNull);
+      expect(b, isNotNull);
+      expect(b!.onsetSec, a!.onsetSec);
+      expect(b.offsetSec, a.offsetSec);
+    });
   });
 
   test('a finished night earlier in the slice is still the main sleep', () {

@@ -275,9 +275,9 @@ class SleepSegmentation {
   final double confidence;
 
   /// Machine-readable cause when [present] is false and the cause is known
-  /// (currently: too little of the window was observed). Null when a caller
-  /// should say nothing more than "no qualifying sleep". Never render a bare
-  /// dash for an absence that carries one of these.
+  /// (too little of the window was observed, or [kAbsenceNightUnfinished]).
+  /// Null when a caller should say nothing more than "no qualifying sleep".
+  /// Never render a bare dash for an absence that carries one of these.
   final String? absenceReason;
 
   /// Seconds the band's last SLEEP removed from the END of the auto window;
@@ -347,6 +347,18 @@ class SleepSegmentation {
         confidence: 0,
         absenceReason: reason,
       );
+
+  /// Absent because the only sleep in the record was still going at its last
+  /// sample while the caller said the record carries on (`recordContinues`).
+  /// Not "no sleep": the night exists and belongs to whichever slice sees it
+  /// end. A caller must NOT treat this as a miss and go looking for a window by
+  /// another route (an HR-led fallback over the same slice proposes the same
+  /// cut-off stretch).
+  static SleepSegmentation get unfinishedNight =>
+      unobservedWindow(kAbsenceNightUnfinished);
+
+  /// True when this result is [unfinishedNight].
+  bool get unfinished => absenceReason == kAbsenceNightUnfinished;
 
   bool get present => window != null;
 
@@ -526,7 +538,9 @@ SleepSegmentation segmentSleep(
     if (recordContinues) {
       final lastTs = grav.fold<int>(grav.first.ts, (m, g) => math.max(m, g.ts));
       groups = _dropUnfinishedGroups(groups, lastTs);
-      if (groups.isEmpty) return SleepSegmentation.absent;
+      // Every candidate was tonight's still-going night: say so, so the
+      // caller can tell a deferral from an empty slice.
+      if (groups.isEmpty) return SleepSegmentation.unfinishedNight;
     }
     chosen = _pickMainSleepGroup(
       groups,
@@ -848,6 +862,11 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
 /// [AdvancedSleepStager.stillWindowMin] window, so a wake inside the final
 /// window cannot be told apart from sleep that runs on past the cut.
 const int kUnfinishedNightEdgeSec = AdvancedSleepStager.stillWindowMin * 60;
+
+/// [SleepSegmentation.absenceReason] for a night deferred because it was still
+/// going at the end of a record that continues. See
+/// [SleepSegmentation.unfinishedNight].
+const String kAbsenceNightUnfinished = 'night_unfinished';
 
 /// Drops every group that is still going at [lastTs], plus any group chained
 /// to one within the detector's own continuation gap. Walking backward
