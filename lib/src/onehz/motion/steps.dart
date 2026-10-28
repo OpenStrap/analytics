@@ -153,12 +153,15 @@ class PedometerResult {
 ///   * Rhythmic arm work at a gait-like rhythm still counts (OxWalk P28:
 ///     258 true steps, ~690 counted). Nothing on a wrist |a| separates it
 ///     from walking; the edge's activity-type gate is the defence.
-///   * Cadence band is [stepLoS]..[stepHiS] per step: 60–240 spm. A shuffle
-///     below 60 spm is not counted; a sprint above 240 spm locks onto its
-///     stride and reads HALF (the edge never lets the strap count sprints).
+///   * The step/stride decision runs first and [stepLoS]..[stepHiS]
+///     (60–240 spm) is checked on its result. A sprint above 240 spm locks
+///     onto its stride and reads HALF (the edge never lets the strap count
+///     sprints). A slow signal is NOT dropped at 60 spm, see the next point.
 ///   * A wrist signal with ONLY a step fundamental slower than ~67 spm
-///     (P ≥ [strideS]) is read as a stride and counted double. On OxWalk that
-///     population is empty; on synthetic signals it is not.
+///     (P ≥ [strideS]) is read as a stride and counted double, down to
+///     ~37.5 spm (P = [peakHiS]); slower than that there is no peak in the
+///     band and nothing is counted. On OxWalk that population is empty; on
+///     synthetic signals it is not.
 ///
 /// Every constant is in SECONDS, so the counter is rate-agnostic — the caller
 /// must pass the buffer's REAL rate as `sampleRateHz`.
