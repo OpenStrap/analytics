@@ -89,6 +89,55 @@ void main() {
       expect(local.value!.nonparam!.interdailyStability, closeTo(1.0, 1e-9));
     });
 
+    test('REGRESSION: a repeated fall-back hour stays two epochs', () {
+      // One sample per UTC hour, offset +1 h then 0 h (fall-back), so local
+      // 01:00 occurs twice. Each hour carries its own value; IV must be the
+      // IV of that hourly series, with both 01:00 epochs in it.
+      final t0 = DateTime.utc(2026, 10, 1).millisecondsSinceEpoch.toDouble();
+      final switchMs = t0 + 2 * 24 * 3600 * 1000.0 + 1 * 3600 * 1000.0;
+      int offAt(int s) => s * 1000 < switchMs ? 3600 : 0;
+      final vals = <double>[];
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 4 * 24; i++) {
+        final tMs = t0 + i * 3600 * 1000.0;
+        final v = 2000 + 100 * math.sin(i * 1.7) + (i % 5) * 13.0;
+        vals.add(v);
+        samples.add(AdcSample(tMs, v));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: offAt);
+      final grand = vals.reduce((a, b) => a + b) / vals.length;
+      var diffSq = 0.0, varTot = 0.0;
+      for (var i = 1; i < vals.length; i++) {
+        diffSq += math.pow(vals[i] - vals[i - 1], 2);
+      }
+      for (final v in vals) {
+        varTot += math.pow(v - grand, 2);
+      }
+      final expectedIv = (diffSq / (vals.length - 1)) / (varTot / vals.length);
+      expect(
+          m.value!.nonparam!.intradailyVariability, closeTo(expectedIv, 1e-9));
+    });
+
+    test('REGRESSION: a fit with no resolvable phase is not reported', () {
+      // A pure 12-h rhythm over whole days has no 24-h component, so the
+      // zero-amplitude test cannot reject and the acrophase is undefined. The
+      // nonparametric half still has variance to work with.
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 4 * 24 * 6; i++) {
+        final tMs = i * 10 * 60 * 1000.0;
+        final h = tMs / 3.6e6;
+        samples
+            .add(AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi * h / 12)));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
+      expect(m.present, isTrue);
+      expect(m.value!.cosinorFit, isNull);
+      expect(m.value!.nonparam, isNotNull);
+      expect(m.confidence, 0.3);
+    });
+
     test('RD-14: IS is taken about the GRAND mean, not the profile mean', () {
       // Unbalanced epoch-of-day coverage — the normal case on real data, where
       // per-day 24-bin coverage runs 14/24 to 24/24 — plus a level drift across
@@ -239,16 +288,16 @@ void main() {
       // 3 days of an identical ADC reading -> varTot == 0 and diffN's
       // squared-difference sum == 0. IS/IV are both undefined divisions by
       // zero here, not "perfectly stable / perfectly regular" measurements.
-      // The cosinor half can still fit a (degenerate) phase on flat input,
-      // so the overall Metric stays present — it's specifically `nonparam`
-      // that must come back null instead of IS=0.0/IV=0.0.
+      // The cosinor half has no resolvable phase on flat input either, so
+      // nothing is left to report and the whole metric is absent.
       final samples = <AdcSample>[
         for (var i = 0; i < 3 * 24 * 6; i++)
           AdcSample(i * 10 * 60 * 1000.0, 2000.0),
       ];
       final m = tempCircadian(samples,
           deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
-      expect(m.value!.nonparam, isNull);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
     });
   });
 
