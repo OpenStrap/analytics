@@ -73,6 +73,16 @@ Metric<SleepDebt> sleepDebt(
   int minFree = sleepDebtMinFreeNights,
 }) {
   const inputs = ['sleep_duration_recent', 'sleep_duration_free'];
+  // A NaN night is not a night: it must not count toward a minimum or reach
+  // the median/percentile, where it either sorts to an end or poisons the sum.
+  recentSleepH = [
+    for (final h in recentSleepH)
+      if (h.isFinite) h
+  ];
+  freeNightSleepH = [
+    for (final h in freeNightSleepH)
+      if (h.isFinite) h
+  ];
   if (recentSleepH.length < minRecent) {
     return Metric<SleepDebt>.absent(
       tier: Tier.high,

@@ -127,6 +127,14 @@ void main() {
       expect(two.value!.osdHours, isNull);
       expect(two.note, 'need_baseline:have=2,need=$sleepDebtMinFreeNights');
     });
+    test('REGRESSION: a NaN night does not count toward either minimum', () {
+      final m = sleepDebt([7.0, 6.8, 7.1], const [7.0, 6.5, double.nan]);
+      expect(m.value!.osdHours, isNull);
+      expect(m.note, 'need_baseline:have=2,need=$sleepDebtMinFreeNights');
+      final r = sleepDebt([7.0, 6.8, double.nan], const [8.0, 8.2, 8.4]);
+      expect(r.present, isFalse);
+      expect(r.note, 'need_baseline:have=2,need=3');
+    });
     test('too few recent nights => need_baseline note', () {
       final m = sleepDebt([7.0, 6.8], const [8.0, 8.2, 8.4]);
       expect(m.present, isFalse);
