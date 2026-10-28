@@ -522,10 +522,13 @@ Metric<List<NapWindow>> detectNaps(
     // is time in bed but not time asleep. This distinction is the whole point:
     // the sleep-need credit must be TST, and crediting TIB systematically
     // over-credits and under-recommends sleep.
+    // Credited in wall-clock seconds, like `tib`: counting one per still
+    // sample put a fully-still 5 s stream at a fifth of its real sleep time.
     var tst = 0;
     for (var k = start; k < end; k++) {
-      if (stillAt(k)) tst++;
+      if (stillAt(k)) tst += secPerSample;
     }
+    if (tst > tib) tst = tib;
 
     // Confidence, NOT efficiency. A 20% dip below the awake baseline earns
     // full marks on that axis; the rest rewards evidence, not sleep quality.
@@ -564,15 +567,27 @@ Metric<List<NapWindow>> detectNaps(
   // even when the rest of the day went unmeasured. Coverage is taken over the
   // seconds outside the main sleep, since that is the only stretch a nap could
   // have come from.
+  //
+  // Both sides are wall-clock seconds over the slice's span. Counting rows
+  // never counted the rows that are missing, so two good hours inside an
+  // otherwise empty day read as full coverage and returned a judged "no nap".
   if (naps.isEmpty) {
-    var outside = 0, outsideAccel = 0;
+    final spanSec = absAt(n - 1) + 1 - baseSec;
+    var mainSec = 0;
+    if (mainSleep != null) {
+      final ms = mainSleep.start < 0 ? 0 : mainSleep.start;
+      final me = mainSleep.end > n ? n : mainSleep.end;
+      if (me > ms) mainSec = absAt(me - 1) + 1 - absAt(ms);
+    }
+    final outside = spanSec - mainSec;
+    var outsideAccel = 0;
     for (var k = 0; k < n; k++) {
       if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) {
         continue;
       }
-      outside++;
-      if (series[k].valid) outsideAccel++;
+      if (series[k].valid) outsideAccel += secPerSample;
     }
+    if (outsideAccel > outside) outsideAccel = outside;
     if (outside > 0 && outsideAccel / outside < minNapAccelCoverage) {
       return Metric<List<NapWindow>>.absent(
         tier: Tier.estimate,

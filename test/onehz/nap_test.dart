@@ -722,6 +722,19 @@ void main() {
       expect(m.value, hasLength(1));
     });
 
+    test('a long recording hole counts against day-wide coverage', () {
+      // Every row that exists is measured, but they cover four hours of a
+      // 24 h span. Counting rows read this as full coverage and returned a
+      // judged "no nap" for twenty hours nobody observed.
+      final d = _Day()
+        ..active(120)
+        ..gap(20 * 60)
+        ..active(120);
+
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.present, isFalse);
+    });
+
     test('accel coverage is judged outside the main sleep only', () {
       // The awake day is fully measured; the unmeasured stretch is the night,
       // which naps are never drawn from. The day stays judged.
@@ -790,6 +803,15 @@ void main() {
         expect(nap.tibSec, closeTo(40 * 60, 6 * 60));
       });
     }
+
+    test('time asleep is wall-clock seconds at a 5 s cadence, like tib', () {
+      // One still sample stands for five seconds here. Counting one per
+      // sample reported a fully-still nap as a fifth asleep.
+      final d = day(5);
+      final nap = detectNaps(d.accel, d.hr).value!.single;
+      expect(nap.tstSec, greaterThan(nap.tibSec * 0.8));
+      expect(nap.tstSec, lessThanOrEqualTo(nap.tibSec));
+    });
 
     test('a skipped second at 1 Hz does not end the nap', () {
       final d = day(1, dropEvery: 120);
