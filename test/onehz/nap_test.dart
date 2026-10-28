@@ -813,6 +813,64 @@ void main() {
       expect(nap.tstSec, lessThanOrEqualTo(nap.tibSec));
     });
 
+    // Fractional cadences. Flooring the measured cadence to whole seconds
+    // credited a 2.5 s sample with 2 s and a 0.5 s sample with a full second.
+    ({List<AccelSample> accel, List<double> hr}) dayMs(int stepMs,
+        {bool Function(int k)? invalid, bool nap = true}) {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      var tMs = 0;
+      var k = 0;
+      void emit(double x, double z, double bpm) {
+        final bad = invalid?.call(k) ?? false;
+        accel.add(bad
+            ? AccelSample(tMs.toDouble(), 0, 0, 0, valid: false)
+            : AccelSample(tMs.toDouble(), x, 0, z));
+        hr.add(bpm);
+        tMs += stepMs;
+        k++;
+      }
+
+      void active(int min) {
+        final end = tMs + min * 60000;
+        while (tMs < end) {
+          final rad = (45 + 35 * math.sin(tMs * 0.0004)) * math.pi / 180;
+          emit(math.cos(rad), math.sin(rad), 82);
+        }
+      }
+
+      void still(int min) {
+        final end = tMs + min * 60000;
+        while (tMs < end) {
+          emit(0, 1, 54);
+        }
+      }
+
+      active(120);
+      if (nap) {
+        still(40);
+        active(120);
+      }
+      return (accel: accel, hr: hr);
+    }
+
+    test('time asleep is not floored at a 2.5 s cadence', () {
+      final d = dayMs(2500);
+      final nap = detectNaps(d.accel, d.hr).value!.single;
+      expect(nap.tstSec, greaterThan(nap.tibSec * 0.9),
+          reason: 'flooring 2.5 s to 2 s put a fully-still nap at 80% asleep');
+      expect(nap.tstSec, lessThanOrEqualTo(nap.tibSec));
+    });
+
+    test('day accel coverage is not doubled at a 0.5 s cadence', () {
+      // Gravity decoded on 2 of every 5 samples: 40% of the day, under the
+      // 50% gate. Crediting each 0.5 s sample a full second read it as 80%
+      // and published a judged "no nap".
+      final d = dayMs(500, invalid: (k) => k % 5 >= 2, nap: false);
+      final m = detectNaps(d.accel, d.hr);
+      expect(m.present, isFalse, reason: m.note);
+    });
+
     test('a skipped second at 1 Hz does not end the nap', () {
       final d = day(1, dropEvery: 120);
       final m = detectNaps(d.accel, d.hr);

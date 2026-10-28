@@ -272,11 +272,12 @@ Metric<List<NapWindow>> detectNaps(
 
   // Wall-clock seconds one sample stands for in the coverage gates below.
   // Counting samples as seconds put a fully-measured 5 s stream at 20%
-  // coverage and rejected every bout as unmeasured. Floored so a sample is
-  // never credited with more time than the stream actually spaces them by, and
-  // exactly 1 at 1 Hz.
-  final cadenceFloor = (mask.cadenceSec ?? 1).floor();
-  final secPerSample = cadenceFloor < 1 ? 1 : cadenceFloor;
+  // coverage and rejected every bout as unmeasured. The measured cadence is
+  // used as is and the total rounded once: flooring it to whole seconds
+  // credited a 0.5 s sample with a full second (doubling coverage on a 2 Hz
+  // stream) and a 2.5 s sample with two.
+  final secPerSample = mask.cadenceSec ?? 1.0;
+  int samplesToSec(int count) => (count * secPerSample).round();
 
   final runs = <List<int>>[];
   var i = 0;
@@ -446,10 +447,11 @@ Metric<List<NapWindow>> detectNaps(
     // Wall-clock accel coverage — the seconds inside the bout the band actually
     // measured gravity for, over the bout's elapsed span (so a recording hole
     // counts against it exactly as an invalid sample does).
-    var accelSec = 0;
+    var accelSamples = 0;
     for (var k = start; k < end; k++) {
-      if (series[k].valid) accelSec += secPerSample;
+      if (series[k].valid) accelSamples++;
     }
+    final accelSec = samplesToSec(accelSamples);
     if (accelSec / tib < minNapAccelCoverage) {
       unobserved++;
       continue;
@@ -466,7 +468,7 @@ Metric<List<NapWindow>> detectNaps(
     for (var k = start; k < end; k++) {
       if (hr[k] > 0) boutHr.add(hr[k]);
     }
-    final hrSec = boutHr.length * secPerSample;
+    final hrSec = samplesToSec(boutHr.length);
     final coverage = hrSec >= tib ? 1.0 : hrSec / tib;
     if (coverage < minNapHrCoverage) {
       unverifiable++;
@@ -524,10 +526,11 @@ Metric<List<NapWindow>> detectNaps(
     // over-credits and under-recommends sleep.
     // Credited in wall-clock seconds, like `tib`: counting one per still
     // sample put a fully-still 5 s stream at a fifth of its real sleep time.
-    var tst = 0;
+    var stillSamples = 0;
     for (var k = start; k < end; k++) {
-      if (stillAt(k)) tst += secPerSample;
+      if (stillAt(k)) stillSamples++;
     }
+    var tst = samplesToSec(stillSamples);
     if (tst > tib) tst = tib;
 
     // Confidence, NOT efficiency. A 20% dip below the awake baseline earns
@@ -580,13 +583,14 @@ Metric<List<NapWindow>> detectNaps(
       if (me > ms) mainSec = absAt(me - 1) + 1 - absAt(ms);
     }
     final outside = spanSec - mainSec;
-    var outsideAccel = 0;
+    var outsideSamples = 0;
     for (var k = 0; k < n; k++) {
       if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) {
         continue;
       }
-      if (series[k].valid) outsideAccel += secPerSample;
+      if (series[k].valid) outsideSamples++;
     }
+    var outsideAccel = samplesToSec(outsideSamples);
     if (outsideAccel > outside) outsideAccel = outside;
     if (outside > 0 && outsideAccel / outside < minNapAccelCoverage) {
       return Metric<List<NapWindow>>.absent(
