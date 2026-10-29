@@ -86,7 +86,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
 | `sleepAccounting` | `sleep/accounting.dart` | TIB/TST/WASO/efficiency accounting | — |
-| `cardiopulmonaryCoupling` | `sleep/cpc.dart` | cardiopulmonary coupling | — |
 | `sleepCyclesMetric` | `sleep/cycles.dart` | fractal ultradian sleep-cycle detection | Rosenblum et al. 2024 |
 | `circadianNonparametric` | `sleep/circadian_np.dart` | IS/IV/RA/L5/M10 nonparametric circadian indices | — |
 | `phillipsSri` | `sleep/sri.dart` | true Phillips epoch-agreement Sleep Regularity Index | Phillips et al. 2017 |

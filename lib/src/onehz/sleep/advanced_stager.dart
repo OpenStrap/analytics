@@ -39,7 +39,7 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
 import '../clinical/hrv_time.dart';
-import 'cardio_stager.dart' show cardioStager;
+import 'cardio_stager.dart' show cardioStager, minHrCoverage;
 import 'accounting.dart' show SleepStage;
 import 'band_offset.dart';
 
@@ -405,6 +405,12 @@ class AdvancedSleepStager {
       if (!continuesChain) {
         chainFromOvernight = _isOvernightOnset(p.start, tzAt);
         nightTailAccepted = false; // new chain re-arms the one-shot exemption
+      } else if (!chainFromOvernight && _isOvernightOnset(p.start, tzAt)) {
+        // A chain that opened on an evening doze (onset before 20:00) becomes
+        // overnight once the real night continues it. Judging only the first
+        // session would leave the flag false for the whole night and drop the
+        // short re-onset after a pre-dawn arousal at the 60-min floor.
+        chainFromOvernight = true;
       } else if (isNightTail && (p.end - p.start) <= minSleepS) {
         // Consume the one-shot ONLY when a SHORT tail actually relied on the floor
         // exemption; a >60-min continuation passes the floor unaided and must not
@@ -1435,9 +1441,14 @@ class AdvancedSleepStager {
   /// way.
   ///
   /// HONESTY: seconds with no usable accelerometer are NOT staged. The window
-  /// is split at those gaps and each contiguous usable RUN is staged on its own
-  /// (so a dropout cannot pollute the neighbouring run's night baselines
-  /// either); the gap seconds, runs too short to stage, and a window where
+  /// is split at those gaps into contiguous usable RUNS, which are laid end to
+  /// end (gap seconds dropped, never filled) and staged in ONE `cardioStager`
+  /// call with the run boundaries passed as `runStarts`: the night baselines
+  /// come from every run, while continuity rules never reach across a gap.
+  /// Staging each run on its own judged a short run against itself, so a run
+  /// holding only an awakening set its arousal cut above its own awake HR and
+  /// came out light/deep sleep end to end. The gap seconds, runs too short or
+  /// too HR-sparse to stage, and a window where
   /// `cardioStager` itself abstains all come back as 'unobserved' — the "stay
   /// unstaged" contract [stageWindow] documents. They must NEVER come back as
   /// 'light', which is what a zero-data window used to report for its entire
@@ -1492,6 +1503,10 @@ class AdvancedSleepStager {
 
     // Everything not staged below stays 'unobserved' — no stage, no wake.
     final perSec = List<String>.filled(span, 'unobserved');
+    // Stageable runs. All but the last are trimmed to whole epochs so every run
+    // boundary sits on the epoch grid; cardioStager scores no sub-epoch tail
+    // anyway, and the tail takes the run's last label below.
+    final runs = <({int from, int to, int nEp})>[];
     var i = 0;
     while (i < span) {
       if (!usable[i]) {
@@ -1503,31 +1518,72 @@ class AdvancedSleepStager {
         j++;
       }
       if ((j - i) >= minStageableSec) {
-        final result = cardioStager(
-          hr1hz.sublist(i, j),
-          accel.sublist(i, j),
-          rrMs: rrMs,
-          rrTsMs: rrTsMs,
-        );
-        final nEpoch = result.base.stages.length;
-        for (var e = 0; e < nEpoch; e++) {
-          final label = switch (result.base.stages[e]) {
-            SleepStage.wake => 'wake',
-            SleepStage.rem => 'rem',
-            SleepStage.nrem => (e < result.deepFlag.length && result.deepFlag[e])
-                ? 'deep'
-                : 'light',
-          };
+        final nEp = (j - i) ~/ epSec;
+        // cardioStager's HR-coverage abstention, applied per run as it was
+        // when each run was staged alone: pooled with well-covered runs, a run
+        // with no HR would pass the window-wide gate and fall through to NREM.
+        var withHr = 0;
+        for (var e = 0; e < nEp; e++) {
           final lo = i + e * epSec;
-          // The last epoch absorbs the run's sub-epoch remainder, exactly as
-          // [_buildSegments] extends the final segment to the window end.
-          final hi = e == nEpoch - 1 ? j : math.min(j, lo + epSec);
-          for (var k = lo; k < hi; k++) {
-            perSec[k] = label;
+          for (var k = lo; k < lo + epSec; k++) {
+            if (hr1hz[k] > 0) {
+              withHr++;
+              break;
+            }
           }
+        }
+        if (withHr >= minHrCoverage * nEp) {
+          runs.add((from: i, to: j, nEp: nEp));
         }
       }
       i = j;
+    }
+
+    if (runs.isNotEmpty) {
+      final hrCat = <double>[];
+      final accelCat = <AccelSample>[];
+      final runStarts = <int>[];
+      for (var ri = 0; ri < runs.length; ri++) {
+        final r = runs[ri];
+        runStarts.add(hrCat.length);
+        // The last run keeps its tail (no boundary follows it), so a window
+        // with a single run is staged exactly as before.
+        final stop = ri == runs.length - 1 ? r.to : r.from + r.nEp * epSec;
+        hrCat.addAll(hr1hz.sublist(r.from, stop));
+        accelCat.addAll(accel.sublist(r.from, stop));
+      }
+      final result = cardioStager(
+        hrCat,
+        accelCat,
+        rrMs: rrMs,
+        rrTsMs: rrTsMs,
+        runStarts: runStarts,
+      );
+      final stages = result.base.stages;
+      // Empty = cardioStager abstained: everything stays 'unobserved'.
+      if (stages.isNotEmpty) {
+        var g = 0; // epoch index into the concatenated result
+        for (final r in runs) {
+          for (var e = 0; e < r.nEp; e++, g++) {
+            if (g >= stages.length) break;
+            final label = switch (stages[g]) {
+              SleepStage.wake => 'wake',
+              SleepStage.rem => 'rem',
+              SleepStage.nrem =>
+                (g < result.deepFlag.length && result.deepFlag[g])
+                    ? 'deep'
+                    : 'light',
+            };
+            final lo = r.from + e * epSec;
+            // The last epoch absorbs the run's sub-epoch remainder, exactly as
+            // [_buildSegments] extends the final segment to the window end.
+            final hi = e == r.nEp - 1 ? r.to : lo + epSec;
+            for (var k = lo; k < hi; k++) {
+              perSec[k] = label;
+            }
+          }
+        }
+      }
     }
 
     // Coalesce the per-second labels into contiguous [StageSegment]s tiling

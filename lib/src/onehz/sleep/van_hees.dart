@@ -129,8 +129,9 @@ class ImmobilityMask {
   /// well-formed 0.0° that is not a measurement of anything.
   final List<double> zAngleDeg;
 
-  /// |Δ z-angle| vs the previous second (index 0 is 0 by definition). NaN when
-  /// either endpoint second is invalid — the arm may have moved across the gap
+  /// |Δ z-angle| vs the sample one smoothing epoch (`smoothSec`) earlier —
+  /// clamped to index 0 for the first epoch, and index 0 is 0 by definition.
+  /// NaN when either endpoint second is invalid — the arm may have moved across the gap
   /// and the record cannot say. Every comparison against NaN is false, so a
   /// consumer testing `deltaDeg[k] < threshold` degrades to "not still", never
   /// to "perfectly still".
@@ -241,9 +242,29 @@ ImmobilityMask immobilityMask(
   final ang = _rollingMedian(raw, smoothSamples);
 
   // 3. per-second immobility: |Δ z-angle| < threshold sustained for ≥ window.
+  //
+  // van Hees 2015 / GGIR test the change between CONSECUTIVE 5 s EPOCHS against
+  // 5°, not the change between consecutive samples. Differencing adjacent 1 Hz
+  // samples made the rule "< 5° per second": a 20° roll spread over 6 s moves
+  // ~3°/s, never crossed the threshold, and a restless hour in bed was certified
+  // as sustained rest. Differencing the smoothed angle across one smoothing
+  // epoch is the sliding form of the epoch-to-epoch comparison, so a slow roll
+  // is judged by the full change it makes over 5 s.
+  //
+  // The rolling median carries NaN only at the unmeasured second itself, so an
+  // unmeasured second strictly INSIDE the compared span left the difference of
+  // its two measured endpoints finite: the arm could have moved and come back
+  // there unobserved. Any unmeasured second in the span makes the change NaN.
+  final invalidBefore = List<int>.filled(n + 1, 0);
+  for (var i = 0; i < n; i++) {
+    invalidBefore[i + 1] = invalidBefore[i] + (accel[i].valid ? 0 : 1);
+  }
   final dAng = List<double>.filled(n, 0);
   for (var i = 1; i < n; i++) {
-    dAng[i] = (ang[i] - ang[i - 1]).abs();
+    final from = math.max(0, i - smoothSamples);
+    dAng[i] = invalidBefore[i + 1] - invalidBefore[from] > 0
+        ? double.nan
+        : (ang[i] - ang[from]).abs();
   }
   final immobile = List<bool>.filled(n, false);
   final immobileUnknown = List<bool>.filled(n, false);
@@ -265,17 +286,22 @@ ImmobilityMask immobilityMask(
   //     record it in `immobileUnknown` rather than guessing either way.
   //
   // A window containing an UNMEASURED second lands in the same two cases, for
-  // the same reason: movement already seen decides it (the sustained rule has
-  // failed on the data in hand), otherwise the arm could have moved where we
-  // were not looking ⇒ undecidable, never asserted rest.
+  // the same reason: movement seen anywhere in the window decides it (the
+  // sustained rule has failed on the data in hand), otherwise the arm could
+  // have moved where we were not looking ⇒ undecidable, never asserted rest.
+  // The scan therefore keeps going past a gap: stopping there missed measured
+  // movement later in the same window and reported it as undecidable.
   for (var i = 0; i < n; i++) {
     final hi = math.min(n, i + winSamples);
     var maxd = 0.0;
     var gap = !accel[i].valid;
     for (var k = i + 1; k < hi; k++) {
-      if (!accel[k].valid) {
+      // NaN also when the epoch this second is compared against reaches back
+      // into an unmeasured second, possibly one before `i` — the arm may have
+      // moved there, so it is a gap, not stillness.
+      if (!accel[k].valid || dAng[k].isNaN) {
         gap = true;
-        break;
+        continue;
       }
       if (dAng[k] > maxd) {
         maxd = dAng[k];

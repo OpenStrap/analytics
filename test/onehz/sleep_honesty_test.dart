@@ -12,6 +12,8 @@
 import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/src/onehz/sleep/cardio_stager.dart'
+    show websterRescoreCardio;
 
 /// Fixed absolute epoch second so every fixture is deterministic.
 const int _t0 = 1700000000;
@@ -130,7 +132,8 @@ void main() {
           reason: 'not one second of gravity was measured');
     });
 
-    test('the SAME vectors marked valid still stage — the flag is the only '
+    test(
+        'the SAME vectors marked valid still stage — the flag is the only '
         'difference', () {
       // Control: proves the abstention above comes from the validity flag and
       // not from the (0,0,0) coordinates or the window shape.
@@ -221,6 +224,49 @@ void main() {
           forcedWindow: (onsetSec: _t0, offsetSec: _t0 + 4 * 3600));
       expect(s.tstSec!, greaterThan((0.9 * 4 * 3600).round()));
     });
+
+    test(
+        'an awakening walled in by two accel holes is judged against the '
+        'night, not against itself (was: 25 min awake staged light/deep)', () {
+      // 8 h at ~55 bpm and still, with a 25 min awakening at ~78 bpm and more
+      // movement starting at 3 h, and a 2 min accel hole on each side of it.
+      // Each hole is past the 60 s carry-forward bound, so the awakening is a
+      // run of its own. Staged on its own, its HR baseline was its own awake
+      // HR, no epoch reached its own arousal cut, and the whole block fell
+      // through to NREM: {light: 1230, deep: 270} pre-fix, against
+      // {wake: 1500} for the same input without the holes.
+      final saved = cardioUserProfile;
+      cardioUserProfile = null; // a new user: no rolling profile to lean on
+      addTearDown(() => cardioUserProfile = saved);
+      final r = math.Random(7);
+      const span = 8 * 3600;
+      const wS = _t0 + 3 * 3600, wE = wS + 1500;
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      final rr = <RrTs>[];
+      for (var k = 0; k < span; k++) {
+        final ts = _t0 + k;
+        final awake = ts >= wS && ts < wE;
+        final hole = (ts >= wS - 120 && ts < wS) || (ts >= wE && ts < wE + 120);
+        final noise = awake ? 0.02 : 0.002;
+        double j() => noise * (r.nextDouble() - 0.5);
+        if (!hole) grav.add(GravTs(ts, 0.1 + j(), 0.2 + j(), 0.97 + j()));
+        final bpm = (awake ? 78.0 : 55.0) + 2 * (r.nextDouble() - 0.5);
+        if (hole) continue;
+        hr.add(HrTs(ts, bpm));
+        rr.add(RrTs(ts, 60000 / bpm + 20 * (r.nextDouble() - 0.5)));
+      }
+      final s =
+          AdvancedSleepStager.stageWindow(_t0, _t0 + span, grav, hr, rr: rr);
+      final inBlock = <String, int>{};
+      for (final seg in s.stages) {
+        final a = math.max(seg.start, wS), b = math.min(seg.end, wE);
+        if (b > a) inBlock[seg.stage] = (inBlock[seg.stage] ?? 0) + (b - a);
+      }
+      expect(inBlock['wake'] ?? 0, greaterThanOrEqualTo(1200),
+          reason: 'pre-fix: 0 s of the 1500 s awakening staged wake');
+      expect(inBlock['deep'] ?? 0, 0, reason: 'pre-fix: 270 s deep');
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -269,10 +315,11 @@ void main() {
     test('cardio_stager: only the bout with REAL flanking sleep is bridged',
         () {
       // 15 min sleep, then 5 × (4 min wake + 1 min sleep). The rule table is
-      // now Webster's published one — ≥15 min of flanking sleep bridges ≤4 min
-      // of wake — so bout #1 legitimately bridges. Bouts #2-#5 are flanked by
-      // ONE minute of sleep and must survive: pre-fix each bridged bout was
-      // counted as context for the next, so all five collapsed and WASO hit 0.
+      // now bounded by Webster's minute values — ≥15 min of flanking sleep
+      // bridges ≤4 min of wake — so bout #1 legitimately bridges. Bouts #2-#5
+      // are flanked by ONE minute of sleep and must survive: pre-fix each
+      // bridged bout was counted as context for the next, so all five
+      // collapsed and WASO hit 0.
       //
       // RE-PINNED with the rule table: this used to use 10-min bouts, which the
       // old non-published [15 → 10] row bridged. Under Webster a 10-min bout is
@@ -283,13 +330,25 @@ void main() {
           reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
     });
 
-    test('stager: only the bout with REAL flanking sleep is bridged', () {
-      // Same shape, sized to the classic Webster table this file uses
-      // (≥15 min context bridges ≤5 min of wake).
-      final sm = fragmented(leadMin: 15, wakeMin: 4, reps: 5);
-      websterRescoreAutonomic(sm, 30);
-      expect(wakeInBody(sm), 4 * 8,
-          reason: 'four 4-min bouts survive; pre-fix: 0 (full cascade)');
+    test('a 5-min awakening flanked by 15 min of sleep stays wake', () {
+      // The bridging table tops out at 4 min. A second copy that bridged up to
+      // 5 min used to sit in stager.dart behind a public seam; this pins the
+      // one live table so the wider bound cannot quietly come back.
+      final sm = [
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+        for (var k = 0; k < 10; k++) SleepStage.wake,
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+      ];
+      websterRescoreCardio(sm, 30);
+      expect(wakeInBody(sm), 10);
+
+      final short = [
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+        for (var k = 0; k < 8; k++) SleepStage.wake,
+        for (var k = 0; k < 30; k++) SleepStage.nrem,
+      ];
+      websterRescoreCardio(short, 30);
+      expect(wakeInBody(short), 0, reason: '4 min is still an arousal');
     });
 
     test('a genuinely fragmented night keeps its WASO end-to-end', () {
@@ -364,7 +423,7 @@ void main() {
 
       active(2 * 3600); // 16:00-18:00
       sleep(6 * 3600); // 18:00-00:00  → night A
-      active(90 * 60, bpm: 90); // 00:00-01:30 (>60 min ⇒ A and B never bridge)
+      active(90 * 60, bpm: 90); // 00:00-01:30 (detected gap ~95 min > 90 ⇒ never bridged)
       sleep(2 * 3600); // 01:30-03:30  ┐
       active(45 * 60, bpm: 90); //     │ night B — three fragments bridged
       sleep(2 * 3600); // 04:15-06:15  │ across two <60 min gaps
@@ -384,6 +443,104 @@ void main() {
       expect(onsetSod, closeTo(1 * 3600 + 32 * 60, 120),
           reason: 'pre-fix the early midpoint made night A (18:02) win');
       expect(s.inBedSec!, greaterThan(7 * 3600));
+    });
+
+    // detectSleep chains a night across any awakening up to
+    // nightContinuationGapMin (90 min). segmentSleep used to bridge only gaps
+    // under 60 min, so a 60-90 min awakening split one night into two groups
+    // and only one half was published.
+    void Function(int, {double bpm}) feeder(
+        List<AccelSample> accel, List<double> hr, int start,
+        {required bool still}) {
+      return (int secs, {double bpm = 0}) {
+        final base = accel.length;
+        for (var k = 0; k < secs; k++) {
+          final t = (start + base + k) * 1000.0;
+          if (still) {
+            accel.add(AccelSample(t, 0.02, 0.02, 1.0));
+            hr.add(bpm + 1.5 * math.sin(k / 1800.0));
+          } else {
+            final ph = math.sin(k * 0.5);
+            accel.add(AccelSample(t, 0.3 * ph, 0.3, 0.9 * (1 - 0.2 * ph)));
+            hr.add(bpm + 2 * math.sin(k / 600.0));
+          }
+        }
+      };
+    }
+
+    test('a 75-min awakening keeps both halves of the night', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 21 * 3600; // 21:00
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(2 * 3600, bpm: 76); // 21:00-23:00
+      sleep(210 * 60, bpm: 50); // 23:00-02:30
+      active(75 * 60, bpm: 90); // 02:30-03:45 up with the baby
+      sleep(225 * 60, bpm: 50); // 03:45-07:30
+      active(2 * 3600, bpm: 76); // 07:30-09:30
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      final onset = s.window!.onsetMs! ~/ 1000;
+      final offset = s.window!.offsetMs! ~/ 1000;
+      // Pre-fix: only the 03:45-07:30 half was published (~3.7 h in bed).
+      expect(onset, lessThan(_midnight + 86400 - 30 * 60),
+          reason: 'onset must be the 23:00 block, not 03:45');
+      expect(offset, greaterThan(_midnight + 86400 + 7 * 3600));
+      expect(s.inBedSec!, greaterThan(8 * 3600));
+      // The awakening is inside the window and is counted as wake.
+      expect(s.wasoSec!, greaterThan(60 * 60));
+      expect(s.tstSec!, greaterThan(5 * 3600));
+    });
+
+    test('a short tail after a 70-min awakening is not lost', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 20 * 3600 + 30 * 60; // 20:30
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(2 * 3600, bpm: 76); // 20:30-22:30
+      sleep(390 * 60, bpm: 50); // 22:30-05:00
+      active(70 * 60, bpm: 90); // 05:00-06:10
+      sleep(40 * 60, bpm: 50); // 06:10-06:50 night tail
+      active(2 * 3600, bpm: 76); // 06:50-08:50
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      final offset = s.window!.offsetMs! ~/ 1000;
+      // Pre-fix the window ended ~05:00 and the tail counted nowhere (nap
+      // detection discards it as a night tail).
+      expect(offset, greaterThan(_midnight + 86400 + 6 * 3600 + 30 * 60));
+    });
+
+    test('two daytime sleeps 75 min apart are not bridged into one window', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 7 * 3600; // 07:00
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(5 * 3600, bpm: 76); // 07:00-12:00
+      sleep(200 * 60, bpm: 50); // 12:00-15:20
+      active(75 * 60, bpm: 90); // 15:20-16:35 up and about
+      sleep(200 * 60, bpm: 50); // 16:35-19:55
+      active(2 * 3600, bpm: 76); // 19:55-21:55
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      // Bridged, this was one ~8 h window with the time up and about counted
+      // as wake. The wider gap is for an overnight chain only.
+      expect(s.inBedSec!, lessThan(4 * 3600));
+      expect(s.wasoSec!, lessThan(30 * 60));
     });
   });
 
@@ -465,6 +622,87 @@ void main() {
           reason: 'pre-fix the pre-onset beats created a minute-0 point at '
               't == onsetSec');
       expect(r.series.any((p) => p['t'] == onset), isFalse);
+    });
+
+    test('the cycle inside an island between two RR holes is kept', () {
+      // A 90-min RMSSD rhythm with contact lost for minutes 60-89 and 250-279.
+      // The island between them holds two peaks (~112 and ~202 min). The
+      // taller one walks into a hole on both sides; it used to be skipped
+      // outright, which left the island one peak and no cycle at all.
+      const onset = _t0;
+      const nMin = 480;
+      for (var seed = 1; seed <= 6; seed++) {
+        final rnd = math.Random(seed);
+        final rr = <double>[], ts = <double>[];
+        for (var s = 0; s < nMin * 60; s++) {
+          final m = s ~/ 60;
+          if ((m >= 60 && m < 90) || (m >= 250 && m < 280)) continue;
+          final amp = 20 + 15 * math.sin(2 * math.pi * (m - 90) / 90);
+          rr.add(1000 + amp * (rnd.nextBool() ? 1 : -1) * 0.7);
+          ts.add((onset + s) * 1000.0);
+        }
+        final r = detectSleepCycles(rr, ts, onset, onset + nMin * 60);
+        final inIsland =
+            r.cycles.where((c) => c.startMin >= 90 && c.endMin < 250).toList();
+        expect(inIsland, hasLength(1), reason: 'seed $seed');
+        expect(inIsland.single.lenMin, inInclusiveRange(70, 110));
+      }
+    });
+
+    test('a cycle never spans a long RR hole', () {
+      // 8 h with a 90-min RMSSD rhythm, then no RR at all for minutes 100-259
+      // (contact loss). Pre-fix the peak before the hole and the peak after it
+      // became one ~186-min "cycle" and the mean jumped from ~89 to ~138 min.
+      const onset = _t0;
+      const nMin = 480;
+      List<SleepCycle> cyclesWith({int? holeFrom, int? holeTo, int seed = 7}) {
+        final rnd = math.Random(seed);
+        final rr = <double>[], ts = <double>[];
+        for (var s = 0; s < nMin * 60; s++) {
+          final m = s ~/ 60;
+          if (holeFrom != null && m >= holeFrom && m < holeTo!) continue;
+          final amp = 20 + 15 * math.sin(2 * math.pi * m / 90);
+          rr.add(1000 + amp * (rnd.nextBool() ? 1 : -1) * 0.7);
+          ts.add((onset + s) * 1000.0);
+        }
+        final r = detectSleepCycles(rr, ts, onset, onset + nMin * 60);
+        if (r.cycles.isNotEmpty) {
+          expect(
+              r.meanDurationMin,
+              closeTo(
+                  r.cycles.fold<int>(0, (a, c) => a + c.lenMin) /
+                      r.cycles.length,
+                  1e-9));
+        }
+        return r.cycles;
+      }
+
+      final full = cyclesWith();
+      expect(full, isNotEmpty);
+      for (final c in full) {
+        expect(c.lenMin, inInclusiveRange(70, 110));
+      }
+
+      // Short contact losses matter most: the ±10 min smoothing paints into
+      // each edge of a hole, so a 30-40 min raw hole must still be caught.
+      for (final h in const [
+        [100, 260, 7],
+        [100, 260, 11],
+        [150, 190, 11],
+        [200, 240, 7],
+        [200, 240, 11],
+        [100, 130, 11],
+        [100, 140, 11],
+        [60, 100, 11],
+      ]) {
+        final holed = cyclesWith(holeFrom: h[0], holeTo: h[1], seed: h[2]);
+        for (final c in holed) {
+          expect(c.startMin < h[1] && c.endMin > h[0], isFalse,
+              reason: 'cycle ${c.startMin}-${c.endMin} spans the '
+                  '${h[0]}-${h[1]} hole (seed ${h[2]})');
+          expect(c.lenMin, inInclusiveRange(70, 110));
+        }
+      }
     });
   });
 
@@ -548,7 +786,9 @@ void main() {
 
       // The two seconds must not share one answer — that is the whole bug.
       expect(w.immobileUnknown[3350] == w.immobileUnknown[3500], isFalse);
-      expect(w.undecidableSec, 193, reason: 'pre-fix: 0 (no such state)');
+      // The burst also decides the seconds whose 5 s comparison epoch still
+      // reaches back into it.
+      expect(w.undecidableSec, 189, reason: 'pre-fix: 0 (no such state)');
     });
   });
 
@@ -557,31 +797,6 @@ void main() {
   //     never a sentinel, never a NaN dressed up as a number.
   // ═══════════════════════════════════════════════════════════════════════════
   group('honesty — cardiopulmonary coupling is WITHDRAWN', () {
-    test('always absent, with the reason attached', () {
-      // It never measured coupling. Thomas 2005 needs a respiration channel
-      // INDEPENDENT of the beat times; the "surrogate" here was the NN series
-      // linearly detrended, so sqrt(P_rr . P_resp) collapsed to P_rr and
-      // cpc_ratio equalled the plain RR periodogram HF/LF ratio — measured
-      // 84.493910 vs 84.493190 on this shape, a ratio of 1.0000085. A healthy
-      // record used to "still report a real ratio"; that was the bug, not the
-      // control case.
-      final nn = <double>[];
-      final ts = <double>[];
-      var t = 0.0;
-      for (var i = 0; i < 3600; i++) {
-        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
-        t += rr;
-        nn.add(rr);
-        ts.add(t);
-      }
-      // ignore: deprecated_member_use_from_same_package
-      final m = cardiopulmonaryCoupling(nn, ts);
-      expect(m.present, isFalse);
-      expect(m.value, isNull);
-      expect(m.confidence, 0);
-      expect(m.note, contains('respiration channel'));
-    });
-
     test('the ratio it used to publish was the RR periodogram HF/LF', () {
       // The assertion that would have failed from the first commit (T-02).
       final nn = <double>[];
