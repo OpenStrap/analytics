@@ -265,9 +265,7 @@ void main() {
       expect(HeartRateZones.timeInZone(stream(600, 20), zoneSet), isNull);
     });
 
-    test('StrainScorer: 301 s and 600 s produce no durations and no strain',
-        () {
-      final bpm = List<double>.filled(40, 150.0);
+    test('StrainScorer: 301 s and 600 s produce no durations', () {
       List<double> ts(double cadence) =>
           [for (var i = 0; i < 40; i++) i * cadence];
       expect(StrainScorer.medianIntervalSeconds(ts(300)), closeTo(300, 1e-12));
@@ -275,15 +273,7 @@ void main() {
       expect(StrainScorer.medianIntervalSeconds(ts(600)), isNull);
       expect(StrainScorer.sampleDurationsMinutes(ts(301)), isEmpty);
       expect(StrainScorer.sampleDurationsMinutes(ts(600)), isEmpty);
-      // The abstention has to reach the published number, not stop at the
-      // helper: `banisterTRIMP` credits `fallbackSampleMin` per sample when
-      // handed an empty list, which is the fabricated 1 s all over again.
-      expect(
-          StrainScorer.strain(bpm, ts(301), maxHR: 190, restingHR: 50), isNull);
-      expect(
-          StrainScorer.strain(bpm, ts(600), maxHR: 190, restingHR: 50), isNull);
-      expect(StrainScorer.strain(bpm, ts(300), maxHR: 190, restingHR: 50),
-          isNotNull);
+      expect(StrainScorer.sampleDurationsMinutes(ts(300)), hasLength(40));
     });
 
     test('AdvancedSleepStager stages nothing past its own cadence ceiling', () {

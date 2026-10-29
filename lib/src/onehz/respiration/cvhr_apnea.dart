@@ -183,7 +183,15 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final perHour = cycleCount / analyzedHours;
-  final conf = ((1 - artifactFraction) * 0.85).clamp(0.2, 0.85);
+  // Confidence also scales with how much time was analysed. Any gap-free
+  // stretch of a minute counts, so a night that dropout left with one clean
+  // 72 s segment and a single dip read 50 cycles/h at 0.85 and tier HIGH. Full
+  // weight needs the same observed hours the 30-night screen asks of a night;
+  // below that the per-hour index is an estimate off a short sample.
+  final coverage = (analyzedHours / minAnalyzedHoursPerNight).clamp(0.0, 1.0);
+  final conf = ((1 - artifactFraction) * 0.85 * coverage).clamp(0.01, 0.85);
+  final tier =
+      analyzedHours < minAnalyzedHoursPerNight ? Tier.estimate : Tier.high;
   return Metric<CvhrResult>(
     value: CvhrResult(
       cycleCount: cycleCount,
@@ -195,7 +203,7 @@ Metric<CvhrResult> cvhrApneaScreen(
       widthQuartilesSec: _quartiles(widths),
     ),
     confidence: conf,
-    tier: Tier.high,
+    tier: tier,
     inputs_used: inputs,
     note: 'CVHR/ACAT (Hayano) apnea SCREEN — NOT a diagnosis, NOT an AHI; '
         'single-night CVHR has substantial night-to-night variability, '
@@ -272,10 +280,15 @@ class CvhrDistribution {
   /// mean is being read against.
   final List<double> quartiles;
 
-  /// True when the recent nights sit above the retained distribution's own p75.
-  /// This is the ONLY comparative statement the screen makes, and it is a
-  /// statement about this user's own history, not about apnea.
-  final bool aboveOwnUsual;
+  /// True when the recent nights sit clearly above the OLDER retained nights:
+  /// above their p75 and by more than their own spread allows for. False when
+  /// they do not. NULL while there are fewer than
+  /// [minReferenceNightsForCvhrComparison] older nights: a false there would be
+  /// read as "stayed inside your range" even for a jump from 5/h to 40/h, and
+  /// the honest answer is that no comparison exists yet. This is the ONLY
+  /// comparative statement the screen makes, and it is a statement about this
+  /// user's own history, not about apnea.
+  final bool? aboveOwnUsual;
 
   const CvhrDistribution({
     required this.nightsUsed,
@@ -304,14 +317,62 @@ const double minAnalyzedHoursPerNight = 4.0;
 /// And this many such nights must exist before the screen says anything.
 const int minNightsForCvhrDistribution = 5;
 
-/// Nights considered, newest-first, once the gates have run.
+/// Nights considered, newest-first, once the gates have run. Also the calendar
+/// span, in days ending on the newest night, that a night must fall inside.
 const int cvhrDistributionWindowNights = 30;
+
+/// The comparison needs this many OLDER nights behind the recent ones. It is
+/// a separate, higher floor than [minNightsForCvhrDistribution]: at the 5-night
+/// distribution floor the reference would be 3 nights, and a stable user then
+/// read as "running higher" on about one evaluation in five.
+const int minReferenceNightsForCvhrComparison = 6;
+
+/// Floor on the reference spread, in cycles/h. Identical or quantized nights
+/// give MAD = 0, and a zero spread turns any difference at all into a verdict.
+/// A 1/h difference in an AHI-scaled index is below any published category
+/// boundary (5/15/30). Candidate for personalisation, not a validated constant.
+const double minCvhrReferenceSpreadPerHour = 1.0;
+
+/// One-sided 95% normal quantile for the recent-vs-reference gap.
+const double _cvhrComparisonZ = 1.645;
+
+/// Whether the recent nights sit clearly above the OLDER nights behind them.
+///
+/// The recent nights are held out of [reference]: comparing them with a range
+/// that contains them makes a single high night its own evidence. Above the
+/// reference p75 alone is not enough either — with a handful of nights p75 is
+/// close to an order statistic and ordinary night-to-night noise clears it.
+/// The recent mean must clear that p75 by z·σ̂·√(1/m + π/(2r)), the standard
+/// error of an m-night mean against an r-night median (π/2 is the median's
+/// variance inflation for normal data), σ̂ = MAD×1.4826. Measuring the gap
+/// from the median instead let a stable user through 5-10% of the time; from
+/// p75 it stays at or below what the plain p75 test gave on long histories.
+///
+/// Null, not false, when the reference is under the floor: there is nothing
+/// to compare against yet, and false would claim the recent nights stayed
+/// inside a range nobody measured.
+bool? _recentAboveReference({
+  required double recentMean,
+  required int recentNights,
+  required List<double> reference,
+}) {
+  if (reference.length < minReferenceNightsForCvhrComparison ||
+      recentNights < 1) {
+    return null;
+  }
+  final p75 = percentile(reference, 75)!;
+  final spread = math.max(mad(reference)!, minCvhrReferenceSpreadPerHour);
+  final se =
+      spread * math.sqrt(1 / recentNights + math.pi / (2 * reference.length));
+  return recentMean - p75 > _cvhrComparisonZ * se;
+}
 
 /// RESP-01 — the 30-night personal CVHR distribution.
 ///
 /// [nights] in any order; the newest [cvhrDistributionWindowNights] retained
-/// nights are used. Returns ABSENT — never a partial number — until at least
-/// [minNightsForCvhrDistribution] nights clear both gates.
+/// nights that fall within [cvhrDistributionWindowNights] calendar days of the
+/// newest night are used. Returns ABSENT — never a partial number — until at
+/// least [minNightsForCvhrDistribution] nights clear both gates.
 Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
   const inputs = ['cvhr_apnea', 'irregular_rhythm_flag'];
   // Newest first, one row per day (a re-derive can leave two).
@@ -322,11 +383,26 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
   final sorted = byDay.values.toList()
     ..sort((a, b) => b.dayKey.compareTo(a.dayKey));
 
+  // Bounded by calendar days, not just by count: after a wear gap the newest
+  // 30 rows reach back months, and the "recent" third then mixes the first
+  // nights back with nights from before the gap. Anchored on the newest night,
+  // never the wall clock. A label that does not parse is not bounded, which is
+  // the old count-only behaviour.
+  final anchorDay =
+      sorted.isEmpty || DateTime.tryParse(sorted.first.dayKey) == null
+          ? null
+          : calendarDays([sorted.first.dayKey])[0];
+
   var excludedIrregular = 0;
   var excludedThin = 0;
   final kept = <CvhrNight>[];
   for (final n in sorted) {
     if (kept.length >= cvhrDistributionWindowNights) break;
+    if (anchorDay != null && DateTime.tryParse(n.dayKey) != null) {
+      final day = calendarDays([n.dayKey])[0];
+      // Newest-first, so every later night is older still.
+      if (anchorDay - day >= cvhrDistributionWindowNights) break;
+    }
     if (!n.cvhrPerHour.isFinite || !n.analyzedHours.isFinite) continue;
     // RESP-02 cross-gate FIRST: an AF night is not a thin night, and counting
     // it as one would misreport why the screen is quiet.
@@ -383,7 +459,11 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
       weightedMean: all,
       recentWeightedMean: rec,
       quartiles: q,
-      aboveOwnUsual: rec > q[2],
+      aboveOwnUsual: _recentAboveReference(
+        recentMean: rec,
+        recentNights: recent.length,
+        reference: [for (final n in kept.skip(recentCount)) n.cvhrPerHour],
+      ),
     ),
     // Relative tier on purpose: this compares the user only with themselves.
     tier: Tier.relative,
@@ -394,7 +474,8 @@ Metric<CvhrDistribution> cvhrPersonalDistribution(List<CvhrNight> nights) {
     inputs_used: inputs,
     note: 'CVHR is a CARDIAC SURROGATE, not a breathing measurement: this is '
         'how often the pattern showed up across ${kept.length} of your own '
-        'nights, never an AHI, never a severity, never a per-night value. '
+        'nights in the last $cvhrDistributionWindowNights days, never an AHI, '
+        'never a severity, never a per-night value. '
         'It also fires on atrial fibrillation (those nights are excluded), on '
         'periodic breathing at altitude and on any fragmented night, and it is '
         'blunted by beta-blockers, autonomic neuropathy and diabetes — so a '

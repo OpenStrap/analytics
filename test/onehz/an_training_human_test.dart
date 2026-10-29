@@ -33,6 +33,29 @@ void main() {
       }
     });
 
+    test(
+        'REGRESSION: a non-finite phase draws AND discloses the population curve',
+        () {
+      // The curve fell back to the population phase on NaN while the note
+      // still claimed a phase fitted on the user's own data.
+      final nan = alertnessForecast(
+        wakeLocalHour: 7,
+        sleepDurationHours: 7,
+        circadianAcrophaseHours: double.nan,
+      );
+      final none = alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 7);
+      expect(nan.present, isTrue);
+      expect(nan.note, contains('ASSUMED from the population'));
+      expect(nan.note, isNot(contains('fitted on your own data')));
+      expect(nan.value!.troughLabel, none.value!.troughLabel);
+      final fitted = alertnessForecast(
+        wakeLocalHour: 7,
+        sleepDurationHours: 7,
+        circadianAcrophaseHours: 16,
+      );
+      expect(fitted.note, contains('fitted on your own data'));
+    });
+
     test('the safety refusal is on every output, present or absent', () {
       final present =
           alertnessForecast(wakeLocalHour: 7, sleepDurationHours: 7.5);
@@ -90,7 +113,23 @@ void main() {
         if (shape[i] > shape[peak]) peak = i;
       }
       final peakClock = 7 + peak * 0.25;
-      expect(peakClock, closeTo(15.75, 0.5));
+      expect(peakClock, closeTo(16.75, 0.5));
+    });
+
+    test('the 12 h ultradian term puts the dip after lunch, not mid-morning',
+        () {
+      // Process U's trough sits 3 h before the circadian acrophase (Åkerstedt,
+      // Folkard & Portin 2004), ~13:48 at the default phase. It used to peak AT
+      // the acrophase with no offset: a dip at 10:48, a bump at 16:48, so the
+      // curve climbed steeply through late morning and then sagged in the late
+      // afternoon while C was still peaking.
+      final v =
+          alertnessForecast(wakeLocalHour: 6, sleepDurationHours: 9).value!;
+      double at(double h) => v.shape[((h - 6) / v.stepHours).round()];
+      final lateMorningRise = at(12) - at(10.75);
+      final lateAfternoonRise = at(16.75) - at(15);
+      expect(lateAfternoonRise, greaterThan(0));
+      expect(lateMorningRise, lessThan(lateAfternoonRise));
     });
 
     test('RD-02: the low window moves with sleep length, not with the horizon',
@@ -381,6 +420,18 @@ void main() {
       expect(m.present, isTrue);
       expect(m.value!.longestIntervalDays, 60);
       expect(m.value!.maxConsecutiveDifferenceDays, 32);
+    });
+
+    test('an interval past the long-interval criterion is a hole, not a bar',
+        () {
+      // 75 days: under the old 90-day cutoff this was charted and met the
+      // 60-day criterion on its own, while the app's cycle screen refused the
+      // same log. One rule, one threshold.
+      final m = cycleLengthSeries(
+          onsets([28, 28, 75, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28]));
+      expect(m.present, isFalse);
+      expect(m.note, contains('log_has_holes:intervals_over_60d=1'));
+      expect(cycleLengthImplausibleGapDays, cycleLongIntervalCriterionDays);
     });
   });
 }

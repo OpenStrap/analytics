@@ -59,6 +59,10 @@ class CusumDetection {
 /// `clinical/illness_cusum.dart` already carries, and the failure mode
 /// `util.dart`'s [calendarDays] documents.
 ///
+/// A gap resets the accumulator only. A gap longer than [staleAfterDays] also
+/// restarts the pre-change regime: the level from before a month off-wrist is
+/// not a baseline for the first nights back.
+///
 /// Omitting [dates] (or passing a mismatched length) keeps the old positional
 /// behaviour — no caller is made worse off — but it is not the honest reading.
 ///
@@ -86,6 +90,7 @@ List<CusumDetection> cusumChangePoints(
   double k = 0.5,
   double h = 5.0,
   int minBaseline = 10,
+  int staleAfterDays = 28,
 }) {
   final out = <CusumDetection>[];
   if (x.length <= minBaseline) return out;
@@ -94,13 +99,21 @@ List<CusumDetection> cusumChangePoints(
   var regimeStart = 0; // first index of the current (pre-change) regime
   var up = 0.0, dn = 0.0;
   for (var i = 0; i < x.length; i++) {
-    // A break in the calendar breaks the regime AND the accumulator: the
-    // pre-change window restarts here and [minBaseline] consecutive days must
-    // accrue again before anything can be scored.
-    if (day != null && i > 0 && day[i] - day[i - 1] > 1) {
-      up = 0;
-      dn = 0;
-      regimeStart = i;
+    // Any break in the calendar breaks the accumulator: there are no
+    // observations across it, so no evidence to carry. It does NOT break the
+    // regime unless it is long enough for the baseline to be stale — a wearer
+    // who charges overnight once a week has a one-night gap every 6-7 rows, and
+    // restarting the regime on each one meant the baseline never reached
+    // [minBaseline] and nothing was ever scored. Same split as
+    // `clinical/illness_cusum.dart`, which resets only its accumulator and keeps
+    // a 28-day calendar baseline.
+    if (day != null && i > 0) {
+      final step = day[i] - day[i - 1];
+      if (step > 1) {
+        up = 0;
+        dn = 0;
+        if (step > staleAfterDays) regimeStart = i;
+      }
     }
     final baseline = x.sublist(regimeStart, i);
     if (baseline.length < minBaseline) continue;

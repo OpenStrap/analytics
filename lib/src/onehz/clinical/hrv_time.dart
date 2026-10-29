@@ -785,8 +785,9 @@ double? _breathingRmssd(List<double> nn, List<double> times) {
 /// window into 5-min bins; required (returns absent without it). [windowMs] bin
 /// width (default 300 000 = 5 min). [minBeatsPerWindow] min NN diffs a window
 /// needs to contribute (default 5). [stageMaskPerSec] OPTIONAL per-second mask
-/// (true = keep, e.g. NREM & immobile); a window is kept only when the mask is
-/// true at the window's MIDPOINT second.
+/// (true = keep, e.g. NREM & immobile) on the [nnTimesMs] clock — index s
+/// covers nnTime s·1000 ms, NOT seconds since the first kept beat; a window is
+/// kept only when the mask is true at the window's MIDPOINT second.
 ///
 /// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
 /// PRV-not-ECG honesty note. Absent when there are too few usable windows, when
@@ -840,7 +841,11 @@ Metric<double> nocturnalRmssd(
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     if (stageMaskPerSec != null) {
-      final midSec = ((idx + 0.5) * windowMs / 1000.0).floor();
+      // Windows are bucketed from the first KEPT beat, but `correctRr` keeps
+      // the elapsed time of a dropped leading artifact run, so t0 can sit
+      // minutes past the mask's origin. Read the mask on the beat clock or
+      // every window takes the stage label from t0 seconds earlier.
+      final midSec = ((t0 + (idx + 0.5) * windowMs) / 1000.0).floor();
       final keep = midSec >= 0 &&
           midSec < stageMaskPerSec.length &&
           stageMaskPerSec[midSec];

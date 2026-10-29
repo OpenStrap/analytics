@@ -42,7 +42,14 @@ const int cycleLongIntervalCriterionDays = 60;
 const int cycleLengthMinCycles = 12;
 
 /// Above this, an interval is more likely a missed log than a cycle.
-const int cycleLengthImplausibleGapDays = 90;
+///
+/// Pinned to the long-interval criterion on purpose: one missed start turns two
+/// 28-day cycles into a 56-day one, and two missed starts into 84, so anything
+/// past the criterion is exactly where a forgotten log and a real long interval
+/// stop being separable. A looser cutoff (this used to be 90) charts 61-90-day
+/// holes as cycles that meet the criterion by themselves, and disagrees with
+/// the cycle screen, which refuses anything over 60.
+const int cycleLengthImplausibleGapDays = cycleLongIntervalCriterionDays;
 
 class CycleLengthSeries {
   /// Days between consecutive logged onsets, oldest first.

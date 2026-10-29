@@ -96,16 +96,22 @@ Metric<StressIndex> baevskyStressIndex(
   }
 
   // Window ~5 min of beats (256), 50% overlap; compute SI per window.
-  const win = 256, step = 128;
+  // MxDMn grows and AMo shrinks with window length, and the bands below are
+  // Baevsky's cut-points for ~5-min recordings. A gap-fragmented night yields
+  // many 30–127 beat segments whose SI runs systematically high (about 2× on
+  // the same beats), and a median over them reads 'elevated' on a normal
+  // night. So a window must hold at least [minWin] beats (~4 min at a resting
+  // HR) to count; shorter fragments are dropped, and if nothing qualifies the
+  // metric is absent.
+  const win = 256, step = 128, minWin = 200;
   final sis = <double>[];
   final modes = <double>[], amos = <double>[], ranges = <double>[];
   for (var s = 0; s < segStart.length; s++) {
     final lo = segStart[s];
     final hi = (s + 1 < segStart.length ? segStart[s + 1] : nn.length);
     final seg = nn.sublist(lo, hi);
-    for (var start = 0; start + 30 <= seg.length; start += step) {
+    for (var start = 0; start + minWin <= seg.length; start += step) {
       final segWin = seg.sublist(start, math.min(start + win, seg.length));
-      if (segWin.length < 30) break;
       final r = _siOfSegment(segWin, minRangeMs);
       if (r != null) {
         sis.add(r[0]);
@@ -120,7 +126,7 @@ Metric<StressIndex> baevskyStressIndex(
     return const Metric<StressIndex>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
-      note: 'no valid Stress Index window',
+      note: 'no valid ~5-min Stress Index window',
     );
   }
   final si = median(sis)!;
