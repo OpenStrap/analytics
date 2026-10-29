@@ -335,7 +335,8 @@ Metric<TempCircadian> tempCircadian(
   if (fit == null && np == null) {
     return Metric<TempCircadian>.absent(
       tier: Tier.relative,
-      inputs_used: inputs,
+      inputs_used:
+          gate == null || accel == null ? inputs : [...inputs, 'accel'],
       note: 'circadian fit degenerate',
     );
   }
