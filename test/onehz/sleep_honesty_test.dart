@@ -519,6 +519,29 @@ void main() {
       // detection discards it as a night tail).
       expect(offset, greaterThan(_midnight + 86400 + 6 * 3600 + 30 * 60));
     });
+
+    test('two daytime sleeps 75 min apart are not bridged into one window', () {
+      final accel = <AccelSample>[];
+      final hr = <double>[];
+      final start = _midnight + 7 * 3600; // 07:00
+      final active = feeder(accel, hr, start, still: false);
+      final sleep = feeder(accel, hr, start, still: true);
+
+      active(5 * 3600, bpm: 76); // 07:00-12:00
+      sleep(200 * 60, bpm: 50); // 12:00-15:20
+      active(75 * 60, bpm: 90); // 15:20-16:35 up and about
+      sleep(200 * 60, bpm: 50); // 16:35-19:55
+      active(2 * 3600, bpm: 76); // 19:55-21:55
+
+      final s = segmentSleep(accel, hr,
+          hrBaseline: List<double>.filled(200, 76), tzOffsetSec: 0);
+
+      expect(s.present, isTrue);
+      // Bridged, this was one ~8 h window with the time up and about counted
+      // as wake. The wider gap is for an overnight chain only.
+      expect(s.inBedSec!, lessThan(4 * 3600));
+      expect(s.wasoSec!, lessThan(30 * 60));
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════

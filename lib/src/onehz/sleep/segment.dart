@@ -534,7 +534,7 @@ SleepSegmentation segmentSleep(
     );
     if (sessions.isEmpty) return SleepSegmentation.absent;
 
-    var groups = _bridgeAdjacentSessions(sessions);
+    var groups = _bridgeAdjacentSessions(sessions, tzAt);
     if (recordContinues) {
       final lastTs = grav.fold<int>(grav.first.ts, (m, g) => math.max(m, g.ts));
       groups = _dropUnfinishedGroups(groups, lastTs);
@@ -807,7 +807,8 @@ class _SleepGroup {
   });
 }
 
-List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
+List<_SleepGroup> _bridgeAdjacentSessions(
+    List<SleepSession> sessions, int Function(int tsSec) tzAt) {
   if (sessions.isEmpty) return const [];
   final sorted = [...sessions]..sort((a, b) => a.start.compareTo(b.start));
   // Must be the same rule detectSleep chains a night on. With a narrower bridge
@@ -816,7 +817,23 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
   // the selector then published one half and silently dropped the other from
   // TST, stages and the HRV/RHR windows (or let it surface as a "nap"). The
   // gap's seconds are scored below as wake where observed, unobserved where not.
-  const bridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+  //
+  // Only an OVERNIGHT chain gets the wider gap. detectSleep chains any two
+  // sessions up to 90 min apart, but the chain only changes what it returns
+  // when it is overnight (the night-tail exemption); two daytime sessions 75
+  // min apart come back as two unrelated sessions. Bridging those would publish
+  // one window with the time spent up and about in between counted as wake.
+  // Same overnight test as detectSleep: some session in the chain started
+  // outside the daytime band.
+  const bridgeGapSec = 60 * 60;
+  const nightBridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+  bool overnightOnset(int start) {
+    final local = start + tzAt(start);
+    final hour = (((local % 86400) + 86400) % 86400) ~/ 3600;
+    return hour < AdvancedSleepStager.daytimeBandStartHour ||
+        hour >= AdvancedSleepStager.daytimeBandEndHour;
+  }
+
   final out = <_SleepGroup>[];
   for (final session in sorted) {
     final asleepMin = AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0;
@@ -833,7 +850,10 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
     }
     final last = out.removeLast();
     final gap = session.start - last.end;
-    if (gap >= 0 && gap <= bridgeGapSec) {
+    final overnight = overnightOnset(session.start) ||
+        last.sessions.any((x) => overnightOnset(x.start));
+    if (gap >= 0 &&
+        (gap < bridgeGapSec || (overnight && gap <= nightBridgeGapSec))) {
       out.add(
         _SleepGroup(
           sessions: [...last.sessions, session],
