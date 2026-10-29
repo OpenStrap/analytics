@@ -782,7 +782,9 @@ class _SleepGroup {
 List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
   if (sessions.isEmpty) return const [];
   final sorted = [...sessions]..sort((a, b) => a.start.compareTo(b.start));
-  const bridgeGapSec = 60 * 60;
+  // Keep the detector's accepted night continuations in the same main sleep.
+  // Gaps retain their wake/unobserved stages; only the selected span changes.
+  const bridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
   final out = <_SleepGroup>[];
   for (final session in sorted) {
     final asleepMin = AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0;
@@ -799,7 +801,11 @@ List<_SleepGroup> _bridgeAdjacentSessions(List<SleepSession> sessions) {
     }
     final last = out.removeLast();
     final gap = session.start - last.end;
-    if (gap >= 0 && gap < bridgeGapSec) {
+    // Individual runs already obey this cap; the combined span must too.
+    final combinedSpan = math.max(last.end, session.end) - last.start;
+    if (gap >= 0 &&
+        gap <= bridgeGapSec &&
+        combinedSpan <= AdvancedSleepStager.maxMainSleepSpanS) {
       out.add(
         _SleepGroup(
           sessions: [...last.sessions, session],
