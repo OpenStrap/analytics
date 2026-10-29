@@ -118,6 +118,20 @@ void main() {
     expect(off, greaterThan(_midnight + 6 * 3600));
   });
 
+  test('a finished daytime sleep 75 min before a still-going one is kept', () {
+    // Asleep 12:00 → 15:20, up for 75 min, asleep again from 16:35 to the cut
+    // at 20:00. The second sleep is deferred; the first is finished and is not
+    // part of it, so it must not be deferred along with it.
+    final r = _record(_midnight + 6 * 3600, _midnight + 20 * 3600, [
+      (_midnight + 12 * 3600, _midnight + 15 * 3600 + 20 * 60),
+      (_midnight + 16 * 3600 + 35 * 60, _midnight + 20 * 3600),
+    ]);
+    final s = segmentSleep(r.accel, r.hr, tzOffsetSec: 0, recordContinues: true);
+    expect(s.unfinished, isFalse);
+    expect(s.present, isTrue);
+    expect(s.window!.offsetMs! ~/ 1000, lessThan(_midnight + 16 * 3600));
+  });
+
   test('a night that ended well before the cut is not deferred', () {
     // Asleep 23:00 → 07:00, awake and moving until the slice ends at 12:00.
     final r = _record(_midnight - 4 * 3600, _midnight + 12 * 3600, [

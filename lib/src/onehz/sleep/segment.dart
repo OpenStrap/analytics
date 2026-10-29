@@ -537,7 +537,7 @@ SleepSegmentation segmentSleep(
     var groups = _bridgeAdjacentSessions(sessions, tzAt);
     if (recordContinues) {
       final lastTs = grav.fold<int>(grav.first.ts, (m, g) => math.max(m, g.ts));
-      groups = _dropUnfinishedGroups(groups, lastTs);
+      groups = _dropUnfinishedGroups(groups, lastTs, tzAt);
       // Every candidate was tonight's still-going night: say so, so the
       // caller can tell a deferral from an empty slice.
       if (groups.isEmpty) return SleepSegmentation.unfinishedNight;
@@ -807,6 +807,36 @@ class _SleepGroup {
   });
 }
 
+/// Whether [next] continues the chain [before] (ending at [beforeEnd]) — the
+/// one rule both the bridge and the unfinished-night deferral use, so they
+/// cannot disagree about what belongs to one night.
+///
+/// Only an OVERNIGHT chain gets the wider gap. detectSleep chains any two
+/// sessions up to 90 min apart, but the chain only changes what it returns
+/// when it is overnight (the night-tail exemption); two daytime sessions 75
+/// min apart come back as two unrelated sessions. Bridging those would publish
+/// one window with the time spent up and about in between counted as wake.
+/// Same overnight test as detectSleep: some session in the chain started
+/// outside the daytime band.
+bool _continuesChain(List<SleepSession> before, int beforeEnd,
+    SleepSession next, int Function(int tsSec) tzAt) {
+  const bridgeGapSec = 60 * 60;
+  const nightBridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+  bool overnightOnset(int start) {
+    final local = start + tzAt(start);
+    final hour = (((local % 86400) + 86400) % 86400) ~/ 3600;
+    return hour < AdvancedSleepStager.daytimeBandStartHour ||
+        hour >= AdvancedSleepStager.daytimeBandEndHour;
+  }
+
+  final gap = next.start - beforeEnd;
+  if (gap < 0) return false;
+  if (gap < bridgeGapSec) return true;
+  return gap <= nightBridgeGapSec &&
+      (overnightOnset(next.start) ||
+          before.any((x) => overnightOnset(x.start)));
+}
+
 List<_SleepGroup> _bridgeAdjacentSessions(
     List<SleepSession> sessions, int Function(int tsSec) tzAt) {
   if (sessions.isEmpty) return const [];
@@ -818,22 +848,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(
   // TST, stages and the HRV/RHR windows (or let it surface as a "nap"). The
   // gap's seconds are scored below as wake where observed, unobserved where not.
   //
-  // Only an OVERNIGHT chain gets the wider gap. detectSleep chains any two
-  // sessions up to 90 min apart, but the chain only changes what it returns
-  // when it is overnight (the night-tail exemption); two daytime sessions 75
-  // min apart come back as two unrelated sessions. Bridging those would publish
-  // one window with the time spent up and about in between counted as wake.
-  // Same overnight test as detectSleep: some session in the chain started
-  // outside the daytime band.
-  const bridgeGapSec = 60 * 60;
-  const nightBridgeGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
-  bool overnightOnset(int start) {
-    final local = start + tzAt(start);
-    final hour = (((local % 86400) + 86400) % 86400) ~/ 3600;
-    return hour < AdvancedSleepStager.daytimeBandStartHour ||
-        hour >= AdvancedSleepStager.daytimeBandEndHour;
-  }
-
+  // Only an overnight chain gets the full gap; see [_continuesChain].
   final out = <_SleepGroup>[];
   for (final session in sorted) {
     final asleepMin = AdvancedSleepStager.hypnogramMetrics(session).tstS / 60.0;
@@ -849,11 +864,7 @@ List<_SleepGroup> _bridgeAdjacentSessions(
       continue;
     }
     final last = out.removeLast();
-    final gap = session.start - last.end;
-    final overnight = overnightOnset(session.start) ||
-        last.sessions.any((x) => overnightOnset(x.start));
-    if (gap >= 0 &&
-        (gap < bridgeGapSec || (overnight && gap <= nightBridgeGapSec))) {
+    if (_continuesChain(last.sessions, last.end, session, tzAt)) {
       out.add(
         _SleepGroup(
           sessions: [...last.sessions, session],
@@ -889,13 +900,13 @@ const int kUnfinishedNightEdgeSec = AdvancedSleepStager.stillWindowMin * 60;
 const String kAbsenceNightUnfinished = 'night_unfinished';
 
 /// Drops every group that is still going at [lastTs], plus any group chained
-/// to one within the detector's own continuation gap. Walking backward
-/// matters: a short awakening splits tonight into two groups and only the
-/// trailing one touches the cut, but the leading one is the same unfinished
-/// night and would otherwise be published for the day that is ending and then
-/// counted again inside the full night by the next slice.
-List<_SleepGroup> _dropUnfinishedGroups(List<_SleepGroup> groups, int lastTs) {
-  const chainGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
+/// to one by [_continuesChain]. Walking backward matters: a group chained to
+/// the one touching the cut is the same unfinished night and would otherwise
+/// be published for the day that is ending and then counted again inside the
+/// full night by the next slice. A completed daytime sleep that merely ended
+/// within 90 min of it is not part of that night and is kept.
+List<_SleepGroup> _dropUnfinishedGroups(
+    List<_SleepGroup> groups, int lastTs, int Function(int tsSec) tzAt) {
   final unfinished = List<bool>.filled(groups.length, false);
   for (var g = groups.length - 1; g >= 0; g--) {
     if (lastTs - groups[g].end <= kUnfinishedNightEdgeSec) {
@@ -904,7 +915,8 @@ List<_SleepGroup> _dropUnfinishedGroups(List<_SleepGroup> groups, int lastTs) {
     }
     if (g + 1 < groups.length &&
         unfinished[g + 1] &&
-        groups[g + 1].start - groups[g].end <= chainGapSec) {
+        _continuesChain(groups[g].sessions, groups[g].end,
+            groups[g + 1].sessions.first, tzAt)) {
       unfinished[g] = true;
     }
   }
