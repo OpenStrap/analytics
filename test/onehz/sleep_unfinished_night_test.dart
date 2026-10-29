@@ -137,6 +137,24 @@ void main() {
       expect(w, isNull);
     });
 
+    test('record continues: a finished overnight dip 105 min before it is kept',
+        () {
+      // Read 8 h ahead: asleep 23:00 → 03:00 local, up for 105 min, asleep
+      // again from 04:45 local to the cut at 07:00. Both start overnight, but
+      // the gap is past the 90-min chain, so the first is a finished night.
+      final r = _record(_midnight + 12 * 3600, _midnight + 23 * 3600, [
+        (_midnight + 15 * 3600, _midnight + 19 * 3600),
+        (_midnight + 20 * 3600 + 45 * 60, _midnight + 23 * 3600),
+      ]);
+      final w = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0],
+          recordContinues: true,
+          tzOffsetResolver: (_) => 8 * 3600);
+      expect(w, isNotNull);
+      expect(w!.offsetSec, lessThan(_midnight + 20 * 3600));
+      expect(w.offsetSec, greaterThan(_midnight + 18 * 3600));
+    });
+
     test('record continues: an overnight dip 75 min before it is deferred too',
         () {
       // Asleep 20:30 → 23:00, up for 75 min, asleep again from 00:15 to the
