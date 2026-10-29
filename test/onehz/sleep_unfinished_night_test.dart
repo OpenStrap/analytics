@@ -121,13 +121,30 @@ void main() {
       expect(w!.offsetSec, lessThan(_midnight + 16 * 3600));
     });
 
+    test('record continues: the same day read 8 h ahead is one deferred night',
+        () {
+      // The record above with a +8 h offset: the runs start at 20:00 and
+      // 00:35 local, both overnight, so the 75-min gap chains them and
+      // neither is a finished night.
+      final r = _record(_midnight + 6 * 3600, _midnight + 20 * 3600, [
+        (_midnight + 12 * 3600, _midnight + 15 * 3600 + 20 * 60),
+        (_midnight + 16 * 3600 + 35 * 60, _midnight + 20 * 3600),
+      ]);
+      final w = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0],
+          recordContinues: true,
+          tzOffsetResolver: (_) => 8 * 3600);
+      expect(w, isNull);
+    });
+
     test('record continues: an overnight dip 75 min before it is deferred too',
         () {
-      // Asleep 21:00 → 23:00, up for 75 min, asleep again from 00:15 to the
+      // Asleep 20:30 → 23:00, up for 75 min, asleep again from 00:15 to the
       // cut at 03:00: one night split by a long arousal, so neither half is
-      // a finished night yet.
+      // a finished night yet. The first half is long enough to be proposed on
+      // its own, so this fails if the chain is lost.
       final r = _record(_midnight + 18 * 3600, _midnight + 27 * 3600, [
-        (_midnight + 21 * 3600, _midnight + 23 * 3600),
+        (_midnight + 20 * 3600 + 30 * 60, _midnight + 23 * 3600),
         (_midnight + 24 * 3600 + 15 * 60, _midnight + 27 * 3600),
       ]);
       final w = hrLedSleepWindow(r.hr, ts(r.accel),
