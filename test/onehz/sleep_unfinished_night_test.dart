@@ -103,6 +103,39 @@ void main() {
       expect(b!.onsetSec, a!.onsetSec);
       expect(b.offsetSec, a.offsetSec);
     });
+
+    test('record continues: a finished daytime dip 75 min before it is kept',
+        () {
+      // Same day shape as the segmentSleep case below: asleep 12:00 → 15:20,
+      // up for 75 min, asleep again from 16:35 to the cut at 20:00. Neither
+      // run starts overnight, so the first is not part of the deferred one.
+      final r = _record(_midnight + 6 * 3600, _midnight + 20 * 3600, [
+        (_midnight + 12 * 3600, _midnight + 15 * 3600 + 20 * 60),
+        (_midnight + 16 * 3600 + 35 * 60, _midnight + 20 * 3600),
+      ]);
+      final w = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0],
+          recordContinues: true,
+          tzOffsetResolver: (_) => 0);
+      expect(w, isNotNull);
+      expect(w!.offsetSec, lessThan(_midnight + 16 * 3600));
+    });
+
+    test('record continues: an overnight dip 75 min before it is deferred too',
+        () {
+      // Asleep 21:00 → 23:00, up for 75 min, asleep again from 00:15 to the
+      // cut at 03:00: one night split by a long arousal, so neither half is
+      // a finished night yet.
+      final r = _record(_midnight + 18 * 3600, _midnight + 27 * 3600, [
+        (_midnight + 21 * 3600, _midnight + 23 * 3600),
+        (_midnight + 24 * 3600 + 15 * 60, _midnight + 27 * 3600),
+      ]);
+      final w = hrLedSleepWindow(r.hr, ts(r.accel),
+          hrBaseline: const [85.0],
+          recordContinues: true,
+          tzOffsetResolver: (_) => 0);
+      expect(w, isNull);
+    });
   });
 
   test('a finished night earlier in the slice is still the main sleep', () {

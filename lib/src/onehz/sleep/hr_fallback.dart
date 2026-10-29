@@ -47,7 +47,11 @@ class HrLedWindow {
 /// has no knowable end, so it is never proposed — the same deferral
 /// `segmentSleep(recordContinues: true)` applies, and for the same reason: a
 /// fallback run over the slice the detector just deferred would otherwise
-/// propose exactly that cut-off stretch as a finished night.
+/// propose exactly that cut-off stretch as a finished night. Runs chained to
+/// that dip are deferred with it on the same rule segmentSleep uses: under
+/// 60 min apart always, up to 90 min only when the chain is overnight (some run
+/// in it starts outside the daytime band, read in local time via
+/// [tzOffsetResolver], default the machine's offset at that instant).
 HrLedWindow? hrLedSleepWindow(
   List<double> hr1hz,
   List<int> tsSec, {
@@ -57,6 +61,7 @@ HrLedWindow? hrLedSleepWindow(
   double smoothSec = 300,
   int maxSampleGapSec = 5 * 60,
   bool recordContinues = false,
+  int Function(int tsSec)? tzOffsetResolver,
 }) {
   final n = hr1hz.length < tsSec.length ? hr1hz.length : tsSec.length;
   if (n < minDurationSec ~/ 2) return null;
@@ -132,22 +137,48 @@ HrLedWindow? hrLedSleepWindow(
     i = j + 1;
   }
 
-  // 5. Defer a dip still going at the cut, and any dip chained to it within
-  //    the detector's own night-continuation gap (a long arousal splits
-  //    tonight in two; only the trailing half touches the cut).
+  // 5. Defer a dip still going at the cut, and every dip chained to it the
+  //    way segmentSleep chains a night (a long arousal splits tonight in two;
+  //    only the trailing half touches the cut). A finished daytime sleep that
+  //    ended 60-90 min before it is not part of that night and stays eligible.
   final deferred = List<bool>.filled(runs.length, false);
-  if (recordContinues) {
-    const chainGapSec = AdvancedSleepStager.nightContinuationGapMin * 60;
-    final lastTs = tsSec[n - 1];
-    for (var r = runs.length - 1; r >= 0; r--) {
-      final endTs = tsSec[(runs[r].end - 1).clamp(0, n - 1)];
-      if (lastTs - endTs <= kUnfinishedNightEdgeSec) {
-        deferred[r] = true;
-      } else if (r + 1 < runs.length &&
-          deferred[r + 1] &&
-          tsSec[runs[r + 1].start] - endTs <= chainGapSec) {
-        deferred[r] = true;
+  if (recordContinues && runs.isNotEmpty) {
+    final int Function(int tsSec) tzAt = tzOffsetResolver ??
+        (int t) => DateTime.fromMillisecondsSinceEpoch(t * 1000, isUtc: false)
+            .timeZoneOffset
+            .inSeconds;
+    bool overnightOnset(int start) {
+      final local = start + tzAt(start);
+      final hour = (((local % 86400) + 86400) % 86400) ~/ 3600;
+      return hour < AdvancedSleepStager.daytimeBandStartHour ||
+          hour >= AdvancedSleepStager.daytimeBandEndHour;
+    }
+
+    int endTs(int r) => tsSec[(runs[r].end - 1).clamp(0, n - 1)];
+    // Forward pass: which earlier run each run's chain starts at.
+    final chainStart = List<int>.filled(runs.length, 0);
+    for (var r = 1; r < runs.length; r++) {
+      final gap = tsSec[runs[r].start] - endTs(r - 1);
+      final from = chainStart[r - 1];
+      var chained = false;
+      if (gap >= 0 && gap < 60 * 60) {
+        chained = true;
+      } else if (gap >= 0 &&
+          gap <= AdvancedSleepStager.nightContinuationGapMin * 60) {
+        chained = overnightOnset(tsSec[runs[r].start]);
+        for (var q = from; !chained && q < r; q++) {
+          chained = overnightOnset(tsSec[runs[q].start]);
+        }
       }
+      chainStart[r] = chained ? from : r;
+    }
+    final lastTs = tsSec[n - 1];
+    final unfinishedChains = <int>{
+      for (var r = 0; r < runs.length; r++)
+        if (lastTs - endTs(r) <= kUnfinishedNightEdgeSec) chainStart[r],
+    };
+    for (var r = 0; r < runs.length; r++) {
+      deferred[r] = unfinishedChains.contains(chainStart[r]);
     }
   }
 
