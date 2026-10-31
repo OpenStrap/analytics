@@ -60,38 +60,62 @@ class PrsaResult {
 }
 
 /// PRSA deceleration capacity.
+///
+/// Pass [nnTimesMs] (aligned to [nnMs], e.g. `correctRr(...).nnTimes`) so no
+/// anchor window is formed across a hole in the beat record.
 Metric<PrsaResult> decelerationCapacity(List<double> nnMs,
-        {int l = 2, double anchorRatioCap = 0.05}) =>
-    _prsa(nnMs, l: l, deceleration: true, anchorRatioCap: anchorRatioCap);
+        {int l = 2, double anchorRatioCap = 0.05, List<num>? nnTimesMs}) =>
+    _prsa(nnMs,
+        l: l,
+        deceleration: true,
+        anchorRatioCap: anchorRatioCap,
+        nnTimesMs: nnTimesMs);
 
-/// PRSA acceleration capacity.
+/// PRSA acceleration capacity. See [decelerationCapacity] for [nnTimesMs].
 Metric<PrsaResult> accelerationCapacity(List<double> nnMs,
-        {int l = 2, double anchorRatioCap = 0.05}) =>
-    _prsa(nnMs, l: l, deceleration: false, anchorRatioCap: anchorRatioCap);
+        {int l = 2, double anchorRatioCap = 0.05, List<num>? nnTimesMs}) =>
+    _prsa(nnMs,
+        l: l,
+        deceleration: false,
+        anchorRatioCap: anchorRatioCap,
+        nnTimesMs: nnTimesMs);
 
 Metric<PrsaResult> _prsa(
   List<double> nnMs, {
   required int l,
   required bool deceleration,
   required double anchorRatioCap,
+  List<num>? nnTimesMs,
 }) {
   final kind = deceleration ? 'DC' : 'AC';
-  final inputs = const ['rr_cleaned'];
   final n = nnMs.length;
+  final inputs = nnTimesMs == null
+      ? const ['rr_cleaned']
+      : const ['rr_cleaned', 'beat_times'];
+  // Beat times that do not line up with the intervals cannot place a seam, and
+  // falling back to the untimed path would anchor across exactly the holes
+  // the caller passed them to guard against.
+  if (nnTimesMs != null && nnTimesMs.length != n) {
+    return Metric<PrsaResult>.absent(
+      tier: Tier.relative,
+      inputs_used: inputs,
+      note: 'PRSA ($kind): beat times not aligned with intervals',
+    );
+  }
   if (l < 2) {
     // Bauer 2006 quantifies PRSA with the Haar contrast at wavelet scale s = 2:
     // DC = [X(0) + X(1) − X(−1) − X(−2)]/4, which needs TWO profile points on
     // each side of the anchor. With l < 2 the profile is too short (l = 1 used
     // to index profile[l−2] = profile[−1] and throw a RangeError).
     return Metric<PrsaResult>.absent(
-      tier: Tier.high,
+      tier: Tier.relative,
       inputs_used: inputs,
       note: 'PRSA ($kind) needs l≥2 for the s=2 Haar contrast',
     );
   }
   if (n < 2 * l + 4) {
     return Metric<PrsaResult>.absent(
-      tier: Tier.high,
+      tier: Tier.relative,
       inputs_used: inputs,
       note: 'too few beats for PRSA ($kind)',
     );
@@ -99,8 +123,38 @@ Metric<PrsaResult> _prsa(
 
   // Anchor selection with an artifact-suppression ratio cap: |RR(i)/RR(i-1)-1|
   // must be ≤ anchorRatioCap so gross jumps (residual artifacts) don't anchor.
+  //
+  // Anchors must also sit in a stretch that is contiguous in TIME. correctRr
+  // drops artifact runs and re-anchors its clock across sensor holes, so two
+  // beats adjacent in the list can sit either side of a 40-minute gap; one
+  // such pair used to anchor on its own and publish a DC built from beats an
+  // hour apart. Same seam test as hrv_time.dart: a pair is contiguous iff the
+  // elapsed time between the two beat times is the interval itself.
+  final gapAware = nnTimesMs != null;
+  // seamBefore[j] = the step from beat j-1 to beat j crosses a hole. A beat
+  // time that runs backwards is a break in the record too; equal times are
+  // left contiguous (whole-second source clocks repeat them).
+  final seamBefore = List<bool>.filled(n, false);
+  if (gapAware) {
+    for (var j = 1; j < n; j++) {
+      final dt = nnTimesMs[j] - nnTimesMs[j - 1];
+      seamBefore[j] = dt < 0 || dt > nnMs[j] + 0.5;
+    }
+  }
   final anchors = <int>[];
   for (var i = l; i < n - l; i++) {
+    if (gapAware) {
+      // The averaged window is i-l .. i+l-1; every step inside it must be
+      // contiguous.
+      var crosses = false;
+      for (var j = i - l + 1; j <= i + l - 1; j++) {
+        if (seamBefore[j]) {
+          crosses = true;
+          break;
+        }
+      }
+      if (crosses) continue;
+    }
     final prev = nnMs[i - 1];
     if (prev <= 0) continue;
     final delta = nnMs[i] - prev;
@@ -112,7 +166,7 @@ Metric<PrsaResult> _prsa(
   }
   if (anchors.isEmpty) {
     return Metric<PrsaResult>.absent(
-      tier: Tier.high,
+      tier: Tier.relative,
       inputs_used: inputs,
       note: 'no valid PRSA anchors ($kind)',
     );
@@ -146,9 +200,13 @@ Metric<PrsaResult> _prsa(
       kind: kind,
     ),
     confidence: conf,
-    tier: Tier.high,
+    tier: Tier.relative,
     inputs_used: inputs,
-    note: 'Bauer 2006 PRSA $kind; needs a long overnight RR record for '
-        'mortality-grade stability',
+    // RELATIVE, not HIGH: the same subject read 7.6-9.9 ms on gen4 and 1.7 ms
+    // on W5 (header), so the number only trends against the user's own
+    // baseline on one device family. Callers must not chart it across a
+    // family change.
+    note: 'Bauer 2006 PRSA $kind; relative to own baseline on one device '
+        'family only',
   );
 }

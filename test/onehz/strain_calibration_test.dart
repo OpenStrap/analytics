@@ -248,6 +248,31 @@ void main() {
       expect(m.tier, Tier.estimate);
       expect(m.value, greaterThan(14.0));
     });
+
+    test('lump and series routes disclose calibration identically', () {
+      // The stored-TRIMP rescale and the per-minute scorer report the same
+      // headline. Same quiet level, same settled state => same confidence and
+      // the same calibrating note, or a backfilled day reads differently from
+      // a live one.
+      const rhr = 50.0, hrMax = 187.0;
+      final hr = List<double>.filled(960, rhr + 0.3 * (hrMax - rhr));
+      final trimp =
+          banisterTrimp(hr, restingHr: rhr, maxHr: hrMax, sex: Sex.male);
+      for (final settled in [true, false]) {
+        final lump = strainScoreMetric(trimp.value,
+            wakeMinutes: 960, quietHrr: quietWakingHrr, quietSettled: settled);
+        final series = strainScoreFromSeries(hr,
+            restingHr: rhr,
+            maxHr: hrMax,
+            quietHrr: quietWakingHrr,
+            sex: Sex.male,
+            quietSettled: settled);
+        expect(lump.present && series.present, isTrue);
+        expect(lump.confidence, series.confidence);
+        expect(lump.tier, series.tier);
+        if (!settled) expect(lump.note, series.note);
+      }
+    });
   });
 
   // MOT-03 shipped the level as an argument; these pin what scoring against it

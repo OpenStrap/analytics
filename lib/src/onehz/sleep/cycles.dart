@@ -57,6 +57,15 @@ const int _smoothMin = 10; // ± window of the moving average
 const int _minPeakDist = 20; // min minutes between cycle peaks
 const double _minProminence = 0.9; // z-score prominence to qualify a peak
 
+/// Longest run of unobserved RAW minutes (no per-minute RMSSD) a cycle may
+/// span. Contact loss, charging or an RR dropout leaves the per-minute series
+/// null; pairing the peak before such a hole with the peak after it reported
+/// the hole itself as one long "cycle" and dragged the mean cycle length up
+/// with it. Counted on the raw minutes, not the smoothed series: the ±10 min
+/// moving average paints 10 min into each edge of a hole, so a gate on the
+/// smoothed series would let a 40-min hole through.
+const int _maxGapMin = 20;
+
 /// Physiologic RR gate (ms): keep 300–2000, drop |Δ|>200 (ectopy/artifact).
 const double _rrMin = 300, _rrMax = 2000, _rrStep = 200;
 
@@ -117,15 +126,19 @@ SleepCyclesResult detectSleepCycles(
   // ── z-score ────────────────────────────────────────────────────────────────
   final mean = vals.reduce((a, b) => a + b) / vals.length;
   final sd0 = math.sqrt(
-      vals.fold<double>(0, (a, b) => a + (b - mean) * (b - mean)) / vals.length);
+      vals.fold<double>(0, (a, b) => a + (b - mean) * (b - mean)) /
+          vals.length);
   final sd = sd0 == 0 ? 1.0 : sd0;
   final z = [for (final x in sm) x == null ? null : (x - mean) / sd];
 
   // ── prominence-gated peaks → peak-to-peak cycles ───────────────────────────
-  final peaks = _findPeaks(z, _minPeakDist, _minProminence);
+  // A peak must sit on an observed minute: inside a hole the smoothed value
+  // is extrapolated from one side only, so its position is not evidence.
+  final peaks = _findPeaks(z, perMin, _minPeakDist, _minProminence);
   final cycles = <SleepCycle>[];
   for (var i = 0; i + 1 < peaks.length; i++) {
     final a = peaks[i], b = peaks[i + 1];
+    if (_longestNullRun(perMin, a, b) > _maxGapMin) continue;
     cycles.add(SleepCycle(a, b, b - a));
   }
   final meanDur = cycles.isEmpty
@@ -144,6 +157,19 @@ SleepCyclesResult detectSleepCycles(
   return SleepCyclesResult(cycles, meanDur, cycles.length, series);
 }
 
+int _longestNullRun(List<double?> y, int from, int to) {
+  var best = 0, run = 0;
+  for (var k = from; k <= to; k++) {
+    if (y[k] == null) {
+      run++;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  return best;
+}
+
 double? _rmssd(List<double> rr) {
   if (rr.length < 10) return null;
   var s = 0.0, n = 0;
@@ -157,22 +183,48 @@ double? _rmssd(List<double> rr) {
 }
 
 /// Local maxima with z-prominence ≥ [minProm], pruned to ≥ [minDist] apart
-/// (tallest-first). Returns peak minute-indices, ascending.
-List<int> _findPeaks(List<double?> y, int minDist, double minProm) {
+/// (tallest-first). Only minutes observed in [raw] are candidates, filtered
+/// before the distance pruning so an extrapolated point cannot suppress a
+/// real neighbour. Returns peak minute-indices, ascending.
+List<int> _findPeaks(
+    List<double?> y, List<double?> raw, int minDist, double minProm) {
   final n = y.length;
   final cand = <List<double>>[]; // [index, value]
   for (var i = 1; i < n - 1; i++) {
     final yi = y[i];
-    if (yi == null) continue;
-    final a = y[i - 1] ?? double.negativeInfinity;
-    final b = y[i + 1] ?? double.negativeInfinity;
-    if (!(yi >= a && yi > b)) continue;
+    final a = y[i - 1], b = y[i + 1];
+    // A missing neighbour is unknown, not -inf. A point beside a data hole is
+    // judged against its observed side only; with no observed neighbour at
+    // all it is not a local maximum on any evidence.
+    if (yi == null || raw[i] == null || (a == null && b == null)) continue;
+    if (a != null && yi < a) continue;
+    if (b != null && yi <= b) continue;
+    // Walk each side until a higher point, the array edge, or a hole. A side
+    // that runs into a hole has no observed base beyond it, so it does not
+    // contribute to the prominence. When BOTH sides do, the peak is the
+    // tallest point of an island between two holes; skipping it dropped that
+    // peak and every cycle beside it, so the island's own minima stand in
+    // for the base, as they would at the array edges.
     var l = i;
-    while (l > 0 && (y[l - 1] ?? double.negativeInfinity) < yi) {
+    var lHole = false;
+    while (l > 0) {
+      final v = y[l - 1];
+      if (v == null) {
+        lHole = true;
+        break;
+      }
+      if (v >= yi) break;
       l--;
     }
     var r = i;
-    while (r < n - 1 && (y[r + 1] ?? double.negativeInfinity) < yi) {
+    var rHole = false;
+    while (r < n - 1) {
+      final v = y[r + 1];
+      if (v == null) {
+        rHole = true;
+        break;
+      }
+      if (v >= yi) break;
       r++;
     }
     var lmin = yi, rmin = yi;
@@ -184,7 +236,10 @@ List<int> _findPeaks(List<double?> y, int minDist, double minProm) {
       final v = y[k];
       if (v != null && v < rmin) rmin = v;
     }
-    if (yi - math.max(lmin, rmin) >= minProm) cand.add([i.toDouble(), yi]);
+    final base = lHole == rHole
+        ? math.max(lmin, rmin)
+        : (lHole ? rmin : lmin);
+    if (yi - base >= minProm) cand.add([i.toDouble(), yi]);
   }
   cand.sort((p, q) => q[1].compareTo(p[1])); // tallest first
   final kept = <int>[];

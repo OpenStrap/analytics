@@ -44,7 +44,11 @@ class Tier {
   /// Published but estimate-grade on a wrist 1 Hz signal (e.g. TRIMP).
   static const String estimate = 'ESTIMATE';
 
-  /// Relative-only — direction/percentile, never an absolute unit.
+  /// Relative-only — never an absolute unit. Either a direction/percentile,
+  /// or a number whose scale only holds against the same user's own baseline
+  /// on one device family (raw-ADC SpO2/temp, PRSA capacity in ms). Such a
+  /// number may be trended for that user; it must not be compared across
+  /// people or charted across a device-family change.
   static const String relative = 'RELATIVE';
 
   static const Set<String> all = {auth, high, estimate, relative};

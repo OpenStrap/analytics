@@ -16,6 +16,10 @@ import 'package:test/test.dart';
 import 'package:openstrap_analytics/src/onehz/wellness/wellness.dart';
 import 'package:openstrap_protocol/openstrap_protocol.dart';
 
+// The synthetic series below put their phase on the UTC epoch grid; pin the
+// local offset to zero so they do not depend on the machine's time zone.
+int _utc(int _) => 0;
+
 void main() {
   // -------------------------------------------------------------------------
   // 1. Relative skin-temp circadian — cosinor recovers an injected phase.
@@ -33,7 +37,8 @@ void main() {
             2000 + 300 * math.cos(2 * math.pi / 24 * (tHours - peakHour));
         samples.add(AdcSample(tMs, adc));
       }
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
       expect(m.present, isTrue);
       expect(m.tier, Tier.relative);
       final fit = m.value!.cosinorFit!;
@@ -44,6 +49,93 @@ void main() {
       final np = m.value!.nonparam!;
       expect(np.interdailyStability, greaterThan(0.7));
       expect(np.intradailyVariability, lessThan(0.5));
+    });
+
+    test('acrophase and IS bins are local clock time, not UTC', () {
+      // UTC+5:30 user whose wrist temp peaks at 03:00 LOCAL = 21:30 UTC.
+      const off = 19800;
+      const peakLocal = 3.0;
+      final samples = <AdcSample>[];
+      // 7 days @ 1 sample / 5 min, starting at a UTC midnight.
+      final t0 = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch.toDouble();
+      for (var i = 0; i < 7 * 24 * 12; i++) {
+        final tMs = t0 + i * 5 * 60 * 1000.0;
+        final localH = ((tMs / 1000 + off) / 3600) % 24;
+        final adc =
+            2000 + 300 * math.cos(2 * math.pi / 24 * (localH - peakLocal));
+        samples.add(AdcSample(tMs, adc));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: (_) => off);
+      expect(m.value!.cosinorFit!.acrophaseHours, closeTo(peakLocal, 0.1));
+    });
+
+    test('a DST change inside the record does not blur IS', () {
+      // Peak at 03:00 local throughout; the offset steps +1 h mid-record. On a
+      // UTC grid the second half's profile lands an hour late.
+      final t0 = DateTime.utc(2026, 3, 1).millisecondsSinceEpoch.toDouble();
+      final switchMs = t0 + 7 * 24 * 3600 * 1000.0;
+      int offAt(int s) => s * 1000 < switchMs ? 0 : 3600;
+      // Square wave on the local clock: hour-aligned plateaus, so an exact
+      // local grid gives IS == 1 and any 1 h misalignment gives IS < 1.
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 14 * 24 * 12; i++) {
+        final tMs = t0 + i * 5 * 60 * 1000.0;
+        final localH = ((tMs / 1000 + offAt((tMs / 1000).floor())) / 3600) % 24;
+        samples.add(AdcSample(tMs, localH < 8 ? 2300 : 2000));
+      }
+      final local = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: offAt);
+      expect(local.value!.nonparam!.interdailyStability, closeTo(1.0, 1e-9));
+    });
+
+    test('REGRESSION: a repeated fall-back hour stays two epochs', () {
+      // One sample per UTC hour, offset +1 h then 0 h (fall-back), so local
+      // 01:00 occurs twice. Each hour carries its own value; IV must be the
+      // IV of that hourly series, with both 01:00 epochs in it.
+      final t0 = DateTime.utc(2026, 10, 1).millisecondsSinceEpoch.toDouble();
+      final switchMs = t0 + 2 * 24 * 3600 * 1000.0 + 1 * 3600 * 1000.0;
+      int offAt(int s) => s * 1000 < switchMs ? 3600 : 0;
+      final vals = <double>[];
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 4 * 24; i++) {
+        final tMs = t0 + i * 3600 * 1000.0;
+        final v = 2000 + 100 * math.sin(i * 1.7) + (i % 5) * 13.0;
+        vals.add(v);
+        samples.add(AdcSample(tMs, v));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: offAt);
+      final grand = vals.reduce((a, b) => a + b) / vals.length;
+      var diffSq = 0.0, varTot = 0.0;
+      for (var i = 1; i < vals.length; i++) {
+        diffSq += math.pow(vals[i] - vals[i - 1], 2);
+      }
+      for (final v in vals) {
+        varTot += math.pow(v - grand, 2);
+      }
+      final expectedIv = (diffSq / (vals.length - 1)) / (varTot / vals.length);
+      expect(
+          m.value!.nonparam!.intradailyVariability, closeTo(expectedIv, 1e-9));
+    });
+
+    test('REGRESSION: a fit with no resolvable phase is not reported', () {
+      // A pure 12-h rhythm over whole days has no 24-h component, so the
+      // zero-amplitude test cannot reject and the acrophase is undefined. The
+      // nonparametric half still has variance to work with.
+      final samples = <AdcSample>[];
+      for (var i = 0; i < 4 * 24 * 6; i++) {
+        final tMs = i * 10 * 60 * 1000.0;
+        final h = tMs / 3.6e6;
+        samples
+            .add(AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi * h / 12)));
+      }
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
+      expect(m.present, isTrue);
+      expect(m.value!.cosinorFit, isNull);
+      expect(m.value!.nonparam, isNotNull);
+      expect(m.confidence, 0.3);
     });
 
     test('RD-14: IS is taken about the GRAND mean, not the profile mean', () {
@@ -64,7 +156,8 @@ void main() {
           }
         }
       }
-      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+      final np = tempCircadian(samples,
+              deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc)
           .value!
           .nonparam!;
       // van Someren's IS puts BOTH variances about the grand mean. Using the
@@ -86,13 +179,13 @@ void main() {
           if (h == 3) continue;
           for (var k = 0; k < 6; k++) {
             final tHours = day * 24.0 + h + k / 6.0;
-            final adc =
-                2000 + 150 * math.cos(2 * math.pi / 24 * (tHours - 4));
+            final adc = 2000 + 150 * math.cos(2 * math.pi / 24 * (tHours - 4));
             samples.add(AdcSample(tHours * 3.6e6, adc));
           }
         }
       }
-      final np = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60)
+      final np = tempCircadian(samples,
+              deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc)
           .value!
           .nonparam!;
       // Correct value with divisor = epochsPerDay; strictly less than the
@@ -109,7 +202,8 @@ void main() {
         samples.add(
             AdcSample(tMs, 2000 + 300 * math.cos(2 * math.pi / 24 * tHours)));
       }
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
       final j = m.value!.nonparam!.toJson();
       // Not "absent when unobserved" — absent from the shape entirely, because
       // RA on a median-centred series divides by a quantity that crosses zero.
@@ -194,15 +288,16 @@ void main() {
       // 3 days of an identical ADC reading -> varTot == 0 and diffN's
       // squared-difference sum == 0. IS/IV are both undefined divisions by
       // zero here, not "perfectly stable / perfectly regular" measurements.
-      // The cosinor half can still fit a (degenerate) phase on flat input,
-      // so the overall Metric stays present — it's specifically `nonparam`
-      // that must come back null instead of IS=0.0/IV=0.0.
+      // The cosinor half has no resolvable phase on flat input either, so
+      // nothing is left to report and the whole metric is absent.
       final samples = <AdcSample>[
         for (var i = 0; i < 3 * 24 * 6; i++)
           AdcSample(i * 10 * 60 * 1000.0, 2000.0),
       ];
-      final m = tempCircadian(samples, deviceFamily: 'gen4', epochMin: 60);
-      expect(m.value!.nonparam, isNull);
+      final m = tempCircadian(samples,
+          deviceFamily: 'gen4', epochMin: 60, tzOffsetResolver: _utc);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
     });
   });
 
@@ -254,6 +349,33 @@ void main() {
       expect(out.last.flag, TempFlag.normal);
       expect(out.last.z, isNull);
       expect(out.last.confidence, 0);
+    });
+
+    test('a short unscored gap carries the elevated run', () {
+      // Fever nights with an unscored night between each (strap re-seated,
+      // ambient-excluded): the run must survive the holes.
+      final temp = <double?>[
+        for (var i = 0; i < 14; i++) 2000.0 + (i.isEven ? 3 : -3),
+        2060, null, 2065, null, 2070,
+      ];
+      final out = tempIllnessFlag(dates(temp.length), temp,
+          baselineDays: 21, zThresh: 2.0, persistDays: 2, minBaseline: 7);
+      expect(out[14].flag, TempFlag.normal);
+      expect(out[15].z, isNull);
+      expect(out[16].flag, TempFlag.elevated);
+      expect(out[18].flag, TempFlag.elevated);
+    });
+
+    test('a long unscored gap still ends the elevated run', () {
+      final temp = <double?>[
+        for (var i = 0; i < 14; i++) 2000.0 + (i.isEven ? 3 : -3),
+        2060, null, null, null, 2065,
+      ];
+      final out = tempIllnessFlag(dates(temp.length), temp,
+          baselineDays: 21, zThresh: 2.0, persistDays: 2, minBaseline: 7);
+      // Gap of 4 calendar days > 1 + maxGapNights: a fresh single night.
+      expect(out.last.z, isNotNull);
+      expect(out.last.flag, TempFlag.normal);
     });
   });
 
@@ -340,6 +462,70 @@ void main() {
           baselineDays: 28, minBaseline: 10, persistDays: 2);
       expect(out[20].candidate, isTrue);
       expect(out[20].flagged, isFalse, reason: 'one night cannot flag');
+    });
+
+    test('a run of unusually GOOD nights is not an illness anomaly', () {
+      // Recovery after a holiday / deload: RHR well down, HRV well up, resp
+      // down. Every oriented deviation points the healthy way, so the
+      // one-sided {RHR↑, HRV↓, temp↑, resp↑} detector must stay quiet.
+      final r = math.Random(11);
+      double g() {
+        final u1 = 1 - r.nextDouble(), u2 = r.nextDouble();
+        return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
+      }
+
+      final feats = <AnomalyFeatures>[
+        for (var i = 0; i < 60; i++)
+          AnomalyFeatures(
+              rhr: (55 + 1.5 * g()).roundToDouble(),
+              hrv: 60 + 6 * g(),
+              resp: 14.5 + 0.4 * g()),
+        for (var i = 0; i < 3; i++)
+          const AnomalyFeatures(rhr: 47, hrv: 95, resp: 12.8),
+      ];
+      final out = multivariateAnomaly(dates(feats.length), feats,
+          baselineDays: 28, minBaseline: 10, persistDays: 2);
+      for (var i = 60; i < 63; i++) {
+        expect(out[i].mahalanobis, isNotNull);
+        expect(out[i].candidate, isFalse, reason: 'night $i improved');
+        expect(out[i].flagged, isFalse, reason: 'night $i improved');
+        // The drivers still report the signed (healthy) deviation.
+        expect(out[i].drivers.every((d) => d.contribution < 0), isTrue);
+      }
+    });
+
+    test('clamping a healthy-side z never raises d² above the two-sided one',
+        () {
+      // Temp and resp anti-correlated in the baseline, so the inverse
+      // correlation has a positive off-diagonal. Tonight temp is well up and
+      // resp well down: zeroing resp's negative z removes a negative cross
+      // term, which on its own pushes d² past a gate the two-sided distance
+      // (the one the inflation table was measured on) stays under.
+      final r = math.Random(7);
+      double g() {
+        final u1 = r.nextDouble() + 1e-12, u2 = r.nextDouble();
+        return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2);
+      }
+
+      final feats = <AnomalyFeatures>[];
+      for (var k = 0; k < 28; k++) {
+        final u = g(), w = g();
+        feats.add(
+            AnomalyFeatures(temp: 100 + 2 * u, resp: 15 + (-0.6 * u + 0.8 * w)));
+      }
+      for (var k = 28; k < 30; k++) {
+        final win = feats.sublist(k - 28, k);
+        final tc = [for (final f in win) f.temp!];
+        final rc = [for (final f in win) f.resp!];
+        feats.add(AnomalyFeatures(
+            temp: median(tc)! + 5 * mad(tc)!,
+            resp: median(rc)! - 3 * mad(rc)!));
+      }
+      final out = multivariateAnomaly(dates(feats.length), feats);
+      for (var i = 28; i < 30; i++) {
+        expect(out[i].candidate, isFalse, reason: 'night $i');
+        expect(out[i].flagged, isFalse, reason: 'night $i');
+      }
     });
   });
 
@@ -516,6 +702,29 @@ void main() {
       expect(cusumChangePoints(x, dates: contiguous, h: 5.0),
           hasLength(cusumChangePoints(x, h: 5.0).length));
     });
+
+    // A one-night gap every week (the band charging overnight) used to restart
+    // the regime on every gap, so the baseline never reached minBaseline and a
+    // sustained shift was never reported with dates passed.
+    test('a weekly one-night gap keeps the baseline (short gaps)', () {
+      const noise10 = <double>[0, 1, -1, 2, -2, 1, -1, 0, 2, -2];
+      String day(int n) => DateTime.utc(2026, 1, 1)
+          .add(Duration(days: n))
+          .toIso8601String()
+          .substring(0, 10);
+      final x = <double>[];
+      final dates = <String>[];
+      for (var d = 0; d < 120; d++) {
+        if (d % 7 == 6) continue; // charging night
+        x.add((d < 60 ? 55.0 : 63.0) + noise10[d % 10]);
+        dates.add(day(d));
+      }
+      final dets = cusumChangePoints(x, dates: dates, h: 5.0);
+      expect(dets, hasLength(1));
+      expect(dets.single.direction, 1);
+      expect(
+          dates[dets.single.index].compareTo(day(60)), greaterThanOrEqualTo(0));
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -592,7 +801,20 @@ void main() {
       // is asserted as a refusal in its own test below. The rescue itself is
       // unchanged; only a baseline with resolvable dispersion reaches it.
       final tightBase = <double>[
-        52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 52, 49, 55, 53
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        52,
+        49,
+        55,
+        53
       ];
       // minInputs:1 — the subject here is the MAD==0 rescue, not the RD-04
       // minimum-inputs gate (which has its own test below).
@@ -616,8 +838,9 @@ void main() {
       // The measured production failure: [58,58,59] bpm + a 52 bpm night =>
       // MAD 0 => mean/SD fallback on an SD of 0.577 bpm => z = -10.97 =>
       // readiness 99.949 at confidence 0.60. Maximal recovery out of 6 bpm.
-      final m = readinessComposite([rhrInput(52.0, <double>[58, 58, 59])],
-          minInputs: 1, minWeightSum: 0.0);
+      final m = readinessComposite([
+        rhrInput(52.0, <double>[58, 58, 59])
+      ], minInputs: 1, minWeightSum: 0.0);
       expect(m.present, isFalse, reason: 'was: 99.949 at confidence 0.60');
       expect(m.note, contains('need_baseline:have=3,need=14'));
     });
@@ -630,7 +853,20 @@ void main() {
       // clamp (a bounded-but-wrong score at confidence 0.60 is harder to catch
       // than an absurd one).
       final base = <double>[
-        58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 59
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        59
       ];
       final m = readinessComposite([rhrInput(52.0, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -856,8 +1092,7 @@ void main() {
       final feats = <AnomalyFeatures>[
         for (var i = 0; i < 12; i++)
           AnomalyFeatures(
-              rhr: i == 5 ? 59 : 58,
-              hrv: 40.0 + (i.isEven ? 1.0 : -1.0)),
+              rhr: i == 5 ? 59 : 58, hrv: 40.0 + (i.isEven ? 1.0 : -1.0)),
         const AnomalyFeatures(rhr: 60, hrv: 40.0), // ordinary 2-bpm move
       ];
       final dates = [for (var i = 0; i < feats.length; i++) 'd$i'];
@@ -886,7 +1121,20 @@ void main() {
       // so the baseline still has more than 1 bpm of SD — below that the input
       // is refused outright rather than scored (A4).
       final base = <double>[
-        55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 58, 51
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        55,
+        58,
+        51
       ];
       final m = readinessComposite([rhrInput(60, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -898,7 +1146,20 @@ void main() {
 
     test('a dispersed baseline still discloses robust-z (median+MAD)', () {
       final base = <double>[
-        50, 52, 54, 56, 58, 60, 62, 51, 53, 55, 57, 59, 61, 63
+        50,
+        52,
+        54,
+        56,
+        58,
+        60,
+        62,
+        51,
+        53,
+        55,
+        57,
+        59,
+        61,
+        63
       ];
       final m = readinessComposite([rhrInput(70, base)],
           minInputs: 1, minWeightSum: 0.0);
@@ -1026,8 +1287,7 @@ void main() {
       }
     });
 
-    test('a cold segment 2 °C or more low is trimmed, 25 % of one refuses',
-        () {
+    test('a cold segment 2 °C or more low is trimmed, 25 % of one refuses', () {
       for (final drop in [200.0, 300.0, 500.0]) {
         final m = nightlySkinTemp(
             ringNight(coldFrom: 30, coldRecords: 12, coldDrop: drop),
@@ -1260,6 +1520,50 @@ void main() {
       expect(bare.last.candidate, isTrue);
       expect(widened.last.candidate, isFalse,
           reason: 'a MAD over ten nights is not a known scale');
+    });
+  });
+
+  group('multivariateAnomaly one-sided clamp (regression)', () {
+    test('an improving feature cannot raise d2 above the two-sided distance',
+        () {
+      // Resp negatively coupled to RHR across the baseline, so the robust
+      // correlation is strongly negative. Tonight RHR is high (illness side)
+      // and resp is well below its median (the good side). Zeroing the good
+      // component used to drop the negative cross term and inflate d2 above
+      // the neutral-resp night and over the gate.
+      double noise(int i) =>
+          math.sin(i * 1.7) +
+          0.6 * math.sin(i * 0.31) +
+          0.4 * math.cos(i * 2.9);
+      final base = <AnomalyFeatures>[
+        for (var i = 0; i < 28; i++)
+          () {
+            final rhr = (60 + 2 * noise(i)).roundToDouble();
+            return AnomalyFeatures(
+                rhr: rhr, resp: 15 - 0.25 * (rhr - 60) + 0.2 * noise(i + 50));
+          }(),
+      ];
+      final dates = [
+        for (var i = 0; i < 29; i++)
+          DateTime.utc(2026, 9, 1)
+              .add(Duration(days: i))
+              .toIso8601String()
+              .substring(0, 10)
+      ];
+      double d2(double resp) {
+        final out = multivariateAnomaly(
+            dates, [...base, AnomalyFeatures(rhr: 66, resp: resp)]);
+        final m = out.last.mahalanobis!;
+        return m * m;
+      }
+
+      // Neutral = resp exactly at its baseline median (z = 0).
+      final resps = [for (final f in base) f.resp!]..sort();
+      final median = (resps[13] + resps[14]) / 2;
+      final neutral = d2(median);
+      final improving = d2(median - 1.5);
+      expect(improving, lessThan(neutral - 1e-6),
+          reason: 'slower breathing must not score as more anomalous');
     });
   });
 }

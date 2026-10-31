@@ -246,6 +246,7 @@ Metric<RespEstimate> rsaRespRate(
   final peakHz = <double>[]; // the same peaks in Hz, index-aligned
   final peakPwr = <double>[]; // their spectral power, index-aligned
   var atCeiling = 0;
+  var atFloor = 0;
   // The ceilings those sub-windows peaked at, br/min — their own, which
   // move with heart rate; not the whole input's.
   var ceilingLo = double.infinity, ceilingHi = 0.0;
@@ -304,11 +305,28 @@ Metric<RespEstimate> rsaRespRate(
       ceilingHi = math.max(ceilingHi, segHi * 60);
       continue;
     }
+    // The same absence at the BOTTOM edge. A true rate below [rsaLoHz] (slow
+    // deep-sleep or paced breathing at 7.5–9 br/min) leaves only the skirt of
+    // its main lobe inside the band, so the in-band maximum sits on or just
+    // above the floor. Every sub-window then lands near that one value, the
+    // agreement gate passes, and ~9 br/min went out at confidence 0.8–0.9 for
+    // a true 8. One resolution width (1/span) was not enough: noise on the
+    // skirt still put sub-windows at 9.2–10 br/min. Two widths of a full
+    // [rsaSegmentSec] sub-window (0.4 br/min) withholds the whole skirt; the
+    // cost is that a true 9.0–9.4 is withheld too, which is an absence rather
+    // than a wrong number. The guard is capped at that width rather than
+    // scaling with 1/segSpan: on a short input (a 3-min window gives ~90 s
+    // sub-windows) 2/segSpan is 1.33 br/min and blanked a true 10 br/min,
+    // while the floor failure there already sits on the first bin.
+    if (pk <= rsaLoHz + math.min(2 / segSpan, 2 / rsaSegmentSec)) {
+      atFloor++;
+      continue;
+    }
     peaks.add(pk * 60.0);
     peakHz.add(pk);
     peakPwr.add(_powerAt(ls, pk));
   }
-  final dropped = atCeiling + belowBand + thin + gappy;
+  final dropped = atCeiling + atFloor + belowBand + thin + gappy;
   final total = peaks.length + dropped;
   if (peaks.length < 3) {
     // The largest counter is the reason; ties go to the earlier entry.
@@ -326,6 +344,11 @@ Metric<RespEstimate> rsaRespRate(
                 'resolvable ceiling (${round6(ceilingLo)}'
                 '${ceilingHi > ceilingLo ? '–${round6(ceilingHi)}' : ''} '
                 'br/min)'
+      ),
+      (
+        atFloor,
+        '$atFloor of $total sub-windows peaked at the floor of the RSA band '
+            '(${round6(rsaLoHz * 60)} br/min) — the true rate may be below it'
       ),
       (
         gappy,
@@ -358,13 +381,16 @@ Metric<RespEstimate> rsaRespRate(
   for (final p in peaks) {
     if ((p - medBrpm0).abs() <= tolBrpm) within++;
   }
-  final consensus = within / peaks.length;
+  // A floor-pinned sub-window is a vote for "below the band", not an
+  // abstention: leaving it out let the few skirt sub-windows that cleared the
+  // floor guard agree among themselves and publish a rate.
+  final consensus = within / (peaks.length + atFloor);
   if (consensus < minConsensus) {
     return Metric<RespEstimate>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'HF peak unstable across the window\'s own sub-windows — only '
-          '$within of ${peaks.length} ${round6(segSec)}s sub-windows fall '
+          '$within of ${peaks.length + atFloor} ${round6(segSec)}s sub-windows fall '
           'within ${round6(tolBrpm)} br/min of the median; withheld',
     );
   }
@@ -391,8 +417,7 @@ Metric<RespEstimate> rsaRespRate(
       .clamp(0.2, 0.9);
   return Metric<RespEstimate>(
     value: RespEstimate(brpm, bestPeakHz, bestPower, 'rsa',
-        usableSubwindows: peaks.length,
-        subwindows: total),
+        usableSubwindows: peaks.length, subwindows: total),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,

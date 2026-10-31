@@ -15,6 +15,8 @@
 // NO NEW SCORE AND NO NEW NOTIFICATION CLASS. In-app feed only. A push channel
 // would turn this into exactly the forward alerting MT-10 refuses.
 
+import '../clinical/illness_cusum.dart'
+    show belowQuantumNote, degenerateBaselineNote;
 import '../clinical/load_trimp.dart';
 import '../foundations/baseline.dart';
 import '../types.dart';
@@ -114,11 +116,24 @@ Metric<OverreachingConjunction> overreachingConjunction({
   final rhrBelowQuantum = dispersionBelowQuantum(rhrBaselineWindow, 1.0);
   final gate =
       (!rhrBelowQuantum && scale != null && scale > 0) ? 0.5 * scale : null;
-  if (centre == null || gate == null || !base.sufficient) {
+  if (centre == null || !base.sufficient) {
     return Metric<OverreachingConjunction>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: needBaselineNote(have: base.nValid, need: minBaseline),
+    );
+  }
+  if (gate == null) {
+    // Enough nights, but no usable dispersion to gate on. This is NOT a cold
+    // start: more nights of the same whole-bpm values never clear it, so a
+    // need_baseline note here read as "still collecting" indefinitely.
+    final sd = stddev(rhrBaselineWindow) ?? 0;
+    return Metric<OverreachingConjunction>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: (rhrBelowQuantum && sd > 0)
+          ? belowQuantumNote
+          : degenerateBaselineNote,
     );
   }
 

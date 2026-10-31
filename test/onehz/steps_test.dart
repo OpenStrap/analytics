@@ -442,8 +442,41 @@ void main() {
       expect(m.tier, Tier.estimate);
       // DAYS, not minutes: the only floor builder a storage-bound caller can
       // use (personalDynFloorFromDailySummaries) is gated on days, and edge
-      // passes a day count. This used to read have=3,need=2000.
-      expect(m.note, 'need_baseline:have=3,need=$personalDynFloorMinDays');
+      // passes a day count. This used to read have=3,need=2000. The need is
+      // the FROZEN-floor gate, since that is what keeps the floor null.
+      expect(m.note, 'need_baseline:have=3,need=$enrollmentDaysForFrozenFloor');
+    });
+
+    test('cold-start note never reads as met while the floor is still null',
+        () {
+      // Days 5-13 have enough history for the summary median but not for the
+      // frozen floor, so the caller still passes null. The note used to say
+      // have=9,need=5, which reads as an unlocked gate on an absent metric.
+      for (final have in [5, 9, enrollmentDaysForFrozenFloor - 1]) {
+        final m = dailyActiveMinutes(day(120, 30),
+            personalDynFloorG: null, historyDaysAvailable: have);
+        expect(m.present, isFalse);
+        expect(m.note,
+            'need_baseline:have=$have,need=$enrollmentDaysForFrozenFloor');
+      }
+      // A caller that unlocks on the bare summary median says so.
+      final early = dailyActiveMinutes(day(120, 30),
+          personalDynFloorG: null,
+          historyDaysAvailable: 3,
+          requiredHistoryDays: personalDynFloorMinDays);
+      expect(early.note, 'need_baseline:have=3,need=$personalDynFloorMinDays');
+    });
+
+    test(
+        'REGRESSION: an unusable floor past the history gate is not a met '
+        'need_baseline note', () {
+      for (final floor in [double.nan, 0.0, null]) {
+        final m = dailyActiveMinutes(day(120, 30),
+            personalDynFloorG: floor,
+            historyDaysAvailable: enrollmentDaysForFrozenFloor + 6);
+        expect(m.present, isFalse);
+        expect(m.note, isNot(startsWith('need_baseline')), reason: '$floor');
+      }
     });
 
     test('an off-wrist HOUR between moving minutes does not make one bout', () {
