@@ -198,6 +198,20 @@ void main() {
       expect(s.detect(), hasLength(2));
     });
 
+    test('a sit-down with a hole longer than maxGapS in it → TWO', () {
+      // HR on both sides of the hole stays well above the bridge floor, so
+      // only the 2-min stretch with no samples can keep the halves apart.
+      final s = _Series()
+        ..flat(10, 70)
+        ..flat(20, 140)
+        ..recover(3, 140, 100)
+        ..flat(2, null)
+        ..flat(3, 100)
+        ..flat(30, 140)
+        ..flat(10, 70);
+      expect(s.detect(), hasLength(2));
+    });
+
     test('a bridge that would exceed maxWorkoutMin is refused → TWO', () {
       // 70 + 8 + 50 = 128 min > 120: merged it would be dropped whole.
       final s = _Series()
