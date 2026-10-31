@@ -12,13 +12,12 @@
 // So we split the problem the only honest way:
 //
 //   TIER A — [pedometer] / [livePedometer]: a real step counter on the 100 Hz
-//     foreground stream, ported from the OpenStrap backend
-//     (openstrap-analytics/src/steps.ts). See [StepParams] for what it actually
-//     is and is not — it is NOT AN-2554 verbatim, and the ×1.11 "calibration"
-//     it used to carry was measured to be a fabricated +10.6%. Its CONFIRM=8
-//     regularity gate rejects IRREGULAR handling and reads 0 at rest; it does
-//     NOT reject rhythmic arm work (measured: a steady 1.8 Hz stir over 300 s
-//     of no locomotion counts 538 steps at 108 spm). Directly testable: walk N
+//     foreground stream. It finds GAIT by stride periodicity (autocorrelation
+//     at the stride lag) and counts steps from the measured cadence; see
+//     [StepParams] for the algorithm and its OxWalk-measured accuracy. It
+//     replaced an AN-2554-shaped peak counter that under-counted real walkers
+//     by ~25%. Rhythmic arm work at a gait-like rhythm can still count — a
+//     wrist |a| cannot separate it from walking. Directly testable: walk N
 //     steps with the app open and compare.
 //
 //   TIER B — [dailyActiveMinutes]: a 24/7 MOVEMENT-VOLUME index from the 1 Hz
@@ -101,218 +100,270 @@ class PedometerResult {
       };
 }
 
-/// WHAT THIS ALGORITHM ACTUALLY IS — the citation, corrected.
+/// WHAT THIS ALGORITHM IS — a gait-PERIODICITY counter, not a peak counter.
 ///
-/// It is NOT AN-2554, despite what this file said for a long time. It is:
+/// The previous counter (an AN-2554-shaped max/min peak search behind a 0.10 g
+/// dead-zone and a CONFIRM=8 run gate) was scored against OxWalk — 39 adults,
+/// unscripted free living, dominant-wrist AX3, camera-annotated heel strikes —
+/// and measured MAPE 33.0%, only 5/39 within ±10%, and a uniform −25.4% on the
+/// participants who actually walked. No setting of its knobs fixed that: every
+/// `sens`/`confirm` that recovered the walkers also tripled-to-sextupled the
+/// arm-work participants, because a peak detector cannot tell "regular wrist
+/// bumps" from "regular wrist bumps while walking".
 ///
-///   * AN-2554's *structure* — centred-window max/min peak search judged
-///     against a dynamic threshold that is refreshed from recent (max+min)/2 —
-///     but on Euclidean magnitude √(x²+y²+z²), where AN-2554 uses the sum of
-///     absolutes, and retuned for 100 Hz where AN-2554 is specified at 50 Hz;
-///   * plus Zhao's ADXL345 Analog Dialogue pedometer's confirm/"regulation"
-///     mechanic ([confirm] consecutive valid pairs before anything is credited,
-///     then free-running until the run breaks) — also a 50 Hz design;
-///   * plus [sens] and [confirm], which appear in NEITHER source. They are
-///     ours. Do not defend them by citation.
+/// What separates them is STRIDE PERIODICITY. Walking repeats every stride
+/// (two steps) with high fidelity; stirring, typing and gesturing mostly do
+/// not. So, per 1 s segment, over the [winS]-second window centred on it:
 ///
-/// What IS taken straight from AN-2554 is the pair of physiological step-
-/// interval bounds ([minStepIntervalS] / [maxStepIntervalS]) — max ~5 steps/s
-/// running, min ~0.5 steps/s very slow walking. Those were missing from this
-/// port until they were added back.
+///   1. band-pass |a| (two 0.1 s moving averages minus a 1 s one) and, above
+///      [decimateAboveHz], block-average down to ~50 Hz. Accuracy is identical
+///      at 50 and 100 Hz on OxWalk and the cost drops ~4×.
+///   2. normalised autocorrelation over lags [lagLoS]..[lagHiS].
+///   3. P = the SHORTEST autocorrelation peak in [peakLoS]..[peakHiS] within
+///      [harmonic] of the strongest — the fundamental, not a multiple of it.
+///   4. STEP OR STRIDE? At the wrist P is either the step period (|a| bobs
+///      once per step) or the stride period (the arm swings once per stride).
+///      On OxWalk walking windows the two populations do not overlap: step-P
+///      sits at 0.47–0.63 s with the half-lag autocorrelation at −0.96…−0.55
+///      (P/2 is anti-phase), stride-P at 0.94–1.27 s with the half-lag at
+///      −0.38…+0.70 (P/2 is itself a step). So P ≥ [strideS], or a half-lag
+///      above [halfAc], means stride and step = P/2; otherwise step = P. This
+///      single decision was the difference between a cadence that was right
+///      and one that read ×2 on ~30% of walking windows.
+///   5. GAIT GATE: band-passed SD ≥ [ampG] and autocorrelation AT THE STRIDE
+///      LAG (2 × step) ≥ [regHi], grown through neighbouring seconds that
+///      clear [regLo] (hysteresis), and kept only as a run of ≥ [minRun]
+///      consecutive seconds. Below 8 s nothing is credited.
+///   6. COUNT = Σ segment seconds / step period over the gait seconds. Steps
+///      come from the MEASURED cadence, never from counting individual peaks,
+///      so one weak footfall cannot reset a run.
 ///
-/// Neither ancestor is validated evidence: AN-2554's "~97% on a wrist" is a
-/// vendor figure on an unpublished protocol, and Zhao's note has no validation
-/// at all. Every independent free-living wrist evaluation puts peak detection
-/// between 60% and 230% error. Treat this as a counter that is accurate on the
-/// walking it supervises, not as an all-day step source.
+/// OxWalk, production chunking (60 s), raw counts, gain 1.00 — measured
+/// 2026-10-23 with `tool/oxwalk_validate.dart`:
+///
+///   Wrist 100 Hz   MAPE 33.0% → 16.7%   within ±10%  5 → 21 of 39
+///                  walkers (≥600 steps/h) bias −25.4% → −10.4%
+///                  daily totals −19.8% → −7.3%
+///   Wrist  50 Hz   MAPE 33.6% → 16.9%
+///   Wrist  25 Hz   MAPE 91.9% → 17.3%   (was dead: the old constants were in
+///                                        samples; these are in seconds)
+///   Hip   100 Hz   MAPE 29.5% → 17.6%
+///
+/// LIMITS, stated rather than hidden:
+///   * Rhythmic arm work at a gait-like rhythm still counts (OxWalk P28:
+///     258 true steps, ~690 counted). Nothing on a wrist |a| separates it
+///     from walking; the edge's activity-type gate is the defence.
+///   * The step/stride decision runs first and [stepLoS]..[stepHiS]
+///     (60–240 spm) is checked on its result. A sprint above 240 spm locks
+///     onto its stride and reads HALF (the edge never lets the strap count
+///     sprints). A slow signal is NOT dropped at 60 spm, see the next point.
+///   * A wrist signal with ONLY a step fundamental slower than ~67 spm
+///     (P ≥ [strideS]) is read as a stride and counted double, down to
+///     ~37.5 spm (P = [peakHiS]); slower than that there is no peak in the
+///     band and nothing is counted. On OxWalk that population is empty; on
+///     synthetic signals it is not.
+///
+/// Every constant is in SECONDS, so the counter is rate-agnostic — the caller
+/// must pass the buffer's REAL rate as `sampleRateHz`.
 class StepParams {
-  /// Default assembled IMU sample rate (Hz). No longer decorative: it is the
-  /// default for [pedometer]'s `sampleRateHz`, which the interval bounds below
-  /// are converted through. Every other constant here is in SAMPLES.
+  /// Default assembled IMU sample rate (Hz) for [pedometer]'s `sampleRateHz`.
   static const double fs = 100;
-  static const int filter = 8; // low-pass moving-average taps
-  static const int window = 33; // centered peak window (~0.33 s @100 Hz)
-  static const double sens = 0.10; // g — dead-zone around the dynamic threshold
-  static const int thrOrder = 4; // dynamic-threshold smoothing buffer
-  static const int confirm = 8; // consecutive possible steps before counting
-  static const int maxMinTimeout = 120; // samples to find a min after a max
 
-  /// AN-2554's step-interval window: a human runs at most ~5 steps/s and walks
-  /// at slowest ~0.5 steps/s, so a peak-to-peak interval outside 0.2–2.0 s is
-  /// not gait and breaks the run. Distinct from [maxMinTimeout], which bounds
-  /// the max→min HALF cycle, not the interval between steps.
-  static const double minStepIntervalS = 0.2;
-  static const double maxStepIntervalS = 2.0;
+  static const double winS = 4.0; // autocorrelation window, centred
+  static const double hopS = 1.0; // decision segment
+  static const double decimateAboveHz = 50; // block-average down to ~50 Hz
+  static const double lagLoS = 0.2;
+  static const double lagHiS = 2.0;
+  static const double peakLoS = 0.25;
+  static const double peakHiS = 1.6;
+  static const double harmonic = 0.8; // "within 80% of the best peak"
+  static const double strideS = 0.9; // P at/above this is a stride
+  static const double halfAc = -0.4; // half-lag above this ⇒ P is a stride
+  static const double stepLoS = 0.25; // 240 spm
+  static const double stepHiS = 1.0; // 60 spm
+  static const double ampG = 0.04; // band-passed SD floor (g)
+  static const double regHi = 0.6; // stride autocorrelation to START gait
+  static const double regLo = 0.2; // ...to CONTINUE it (hysteresis)
+  static const int minRun = 8; // consecutive gait seconds before crediting
 
   /// Per-user calibration trim. **Default 1.00, and it must stay 1.00 as a
-  /// default** — a population fudge factor is not a calibration.
-  ///
-  /// This was 1.11 and it was shipping a measured +10.6% over-count. The
-  /// docstring claimed "raw 90 → ~100 ground truth"; on clean synthetic gait
-  /// the raw count is exact — raw/truth 1.00 at 60, 80, 100, 120, 140 and
-  /// 180 spm. The 90→100 figure is only reproducible at ~0.050 g peak
-  /// amplitude, on the [sens] dead-zone cliff where a 100-step walk counts
-  /// 0 → 56 → 98 → 100 across 0.048–0.055 g: n=1, at the least reproducible
-  /// operating point in the parameter space.
-  ///
-  /// The real systematic deficit on a still→walk→still bout is a FLAT −0.9%,
-  /// identical from a 20-step bout to a 10,000-step one. Flat means it is
-  /// neither a gain error (which would scale) nor an offset (which would
-  /// shrink): it is per-minute CHUNK-BOUNDARY loss inside [calcSteps], which
-  /// restarts the state machine every minute and pays [confirm] again. Fixing
-  /// that means changing how [calcSteps] segments minutes; it is 0.9% and it is
-  /// deliberately not chased. Do not re-derive a gain from it.
-  ///
-  /// A real strap on a real wrist may still need trimming — that is what this
-  /// knob is for. Measure it against ground truth, per user, and store it with
-  /// the user; never bake a population constant back in here.
+  /// default** — a population fudge factor is not a calibration. It was once
+  /// 1.11 and shipped a measured +10.6% over-count. Measure it against ground
+  /// truth, per user, and store it with the user.
   static const double gain = 1.00;
 }
 
-/// Time-domain step count over ONE contiguous accelerometer-MAGNITUDE signal
-/// (g, gravity INCLUDED). Raw count — no calibration gain. See [StepParams] for
-/// what this algorithm is (it is not AN-2554 verbatim).
-///
-///   low-pass (trailing MA) → centered-window max/min extrema → dynamic
-///   threshold ± [StepParams.sens]/2 dead-zone → step-interval bounds
-///   ([StepParams.minStepIntervalS]…[StepParams.maxStepIntervalS]) →
-///   [StepParams.confirm] consecutive "possible steps" before counting (the
-///   regularity gate — it rejects IRREGULAR handling and reads 0 at rest, but
-///   it does NOT reject rhythmic arm work).
-///
-/// [sampleRateHz] is the rate of THIS buffer. It is used only to convert the
-/// step-interval bounds into samples — every other constant is in samples and
-/// the peak window is wide enough that 50–200 Hz all count correctly (measured;
-/// 25 Hz collapses to 0.29 of truth at 110 spm and no bound saves that).
-int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) {
-  final n = sig.length;
-  if (n < StepParams.window || sampleRateHz <= 0) return 0;
-  // Step-interval bounds in SAMPLES, from the buffer's real rate.
-  final minGap = StepParams.minStepIntervalS * sampleRateHz;
-  final maxGap = StepParams.maxStepIntervalS * sampleRateHz;
-  const filter = StepParams.filter;
-  // low-pass: trailing moving average
-  final lp = List<double>.filled(n, 0);
-  var acc = 0.0;
-  for (var i = 0; i < n; i++) {
-    acc += sig[i];
-    if (i >= filter) acc -= sig[i - filter];
-    lp[i] = acc / math.min(i + 1, filter);
-  }
-  final half = StepParams.window >> 1;
-  // centered-window extrema candidates
-  final candI = <int>[];
-  final candMax = <bool>[];
-  final candV = <double>[];
-  for (var i = half; i < n - half; i++) {
-    var isMax = true, isMin = true;
-    final v = lp[i];
-    for (var j = i - half; j <= i + half; j++) {
-      if (lp[j] > v) isMax = false;
-      if (lp[j] < v) isMin = false;
-      if (!isMax && !isMin) break;
-    }
-    if (isMax) {
-      candI.add(i);
-      candMax.add(true);
-      candV.add(v);
-    } else if (isMin) {
-      candI.add(i);
-      candMax.add(false);
-      candV.add(v);
-    }
-  }
-  // dynamic threshold + CONFIRM-step regularity
-  final dyn = <double>[];
-  var dynVal = 0.0;
-  for (final v in sig) {
-    dynVal += v;
-  }
-  dynVal /= n;
-  var steps = 0, poss = 0;
-  var regulation = false;
-  var stateMax = true; // 'max' → looking for a max; else looking for a min
-  var curMax = 0.0;
-  var curMaxIdx = -1;
-  var lastStepIdx =
-      -1; // peak index of the last credited pair (interval anchor)
-  for (var k = 0; k < candI.length; k++) {
-    final ci = candI[k], cMax = candMax[k], cv = candV[k];
-    if (stateMax) {
-      if (cMax) {
-        curMax = cv;
-        curMaxIdx = ci;
-        stateMax = false;
-      }
-    } else {
-      if (cMax) {
-        if (cv > curMax) {
-          curMax = cv;
-          curMaxIdx = ci;
-        }
-        continue;
-      }
-      if (ci - curMaxIdx > StepParams.maxMinTimeout) {
-        stateMax = true;
-        poss = 0;
-        regulation = false;
-        lastStepIdx = -1;
-        continue;
-      }
-      final mx = curMax, mn = cv;
-      if (mx > dynVal + StepParams.sens / 2 &&
-          mn < dynVal - StepParams.sens / 2) {
-        // Step-interval bound (AN-2554). The interval between two steps is the
-        // gap between their peaks; outside 0.2–2.0 s no human produced both, so
-        // this pair cannot CONTINUE the run — it can only start a new one.
-        // Without it the counter tracks 250, 300 and 320 spm at raw/truth 1.00
-        // and only loses lock near 350 spm, by accident of the peak window's
-        // width. Checked here rather than above the amplitude test so a noise
-        // pair can never move the anchor.
-        final gap = lastStepIdx < 0 ? null : curMaxIdx - lastStepIdx;
-        lastStepIdx = curMaxIdx;
-        if (gap != null && (gap < minGap || gap > maxGap)) {
-          poss = 0;
-          regulation = false;
-          stateMax = true;
-          continue;
-        }
-        if (mx - mn > StepParams.sens) {
-          dyn.add((mx + mn) / 2);
-          if (dyn.length > StepParams.thrOrder) dyn.removeAt(0);
+/// Step count over ONE contiguous accelerometer-MAGNITUDE signal (g, gravity
+/// INCLUDED) sampled at [sampleRateHz]. Raw count — no calibration gain. See
+/// [StepParams] for the algorithm and its measured accuracy.
+int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) =>
+    _gaitSteps(sig, sampleRateHz).round();
+
+double _gaitSteps(List<double> sig, double sampleRateHz) {
+  if (sig.isEmpty || !(sampleRateHz > 0)) return 0;
+  var fs = sampleRateHz;
+  // 1. band-pass, then decimate.
+  final lp = _trailingMean(_trailingMean(sig, fs * 0.1), fs * 0.1);
+  final hp = _trailingMean(lp, fs);
+  var bp = <double>[for (var i = 0; i < lp.length; i++) lp[i] - hp[i]];
+  final k = (fs / StepParams.decimateAboveHz).floor();
+  if (k > 1) {
+    bp = [
+      for (var i = 0; i < bp.length; i += k)
+        () {
+          final end = math.min(i + k, bp.length);
           var s = 0.0;
-          for (final v in dyn) {
-            s += v;
+          for (var j = i; j < end; j++) {
+            s += bp[j];
           }
-          dynVal = s / dyn.length;
-        }
-        poss++;
-        if (regulation) {
-          steps++;
-        } else if (poss >= StepParams.confirm) {
-          steps += poss;
-          regulation = true;
-        }
-      } else {
-        poss = 0;
-        regulation = false;
-      }
-      stateMax = true;
+          return s / (end - i);
+        }(),
+    ];
+    fs = fs / k;
+  }
+  final n = bp.length;
+  final w = (StepParams.winS * fs).round();
+  final h = math.max(1, (StepParams.hopS * fs).round());
+
+  // 2-4. per-segment cadence + stride regularity.
+  final segS = <double>[];
+  final stepS = <double?>[];
+  final ok = <bool>[];
+  final reg = <double>[];
+  for (var c = 0; c < n; c += h) {
+    final segLen = math.min(h, n - c);
+    var lo = math.max(0, c + segLen ~/ 2 - w ~/ 2);
+    final hi = math.min(n, lo + w);
+    lo = math.max(0, hi - w);
+    final d = _decide(bp, lo, hi, fs);
+    segS.add(segLen / fs);
+    stepS.add(d.stepS);
+    ok.add(d.stepS != null && d.sd >= StepParams.ampG);
+    reg.add(d.strideAc);
+  }
+
+  // 5. gait gate with hysteresis, then the minimum run.
+  final m = ok.length;
+  final gait = [
+    for (var i = 0; i < m; i++) ok[i] && reg[i] >= StepParams.regHi
+  ];
+  bool loose(int i) => ok[i] && reg[i] >= StepParams.regLo;
+  for (var i = 1; i < m; i++) {
+    if (!gait[i] && gait[i - 1] && loose(i)) gait[i] = true;
+  }
+  for (var i = m - 2; i >= 0; i--) {
+    if (!gait[i] && gait[i + 1] && loose(i)) gait[i] = true;
+  }
+
+  // 6. steps = time / measured step period, over runs long enough to be gait.
+  var steps = 0.0;
+  var i = 0;
+  while (i < m) {
+    if (!gait[i]) {
+      i++;
+      continue;
     }
+    var j = i;
+    while (j + 1 < m && gait[j + 1]) {
+      j++;
+    }
+    if (j - i + 1 >= StepParams.minRun) {
+      for (var q = i; q <= j; q++) {
+        steps += segS[q] / stepS[q]!;
+      }
+    }
+    i = j + 1;
   }
   return steps;
+}
+
+/// Trailing moving average over round([w]) samples (shorter at the start).
+List<double> _trailingMean(List<double> x, double w) {
+  final taps = math.max(1, w.round());
+  final out = List<double>.filled(x.length, 0);
+  var acc = 0.0;
+  for (var i = 0; i < x.length; i++) {
+    acc += x[i];
+    if (i >= taps) acc -= x[i - taps];
+    out[i] = acc / math.min(i + 1, taps);
+  }
+  return out;
+}
+
+/// Cadence and stride regularity of `bp[lo, hi)`: the step period (s, or null
+/// when the window has no gait-band periodicity), the window's SD, and the
+/// autocorrelation at the stride lag (−1 when there is none).
+({double? stepS, double sd, double strideAc}) _decide(
+    List<double> bp, int lo, int hi, double fs) {
+  final n = hi - lo;
+  if (n <= 0) return (stepS: null, sd: 0.0, strideAc: -1.0);
+  var mean = 0.0;
+  for (var i = lo; i < hi; i++) {
+    mean += bp[i];
+  }
+  mean /= n;
+  final s = <double>[for (var i = lo; i < hi; i++) bp[i] - mean];
+  // Prefix energies, so each lag's normalisation is O(1).
+  final e = List<double>.filled(n + 1, 0);
+  for (var i = 0; i < n; i++) {
+    e[i + 1] = e[i] + s[i] * s[i];
+  }
+  final sd = math.sqrt(e[n] / n);
+  const none = -1.0;
+  final lagLo = (StepParams.lagLoS * fs).round();
+  final lagHi =
+      math.min((StepParams.lagHiS * fs).round(), n - (0.5 * fs).round());
+  if (lagHi <= lagLo + 2 || sd <= 0) {
+    return (stepS: null, sd: sd, strideAc: none);
+  }
+  final ac = List<double>.filled(lagHi + 1, double.nan);
+  for (var l = lagLo; l <= lagHi; l++) {
+    var dot = 0.0;
+    for (var t = 0; t < n - l; t++) {
+      dot += s[t] * s[t + l];
+    }
+    final den = math.sqrt(e[n - l] * (e[n] - e[l]));
+    ac[l] = den > 0 ? dot / den : 0.0;
+  }
+  double acAt(int l) => (l >= lagLo && l <= lagHi) ? ac[l] : double.nan;
+
+  final pLo = math.max((StepParams.peakLoS * fs).round(), lagLo + 1);
+  final pHi = math.min((StepParams.peakHiS * fs).round(), lagHi - 1);
+  final peaks = <int>[
+    for (var l = pLo; l <= pHi; l++)
+      if (ac[l] >= ac[l - 1] && ac[l] >= ac[l + 1]) l,
+  ];
+  if (peaks.isEmpty) return (stepS: null, sd: sd, strideAc: none);
+  var best = ac[peaks.first];
+  for (final l in peaks) {
+    if (ac[l] > best) best = ac[l];
+  }
+  if (best <= 0) return (stepS: null, sd: sd, strideAc: none);
+  final p = peaks.firstWhere((l) => ac[l] >= StepParams.harmonic * best);
+  // Sub-sample peak: parabolic interpolation (a 20 ms lag grid is a ±2%
+  // cadence error at 140-180 spm otherwise).
+  final a0 = ac[p - 1], a1 = ac[p], a2 = ac[p + 1];
+  final curv = a0 - 2 * a1 + a2;
+  final pf = p + (curv < 0 ? 0.5 * (a0 - a2) / curv : 0.0);
+  final half = (p / 2).round();
+  final isStride = p / fs >= StepParams.strideS ||
+      (half / fs >= StepParams.peakLoS && acAt(half) > StepParams.halfAc);
+  final step = isStride ? pf / 2 : pf;
+  final stepS = step / fs;
+  if (stepS < StepParams.stepLoS || stepS > StepParams.stepHiS) {
+    return (stepS: null, sd: sd, strideAc: none);
+  }
+  final r = acAt((2 * step).round());
+  return (stepS: stepS, sd: sd, strideAc: r.isNaN ? none : r);
 }
 
 /// Daily total: [pedometer] over each per-minute contiguous magnitude signal,
 /// summed and scaled by [StepParams.gain] (1.00 by default — see there).
 ///
-/// KNOWN, DELIBERATELY UNFIXED: the per-minute chunking costs a flat −0.9%.
-/// The state machine restarts at every boundary and has to re-earn
-/// [StepParams.confirm], losing ~2 steps per minute of continuous walking.
-/// Measured on still→walk→still bouts of 20 / 100 / 1000 / 10000 steps: −0.9%
-/// at every size. It is not a gain error and must not be "corrected" with one.
-/// Fixing it properly means carrying state across chunk boundaries, i.e.
-/// changing how this function segments minutes.
+/// Chunking costs little: each chunk's gait runs restart at its edges, so a
+/// walk crossing a boundary can lose up to [StepParams.minRun] seconds on each
+/// side only when a fragment is shorter than that. Measured on OxWalk wrist
+/// 100 Hz, 60 s chunks cost −2.4% of the total vs one contiguous buffer.
 int calcSteps(
   List<List<double>> minuteSignals, {
   double sampleRateHz = StepParams.fs,
@@ -336,7 +387,7 @@ PedometerResult livePedometer(
   double sampleRateHz = StepParams.fs,
 }) {
   final n = math.min(x.length, math.min(y.length, z.length));
-  if (n < StepParams.window || sampleRateHz <= 0) return PedometerResult.none;
+  if (n < 2 || sampleRateHz <= 0) return PedometerResult.none;
   final mag = <double>[
     for (var i = 0; i < n; i++)
       math.sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i])
@@ -345,8 +396,8 @@ PedometerResult livePedometer(
   final durationS = n / sampleRateHz;
   if (steps <= 0) return PedometerResult(0, durationS, 0, 0, 0);
   // Cadence over the buffer span. For a dedicated walk this is the walking
-  // cadence; the CONFIRM gate guarantees any nonzero count is confirmed gait,
-  // so confidence is high. peakToPeak is the magnitude range (motion strength).
+  // cadence; the gait gate guarantees any nonzero count came from a periodic
+  // run of at least StepParams.minRun seconds, so confidence is high. peakToPeak is the magnitude range (motion strength).
   final cadence = durationS > 0 ? steps / (durationS / 60.0) : 0.0;
   var mn = mag.first, mx = mag.first;
   for (final v in mag) {

@@ -105,7 +105,8 @@ foundation layers:
   (IS/IV/RA/L5/M10).
 - **`respiration/`** — RSA-derived respiratory rate fused with motion-modulated RIIV,
   CVHR-based apnea screening, a relative (never absolute) oxygen-desaturation ratio.
-- **`motion/`** — ENMO/MAD activity metrics, a 100 Hz AN-2554-derived live pedometer
+- **`motion/`** — ENMO/MAD activity metrics, a 100 Hz live pedometer that finds gait
+  by stride periodicity (autocorrelation) and counts steps from the measured cadence,
   plus a separate 1 Hz movement-minutes estimate (no step count — true per-step
   counting is impossible below gait Nyquist) for whatever the live stream missed,
   energy-expenditure fusion.
