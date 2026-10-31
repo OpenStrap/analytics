@@ -47,5 +47,32 @@ void main() {
       expect(m.present, isTrue);
       expect(m.value!.bothPointSameWay, isTrue);
     });
+    test('a long but coarse baseline is not reported as a cold start', () {
+      final recent = <double?>[65.0, 66.0, 64.0, 67.0, 65.0];
+      final flat = overreachingConjunction(
+        load: load,
+        rhrRecent: recent,
+        rhrBaselineWindow: List<double>.filled(28, 58),
+      );
+      expect(flat.present, isFalse);
+      expect(flat.note, degenerateBaselineNote);
+
+      final alternating = overreachingConjunction(
+        load: load,
+        rhrRecent: recent,
+        rhrBaselineWindow: [for (var i = 0; i < 28; i++) i.isEven ? 58 : 59],
+      );
+      expect(alternating.present, isFalse);
+      expect(alternating.note, belowQuantumNote);
+    });
+
+    test('a short baseline still reports need_baseline', () {
+      final m = overreachingConjunction(
+        load: load,
+        rhrRecent: const [65.0, 65.0, 65.0, 65.0, 65.0],
+        rhrBaselineWindow: const [54, 56, 58, 60, 55],
+      );
+      expect(m.note, 'need_baseline:have=5,need=14');
+    });
   });
 }

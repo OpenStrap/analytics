@@ -94,7 +94,8 @@ void main() {
       expect(m.note, contains('%HRR band'));
     });
 
-    test('hr_max too close to resting_hr abstains rather than divide-by-noise', () {
+    test('hr_max too close to resting_hr abstains rather than divide-by-noise',
+        () {
       final m = vo2maxSubmaxEstimate(
         speedMps: 2.78,
         avgHrBpm: 90,
@@ -115,6 +116,25 @@ void main() {
         hrMaxBpm: 185,
       );
       expect(m.present, isFalse);
+    });
+    test('non-finite heart-rate inputs abstain instead of throwing', () {
+      for (final (avg, rest, max) in [
+        (double.nan, 55.0, 185.0),
+        (double.infinity, 55.0, 185.0),
+        (150.0, double.nan, 185.0),
+        (150.0, 55.0, double.nan),
+        (150.0, 55.0, double.infinity),
+      ]) {
+        final m = vo2maxSubmaxEstimate(
+          speedMps: 3,
+          avgHrBpm: avg,
+          boutDurationSec: 600,
+          restingHrBpm: rest,
+          hrMaxBpm: max,
+        );
+        expect(m.present, isFalse, reason: 'avg=$avg rest=$rest max=$max');
+        expect(m.value, isNull);
+      }
     });
   });
 }

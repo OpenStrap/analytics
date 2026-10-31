@@ -71,7 +71,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `strainScoreFromSeries` | `clinical/load_trimp.dart` | **the headline 0-21 strain** from per-minute wake HR: `netTrimpAboveQuiet` log-mapped onto 0-21 | — |
 | `strainCurveFromSeries` | `clinical/load_trimp.dart` | cumulative 0-21 strain per minute, same arithmetic; last point == headline | — |
 | `strainScoreMetric` | `clinical/load_trimp.dart` | LUMP form (TRIMP minus wake-minutes × quiet cost) log-squashed onto 0-21; can debit exercise, kept only for rescaling a stored TRIMP with no per-minute series | — |
-| `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
 | `baevskyStressIndex` | `clinical/stress_si.dart` | Baevsky Stress Index, 5-min sliding RR-histogram | Baevsky & Berseneva 2008 |
 | `irregularBeatScreen` | `clinical/irregular_rhythm.dart` | Poincaré SD1/SD2 + pNN70 irregular-rhythm screen | — (screen, not a diagnosis; no ECG) |
@@ -87,7 +86,6 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
 | `sleepAccounting` | `sleep/accounting.dart` | TIB/TST/WASO/efficiency accounting | — |
-| `cardiopulmonaryCoupling` | `sleep/cpc.dart` | cardiopulmonary coupling | — |
 | `sleepCyclesMetric` | `sleep/cycles.dart` | fractal ultradian sleep-cycle detection | Rosenblum et al. 2024 |
 | `circadianNonparametric` | `sleep/circadian_np.dart` | IS/IV/RA/L5/M10 nonparametric circadian indices | — |
 | `phillipsSri` | `sleep/sri.dart` | true Phillips epoch-agreement Sleep Regularity Index | Phillips et al. 2017 |
@@ -133,7 +131,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `socialJetlag` / `chronotype` | `human/circadian_lifestyle.dart` | MSFsc-based social jetlag + chronotype | Wittmann & Roenneberg 2006; MCTQ |
 | `alcoholNightFlag` | `human/event_detection.dart` | dose-graded autonomic-stress signature — **reports state, never asserts a cause** | Pietilä et al. 2018 |
 | `roughNight` | `human/event_detection.dart` | neutral fallback descriptor when the signature is ambiguous | — |
-| `percentileOfYou` / `personalRecord` | `human/percentile_of_you.dart` | percentile-vs-your-own-history, miss-tolerant personal-record streaks | — |
+| `percentileOfYou` | `human/percentile_of_you.dart` | percentile-vs-your-own-history | — |
 | `glassBoxReadiness` | `human/readiness_glassbox.dart` | **deprecated** — kept only for its percentile-of-you breakdown + narrative and edge back-compat; `readinessComposite` is canonical | — |
 | `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | — |
 | `journalCorrelations` | `human/coaching.dart` | per-tag mean-difference correlation vs. logged outcomes, on-device, personal | — |

@@ -91,8 +91,11 @@ class AutoWorkoutDetector {
   /// you work out?" prompt should ask about.
   static const double hrrFloorFraction = 0.45;
 
-  /// HRmax fallback when the caller passes none (age-predicted is preferred).
-  static const int defaultMaxHR = 190;
+  // There is deliberately no HRmax fallback. A population 190 put the %HRR
+  // gate ~12 bpm too high for a 62-year-old at RHR 62 (120 vs 108 on their
+  // age line) and too low for anyone whose real ceiling is above 190, and
+  // nothing in the result said a default was used. No ceiling → no
+  // suggestions; see [detect] and [autoDetectWorkouts].
 
   /// A suggested WORKOUT is time-bounded. A sustained elevation longer than this
   /// (observed: ~3 h of steady 131 bpm from an active evening) is lifestyle
@@ -218,6 +221,8 @@ class AutoWorkoutDetector {
   ///
   /// [hrTs]/[hrBpm] the day's HR samples (parallel, any order; empty → []).
   /// [restingBpm] nightly resting HR for the day; null → [defaultRestingHR] (60).
+  /// [maxBpm] the user's HRmax (measured or age-predicted); null → [] (the
+  /// %HRR gate cannot be placed without it).
   /// [motion] OPTIONAL continuous motion series for confirmation; null/empty →
   /// HR-only. [savedSpans] already-saved windows to exclude by overlap.
   /// [classify] the sport seam — runs on each surviving bout; default
@@ -232,7 +237,7 @@ class AutoWorkoutDetector {
     SportClassifier classify = defaultSportClassifier,
   }) {
     final n = hrTs.length;
-    if (n == 0) return const [];
+    if (n == 0 || maxBpm == null) return const [];
     final order = List<int>.generate(n, (i) => i)
       ..sort((a, b) => hrTs[a].compareTo(hrTs[b]));
     final ts = [for (final i in order) hrTs[i]];
@@ -240,8 +245,7 @@ class AutoWorkoutDetector {
 
     // %HRR floor (primary), never below the RHR+margin safety floor.
     final rhr = restingBpm ?? defaultRestingHR;
-    final hrMax = maxBpm ?? defaultMaxHR;
-    final hrrFloor = (rhr + hrrFloorFraction * (hrMax - rhr)).round();
+    final hrrFloor = (rhr + hrrFloorFraction * (maxBpm - rhr)).round();
     final floor = math.max(rhr + elevatedMarginBPM, hrrFloor);
 
     // --- 1+2+3: grow sustained spans tolerating brief dips ---
@@ -281,7 +285,7 @@ class AutoWorkoutDetector {
     // from effort", not "working out". Never above the gate itself, so a low
     // HRmax can't make bridging stricter than the bout definition.
     final bridgeFloor = math.min(
-        floor, (rhr + restBridgeHrrFraction * (hrMax - rhr)).round());
+        floor, (rhr + restBridgeHrrFraction * (maxBpm - rhr)).round());
     // Two passes. The unconditional < mergeGapS merge runs first, exactly as
     // it always has; bridging then works on its output. Done the other way
     // round, a short gap after a bridge would grow the window past
@@ -380,8 +384,12 @@ class AutoWorkoutDetector {
             cnt++;
           }
         }
-        meanMotion = cnt == 0 ? 0.0 : sum / cnt;
-        if (meanMotion < motionConfirmMean) {
+        // No motion sample inside the window is missing evidence, not a still
+        // wrist: reading it as 0.0 g failed the gate and dropped the bout,
+        // and handed the classifier an intensity nobody measured. Judge the
+        // window on HR alone, as with no motion series at all.
+        meanMotion = cnt == 0 ? null : sum / cnt;
+        if (meanMotion != null && meanMotion < motionConfirmMean) {
           // Low-motion but a genuine exercise-like onset — see [onsetRiseBpm].
           final preMean =
               _meanBpmInRange(ts, bpm, start - onsetLookbackS, start);
@@ -491,8 +499,9 @@ class AutoWorkoutDetector {
   }
 }
 
-/// Wrap a list of [DetectedWorkout] in the honesty envelope. Always present
-/// (an empty list is a valid, honest "no suggested workouts" answer).
+/// Wrap a list of [DetectedWorkout] in the honesty envelope. An empty list is a
+/// valid, honest "no suggested workouts" answer; a null value means the gate
+/// could not be placed because [maxBpm] was absent (`need_input:hr_max`).
 Metric<List<DetectedWorkout>> autoDetectWorkouts({
   required List<int> hrTs,
   required List<int> hrBpm,
@@ -502,6 +511,13 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
   List<SavedWorkoutSpan> savedSpans = const [],
   SportClassifier classify = defaultSportClassifier,
 }) {
+  if (maxBpm == null) {
+    return const Metric<List<DetectedWorkout>>.absent(
+      tier: Tier.estimate,
+      inputs_used: [],
+      note: 'need_input:hr_max',
+    );
+  }
   final list = AutoWorkoutDetector.detect(
     hrTs: hrTs,
     hrBpm: hrBpm,

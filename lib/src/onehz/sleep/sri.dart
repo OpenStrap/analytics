@@ -80,6 +80,14 @@ class SriResult {
 /// and without the floor a half-unobserved weekend tops the "worst pair" list
 /// for having no data. The floor does NOT change the published [SriResult.sri]:
 /// every accepted epoch still counts toward the total, thin pair or not.
+///
+/// The floor DOES gate whether a total is published at all: with no pair
+/// clearing it, the record is abstained on rather than scored. Without that, a
+/// handful of minutes shared between two nights (a rotating shift whose sleeps
+/// barely overlap in clock time) publishes ±100, and since the only valid
+/// epochs are the asleep ones, almost always +100 "perfectly regular".
+/// Confidence is sized from the qualifying pairs for the same reason — the
+/// length of the grid says nothing about how much of it was observed.
 Metric<SriResult> phillipsSri(
   List<bool> sleepWake,
   int epochsPerDay, {
@@ -135,10 +143,19 @@ Metric<SriResult> phillipsSri(
     );
   }
 
+  if (pairs.isEmpty) {
+    return Metric<SriResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no adjacent-day pair has ≥$pairFloor epochs observed on both '
+          'days (have=$cases epochs in total)',
+    );
+  }
+
   final sri = 200.0 * agreement / cases - 100.0;
-  // Confidence: scales with the number of day-comparisons (more days, more
-  // stable). Saturates around a typical 7-day record.
-  final conf = ((days - 1) / 7.0).clamp(0.3, 0.95);
+  // Confidence: scales with the number of adequately-observed day-comparisons
+  // (more of them, more stable). Saturates around a typical 7-day record.
+  final conf = (pairs.length / 7.0).clamp(0.3, 0.95);
   return Metric<SriResult>(
     value: SriResult(sri, days, cases, pairs),
     confidence: conf,

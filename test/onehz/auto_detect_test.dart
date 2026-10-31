@@ -1,232 +1,230 @@
-// AutoWorkoutDetector — synthetic known-answer tests for how a REST inside a
-// workout is handled.
+// AutoWorkoutDetector — synthetic known-answer tests.
 //
-// The report this covers: "I play tennis for an hour, after 20 min I sit down
-// for 5-10 min and then start again, and it splits the workout into 2
-// workouts." The sit-down drops HR below the gate, the span closes after
-// maxDipS, and the halves landed ~7.5 min apart — past the old 5-min merge.
-//
-// All series are 1 Hz, HR-only (no motion → no motion gate), RHR 60 /
-// HRmax 190: gate = max(60+40, round(60 + 0.45·130)) = 119 bpm, rest-bridge
-// floor = round(60 + 0.15·130) = 80 bpm.
-import 'dart:math' as math;
-
+// RHR 55 / HRmax 190 throughout, so the gate is
+// max(55 + 40, round(55 + 0.45·135)) = 116 bpm.
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/src/onehz/workout/auto_detect.dart';
+import 'package:openstrap_analytics/src/onehz/workout/sport.dart';
 
-const int _t0 = 1700000000;
-const int _rhr = 60;
-const int _hrMax = 190;
+const _rhr = 55;
+const _max = 190;
 
-/// Builds a 1 Hz HR series from consecutive segments. A segment is either a
-/// constant level or a recovery curve; `null` bpm means "no samples" (strap
-/// off the wrist) for that many seconds.
-class _Series {
+class _Hr {
   final ts = <int>[];
   final bpm = <int>[];
-  var _t = _t0;
 
-  int get now => _t;
-
-  void flat(int minutes, int? hr) {
-    for (var i = 0; i < minutes * 60; i++, _t++) {
-      if (hr == null) continue;
-      ts.add(_t);
-      bpm.add(hr);
+  /// Constant [v] for seconds [from, to).
+  void flat(int from, int to, int v) {
+    for (var t = from; t < to; t++) {
+      ts.add(t);
+      bpm.add(v);
     }
   }
 
-  /// Exponential recovery from [from] toward [to] (τ = 60 s) — what HR does
-  /// when you stop and sit down.
-  void recover(int minutes, int from, int to) {
-    for (var i = 0; i < minutes * 60; i++, _t++) {
-      ts.add(_t);
-      bpm.add((to + (from - to) * math.exp(-i / 60.0)).round());
+  /// Linear ramp [a] → [b] over seconds [from, to).
+  void ramp(int from, int to, int a, int b) {
+    final n = to - from;
+    for (var t = from; t < to; t++) {
+      ts.add(t);
+      bpm.add((a + (b - a) * (t - from) / n).round());
     }
   }
-
-  List<DetectedWorkout> detect(
-          {List<SavedWorkoutSpan> savedSpans = const []}) =>
-      AutoWorkoutDetector.detect(
-        hrTs: ts,
-        hrBpm: bpm,
-        restingBpm: _rhr,
-        maxBpm: _hrMax,
-        savedSpans: savedSpans,
-      );
 }
 
+List<MotionPoint> _motion(int from, int to, double v,
+        {int? holeFrom, int? holeTo}) =>
+    [
+      for (var t = from; t < to; t++)
+        if (holeFrom == null || t < holeFrom || t >= holeTo!)
+          MotionPoint(t, v),
+    ];
+
+List<DetectedWorkout> _detect(_Hr hr,
+        {List<MotionPoint>? motion, SportClassifier? classify}) =>
+    AutoWorkoutDetector.detect(
+      hrTs: hr.ts,
+      hrBpm: hr.bpm,
+      restingBpm: _rhr,
+      maxBpm: _max,
+      motion: motion,
+      classify: classify ?? defaultSportClassifier,
+    );
+
+/// 3 h day: rest, a gradual 20-min warm-up 70→150, 30 min at 150, rest.
+/// The warm-up is slow enough that the onset bypass cannot fire.
+_Hr _gradualBout() => _Hr()
+  ..flat(0, 3600, 70)
+  ..ramp(3600, 4800, 70, 150)
+  ..flat(4800, 6600, 150)
+  ..flat(6600, 10800, 70);
+
+/// 3 h day: rest, a sharp step to 150 for 30 min, rest.
+_Hr _sharpBout() => _Hr()
+  ..flat(0, 3600, 70)
+  ..flat(3600, 5400, 150)
+  ..flat(5400, 10800, 70);
+
 void main() {
-  group('AutoWorkoutDetector rest bridging', () {
-    test('tennis 20 min / 8 min sit-down / 30 min is ONE workout', () {
-      final s = _Series()..flat(10, 70);
-      final playStart = s.now;
-      s
-        ..flat(20, 140)
-        ..recover(8, 140, 90) // sitting: HR falls but stays well above rest
-        ..flat(30, 140);
-      final playEnd = s.now - 1;
-      s.flat(20, 70);
+  group('motion series with no sample inside the window', () {
+    test('is judged on HR alone, like a null motion series', () {
+      final hr = _gradualBout();
+      final hrOnly = _detect(hr);
+      expect(hrOnly, hasLength(1));
 
-      final w = s.detect();
-      expect(w, hasLength(1));
-      expect(w.single.startSec, playStart);
-      expect(w.single.endSec, playEnd);
-      expect(w.single.durationMin, 57); // 58 min of samples, floor((58·60−1)/60)
-      // The reported average covers the whole session, the sit-down included:
-      // below the 140 of play, above the gate.
-      expect(w.single.avgBpm, lessThan(140));
-      expect(w.single.avgBpm, greaterThan(119));
+      // Motion present for the rest of the day, absent across the bout.
+      final motion = _motion(0, 10800, 0.3, holeFrom: 3600, holeTo: 6600);
+      final withHole = _detect(hr, motion: motion);
+      expect(withHole, hasLength(1));
+      expect(withHole.single.startSec, hrOnly.single.startSec);
+      expect(withHole.single.endSec, hrOnly.single.endSec);
     });
 
-    test('the sit-down really is past the unconditional 5-min merge', () {
-      // Guards the test above against passing for the wrong reason: the two
-      // halves must come out of span-building > mergeGapS apart, so it is
-      // the rest bridge that joins them.
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(20, 140)
-        ..recover(8, 140, 90)
-        ..flat(30, 140)
-        ..flat(20, 70);
-      final secondHalfStart = _t0 + 38 * 60;
-      // Last at-gate second before play resumes: the tail of the first half
-      // plus the few seconds the recovery curve takes to cross the gate.
-      final firstHalfEnd = [
-        for (var k = 0; k < s.ts.length; k++)
-          if (s.bpm[k] >= 119 && s.ts[k] < secondHalfStart) s.ts[k]
-      ].last;
-      expect(secondHalfStart - firstHalfEnd,
-          greaterThan(AutoWorkoutDetector.mergeGapS));
-      expect(secondHalfStart - firstHalfEnd,
-          lessThanOrEqualTo(AutoWorkoutDetector.restBridgeMaxS));
-
-      // And the detector itself splits there: span-building only sees
-      // at-gate vs below-gate, so pulling the sit-down's below-gate samples
-      // under the bridge floor leaves the spans untouched and takes away
-      // only the bridge. That must give the two halves back.
-      for (var k = 0; k < s.ts.length; k++) {
-        if (s.ts[k] > firstHalfEnd && s.ts[k] < secondHalfStart) s.bpm[k] = 70;
-      }
-      expect(s.detect(), hasLength(2));
+    test('hands the classifier no motion features', () {
+      final seen = <MotionFeatures?>[];
+      final out = _detect(
+        _sharpBout(),
+        motion: _motion(0, 10800, 0.3, holeFrom: 3000, holeTo: 6000),
+        classify: (bout, feats) {
+          seen.add(feats);
+          return 'x';
+        },
+      );
+      expect(out, hasLength(1));
+      expect(seen, [isNull]);
     });
 
-    test('two sessions 2 h apart stay TWO workouts', () {
-      // HR between them is held at 90 — above the bridge floor — so it is the
-      // time limit, not HR, that keeps them apart.
-      final s = _Series()..flat(10, 70);
-      final morningStart = s.now;
-      s.flat(30, 140);
-      final morningEnd = s.now - 1;
-      s.flat(120, 90);
-      final laterStart = s.now;
-      s
-        ..flat(30, 140)
-        ..flat(10, 70);
-
-      final w = s.detect();
-      expect(w, hasLength(2));
-      expect(w[0].startSec, morningStart);
-      expect(w[0].endSec, morningEnd);
-      expect(w[1].startSec, laterStart);
+    test('a measured still wrist still fails the gate without an onset', () {
+      final out = _detect(_gradualBout(), motion: _motion(0, 10800, 0.01));
+      expect(out, isEmpty);
     });
 
-    test('a 20-min elevated pause is past the bridge limit → TWO', () {
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(20, 140)
-        ..flat(20, 95)
-        ..flat(30, 140)
-        ..flat(10, 70);
-      expect(s.detect(), hasLength(2));
+    test('measured motion above the gate confirms and reaches the classifier',
+        () {
+      final seen = <MotionFeatures?>[];
+      final out = _detect(
+        _gradualBout(),
+        motion: _motion(0, 10800, 0.3),
+        classify: (bout, feats) {
+          seen.add(feats);
+          return 'x';
+        },
+      );
+      expect(out, hasLength(1));
+      expect(seen.single!.meanIntensity, closeTo(0.3, 1e-9));
+    });
+  });
+
+  group('onset bypass', () {
+    test('a sharp HR onset survives a low-motion window', () {
+      final seen = <MotionFeatures?>[];
+      final out = _detect(
+        _sharpBout(),
+        motion: _motion(0, 10800, 0.01),
+        classify: (bout, feats) {
+          seen.add(feats);
+          return 'x';
+        },
+      );
+      expect(out, hasLength(1));
+      expect(out.single.avgBpm, 150);
+      expect(seen.single!.meanIntensity, closeTo(0.01, 1e-9));
     });
 
-    test('an 8-min pause where HR is back at rest → TWO', () {
-      // Done, sat down, fully recovered: the next effort is a new workout.
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(20, 140)
-        ..recover(8, 140, 65)
-        ..flat(30, 140)
-        ..flat(10, 70);
-      expect(s.detect(), hasLength(2));
+    test('abstains when there is no pre-window to measure the onset against',
+        () {
+      // Recording starts mid-elevation: nothing before the span.
+      final hr = _Hr()
+        ..flat(0, 1800, 150)
+        ..flat(1800, 5400, 70);
+      expect(_detect(hr), hasLength(1));
+      expect(_detect(hr, motion: _motion(0, 5400, 0.01)), isEmpty);
+    });
+  });
+
+  group('maxGapS', () {
+    test('a hole in the record longer than maxGapS splits the span', () {
+      // Two 15-min efforts with 40 min of no samples between them.
+      final hr = _Hr()
+        ..flat(0, 1800, 70)
+        ..flat(1800, 2700, 150)
+        ..flat(5100, 6000, 150)
+        ..flat(6000, 9000, 70);
+      final out = _detect(hr);
+      expect(out, hasLength(2));
+      expect(out[0].endSec, 2699);
+      expect(out[1].startSec, 5100);
     });
 
-    test('an 8-min pause with the strap off the wrist → TWO', () {
-      // No samples is not evidence the user kept going (see maxGapS).
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(20, 140)
-        ..flat(8, null)
-        ..flat(30, 140)
-        ..flat(10, 70);
-      expect(s.detect(), hasLength(2));
+    test('a hole no longer than maxGapS is bridged', () {
+      final hr = _Hr()
+        ..flat(0, 1800, 70)
+        ..flat(1800, 2700, 150)
+        ..flat(2760, 3600, 150)
+        ..flat(3600, 6000, 70);
+      final out = _detect(hr);
+      expect(out, hasLength(1));
+      expect(out.single.startSec, 1800);
+      expect(out.single.endSec, 3599);
+    });
+  });
+
+  group('merge', () {
+    test('spans less than mergeGapS apart merge into one bout', () {
+      // 3 min of present, resting HR between two 15-min efforts.
+      final hr = _Hr()
+        ..flat(0, 1800, 70)
+        ..flat(1800, 2700, 150)
+        ..flat(2700, 2880, 70)
+        ..flat(2880, 3780, 150)
+        ..flat(3780, 7000, 70);
+      final out = _detect(hr);
+      expect(out, hasLength(1));
+      expect(out.single.startSec, 1800);
+      expect(out.single.endSec, 3779);
     });
 
-    test('a bridge that would exceed maxWorkoutMin is refused → TWO', () {
-      // 70 + 8 + 50 = 128 min > 120: merged it would be dropped whole.
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(70, 140)
-        ..recover(8, 140, 90)
-        ..flat(50, 140)
-        ..flat(10, 70);
-      expect(s.detect(), hasLength(2));
+    test('spans at least mergeGapS apart stay separate', () {
+      final hr = _Hr()
+        ..flat(0, 1800, 70)
+        ..flat(1800, 2700, 150)
+        ..flat(2700, 3300, 70)
+        ..flat(3300, 4200, 150)
+        ..flat(4200, 7000, 70);
+      expect(_detect(hr), hasLength(2));
+    });
+  });
+
+  group('HRmax', () {
+    test('absent ceiling abstains instead of assuming 190', () {
+      final hr = _sharpBout();
+      expect(_detect(hr), hasLength(1));
+      expect(
+        AutoWorkoutDetector.detect(
+            hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: _rhr, maxBpm: null),
+        isEmpty,
+      );
+      final m = autoDetectWorkouts(
+          hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: _rhr, maxBpm: null);
+      expect(m.value, isNull);
+      expect(m.note, 'need_input:hr_max');
     });
 
-    test('a short pause after a bridge cannot push it past maxWorkoutMin', () {
-      // 20 play / 8 sit / 60 play / 3 off / 35 play. The 3-min pause joins
-      // the last two efforts (98 min) as it always has; bridging the first
-      // one on as well would make 126 min, so it is refused and both
-      // suggestions survive instead of the whole window being dropped.
-      final s = _Series()..flat(10, 70);
-      final firstStart = s.now;
-      s.flat(20, 140);
-      final firstEnd = s.now - 1;
-      s.recover(8, 140, 90);
-      final secondStart = s.now;
-      s
-        ..flat(60, 140)
-        ..flat(3, 65)
-        ..flat(35, 140);
-      final secondEnd = s.now - 1;
-      s.flat(10, 70);
-
-      final w = s.detect();
-      expect(w, hasLength(2));
-      expect(w[0].startSec, firstStart);
-      // The first effort ends where the sit-down's recovery crosses the gate.
-      expect(w[0].endSec, inInclusiveRange(firstEnd, firstEnd + 60));
-      expect(w[1].startSec, secondStart);
-      expect(w[1].endSec, secondEnd);
-    });
-
-    test('a saved workout over one half does not hide the other half', () {
-      final s = _Series()..flat(10, 70);
-      final firstStart = s.now;
-      s.flat(20, 140);
-      final firstEnd = s.now - 1;
-      s.recover(8, 140, 90);
-      final secondStart = s.now;
-      s.flat(30, 140);
-      final secondEnd = s.now - 1;
-      s.flat(20, 70);
-
-      final w = s.detect(
-          savedSpans: [SavedWorkoutSpan(firstStart, firstEnd)]);
-      expect(w, hasLength(1));
-      expect(w.single.startSec, secondStart);
-      expect(w.single.endSec, secondEnd);
-    });
-
-    test('a short (< 5 min) pause still merges as before', () {
-      final s = _Series()
-        ..flat(10, 70)
-        ..flat(20, 140)
-        ..flat(3, 65)
-        ..flat(20, 140)
-        ..flat(10, 70);
-      expect(s.detect(), hasLength(1));
+    test("the gate follows the caller's ceiling", () {
+      // RHR 62, HRmax 165: gate = max(102, round(62 + 0.45·103)) = 108, so a
+      // 25-min bout at 115 is a suggestion. A 190 ceiling would put the gate
+      // at 120 and drop it.
+      final hr = _Hr()
+        ..flat(0, 3600, 70)
+        ..flat(3600, 5100, 115)
+        ..flat(5100, 9000, 70);
+      final out = AutoWorkoutDetector.detect(
+          hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: 62, maxBpm: 165);
+      expect(out, hasLength(1));
+      expect(
+        AutoWorkoutDetector.detect(
+            hrTs: hr.ts, hrBpm: hr.bpm, restingBpm: 62, maxBpm: 190),
+        isEmpty,
+      );
     });
   });
 }

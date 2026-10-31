@@ -174,6 +174,7 @@ void main() {
       final m = readinessLnRmssd(hist);
       expect(m.value!.rolling7Mean, closeTo(4.4653, 1e-3));
       expect(m.value!.rolling7Median, closeTo(4.623, 1e-9));
+      // tonight itself is low: 1.5 robust SDs under the median.
       expect(m.value!.band, 'suppressed'); // mean/SD said 'normal'
       expect(m.value!.z!, lessThan(-1));
     });

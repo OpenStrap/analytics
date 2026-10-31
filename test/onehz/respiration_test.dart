@@ -199,7 +199,8 @@ void main() {
       return (rr: rr, t: t);
     }
 
-    test('RSA: an 8-hour night resolves its time-median rate, not a noise spike',
+    test(
+        'RSA: an 8-hour night resolves its time-median rate, not a noise spike',
         () {
       // Measured, same three noise seeds: OLD published 18.48 / 16.94 / 16.06 —
       // three different answers to the same signal, each passing its own
@@ -224,8 +225,7 @@ void main() {
       final s = rsaNight(11);
       final corr = correctRr(s.rr, rrTsMs: s.t);
       final shuffled = [...corr.nn]..shuffle(math.Random(3));
-      final m =
-          rsaRespRate(shuffled, corr.nnTimesMs, artifactFraction: 0);
+      final m = rsaRespRate(shuffled, corr.nnTimesMs, artifactFraction: 0);
       expect(m.present, isFalse, reason: 'got ${m.value?.brpm}');
       expect(m.confidence, 0);
       expect(m.note, contains('sub-windows'));
@@ -273,8 +273,7 @@ void main() {
         expect(mg.present, isTrue, reason: 'seed $seed: ${mg.note}');
         expect(mg.value!.brpm!, closeTo(mf.value!.brpm!, 1.0));
         expect(mg.value!.brpm!, closeTo(15.0, 0.8)); // time-median of 16→14
-        expect(mg.value!.usableSubwindows!,
-            lessThan(mg.value!.subwindows!),
+        expect(mg.value!.usableSubwindows!, lessThan(mg.value!.subwindows!),
             reason: 'the holes cost sub-windows, and the value says so');
       }
     });
@@ -321,7 +320,9 @@ void main() {
         for (var k = 0; k < 4; k++) (k * 0.25 + 0.05, k * 0.25 + 0.25)
       ]);
       // The fixture is what it says: four bursts of ~3 min, ~12 min of beats.
-      final bursts = <List<double>>[[s.t.first, s.t.first]];
+      final bursts = <List<double>>[
+        [s.t.first, s.t.first]
+      ];
       for (final x in s.t.skip(1)) {
         if (x - bursts.last[1] > 60e3) bursts.add([x, x]);
         bursts.last[1] = x;
@@ -385,10 +386,10 @@ void main() {
       // 1.4 h at 56 bpm, then 0.6 h at 40 bpm (Nyquist 20 br/min, below the
       // top of the HF band). The whole input's median clears the band; the
       // slow stretch's sub-windows do not, and must not be used.
-      final a = gappyRsaNight(5, hrBpm: 56, hours: 1.4, resp0Brpm: 15,
-          resp1Brpm: 15);
-      final b = gappyRsaNight(6, hrBpm: 40, hours: 0.6, resp0Brpm: 15,
-          resp1Brpm: 15);
+      final a =
+          gappyRsaNight(5, hrBpm: 56, hours: 1.4, resp0Brpm: 15, resp1Brpm: 15);
+      final b =
+          gappyRsaNight(6, hrBpm: 40, hours: 0.6, resp0Brpm: 15, resp1Brpm: 15);
       final rr = [...a.rr, ...b.rr];
       final t = [...a.t, for (final x in b.t) a.t.last + x];
       final c = correctRr(rr, rrTsMs: t);
@@ -401,7 +402,8 @@ void main() {
           reason: 'the 40 bpm stretch holds ~13 sub-windows');
     });
 
-    test('RSA: the at-ceiling note names the rejecting sub-windows\' own '
+    test(
+        'RSA: the at-ceiling note names the rejecting sub-windows\' own '
         'ceilings', () {
       // A beat-to-beat alternation sits exactly at each sub-window's own
       // Nyquist, so every sub-window peaks at its ceiling: ~26 br/min in the
@@ -433,14 +435,66 @@ void main() {
       expect(double.parse(nums.group(2) ?? '0'), inInclusiveRange(28.5, 30.0));
     });
 
+    test(
+        'RSA: slow breathing below the band floor is withheld, not published '
+        'as the floor', () {
+      // An hour of 7.5–9 br/min RSA (deep sleep / paced breathing) with a
+      // 0.1 Hz Mayer wave. Only the skirt of the true peak is inside the
+      // 9 br/min floor, so every sub-window agreed on ~9 br/min and it went
+      // out at high confidence.
+      RespEstimate? run(double brpm,
+          {double spanMs = 3600e3, double artifactFraction = 0, int seed = 1}) {
+        final rnd = math.Random(seed);
+        final nn = <double>[], t = <double>[];
+        var tMs = 0.0;
+        while (tMs < spanMs) {
+          final s = tMs / 1000;
+          final v = 1000 +
+              30 * math.sin(2 * math.pi * brpm / 60 * s) +
+              10 * math.sin(2 * math.pi * 0.1 * s) +
+              (rnd.nextDouble() * 20 - 10);
+          tMs += v;
+          nn.add(v);
+          t.add(tMs);
+        }
+        final m = rsaRespRate(nn, t, artifactFraction: artifactFraction);
+        if (m.present) return m.value;
+        expect(m.note, isNotNull);
+        return null;
+      }
+
+      for (final slow in [7.5, 8.0, 8.5, 9.0]) {
+        final v = run(slow);
+        expect(v, isNull, reason: 'true $slow br/min reported as ${v?.brpm}');
+      }
+      // In-band rates are unaffected.
+      expect(run(10.0)?.brpm, closeTo(10.0, 0.3));
+      expect(run(12.0)?.brpm, closeTo(12.0, 0.3));
+
+      // A 3-min window has ~90 s sub-windows. The floor guard must not widen
+      // with the coarser resolution: a true 10 br/min is still a measurement
+      // there, while the slow-breathing skirt is still withheld.
+      for (var seed = 1; seed <= 5; seed++) {
+        final short10 =
+            run(10.0, spanMs: 180e3, artifactFraction: 0.15, seed: seed);
+        expect(short10?.brpm, closeTo(10.0, 0.5),
+            reason: 'seed $seed: 3-min true 10 br/min was ${short10?.brpm}');
+        final short8 =
+            run(8.0, spanMs: 180e3, artifactFraction: 0.15, seed: seed);
+        expect(short8, isNull,
+            reason: 'seed $seed: 3-min true 8 br/min reported as '
+                '${short8?.brpm}');
+      }
+    });
+
     test('RSA: confidence scales with usable sub-windows', () {
       final s = rsaNight(11);
       final c = correctRr(s.rr, rrTsMs: s.t);
       ({List<double> nn, List<double> t}) firstSec(double sec) {
         // through the first beat PAST [sec], so the span covers all of it
-        final k = c.nnTimesMs
-                .indexWhere((t) => t - c.nnTimesMs.first > sec * 1000) +
-            1;
+        final k =
+            c.nnTimesMs.indexWhere((t) => t - c.nnTimesMs.first > sec * 1000) +
+                1;
         return (nn: c.nn.sublist(0, k), t: c.nnTimesMs.sublist(0, k));
       }
 
@@ -603,6 +657,39 @@ void main() {
           reason: 'pre-fix this fell by a third');
     });
 
+    test('CVHR: a few analysed minutes never publish at full confidence', () {
+      // One 60 s dip in a short clean stretch read ~50 cycles/h at 0.85, tier
+      // HIGH, because confidence only looked at the artifact fraction.
+      List<double> times(List<double> nn) {
+        var t = 0.0;
+        return [for (final r in nn) t += r];
+      }
+
+      final nn = <double>[];
+      var t = 0.0;
+      while (t < 72000) {
+        final s = t / 1000.0;
+        final hr = s >= 6 && s < 66
+            ? 60.0 - 6.0 * math.sin(2 * math.pi * (s - 6) / 60)
+            : 60.0;
+        final r = 60000.0 / hr;
+        nn.add(r);
+        t += r;
+      }
+      final short = cvhrApneaScreen(nn, times(nn), artifactFraction: 0);
+      expect(short.present, isTrue, reason: short.note);
+      expect(short.value!.analyzedHours, lessThan(0.05));
+      expect(short.confidence, lessThan(0.05));
+      expect(short.tier, Tier.estimate);
+
+      // A full night of clean beats keeps the old ceiling.
+      final night = List<double>.filled(5 * 3600, 1000.0);
+      final full = cvhrApneaScreen(night, times(night), artifactFraction: 0);
+      expect(full.present, isTrue, reason: full.note);
+      expect(full.confidence, closeTo(0.85, 1e-9));
+      expect(full.tier, Tier.high);
+    });
+
     test('CVHR: no cycles means mean depth/width are ABSENT, not 0', () {
       // an-motion-7. They were non-nullable and filled with 0, serialising an
       // absence as a measurement.
@@ -730,14 +817,12 @@ void main() {
 
     test(
         'relativeOdi: a mid-night gap (charging break) does not dilute '
-        'odiPerHour/burdenPct — observed-hours denominator, not raw span',
-        () {
+        'odiPerHour/burdenPct — observed-hours denominator, not raw span', () {
       // Two clean 300 s segments with 5 dips each, separated by a 2 h gap
       // (charging break) in ts. Same shape as cvhr_apnea's regression case.
       const pulsHz = 0.3;
-      List<double> buildSegment(int startSec, math.Random rnd,
-          List<int> events, List<double> red, List<double> ir,
-          List<double> ts) {
+      List<double> buildSegment(int startSec, math.Random rnd, List<int> events,
+          List<double> red, List<double> ir, List<double> ts) {
         for (var s = 0; s < 300; s++) {
           final t = (startSec + s).toDouble();
           final inEvent = events.any((e) => s >= e && s < e + 20);
@@ -820,7 +905,8 @@ void main() {
               'a desaturation at the segment boundary');
     });
 
-    test('relativeOdi: default maxGapSec is a no-op on gap-free input '
+    test(
+        'relativeOdi: default maxGapSec is a no-op on gap-free input '
         '(regression guard)', () {
       const totalSec = 600;
       final red = <double>[];
@@ -846,8 +932,7 @@ void main() {
       // span is (totalSec-1) seconds (ts runs 0..totalSec-1 inclusive) —
       // same first-to-last-span semantics as before this fix, just now
       // computed as a single observed segment instead of the raw ts delta.
-      expect(m.value!.analyzedHours,
-          closeTo((totalSec - 1) / 3600.0, 1e-9));
+      expect(m.value!.analyzedHours, closeTo((totalSec - 1) / 3600.0, 1e-9));
     });
 
     test('BRV: variable breathing rates -> CV>0 + Theil-Sen slope', () {
@@ -1083,6 +1168,99 @@ void _resp01Tests() {
       expect(rising.value!.aboveOwnUsual, isTrue);
       // and it still refuses to be an AHI or a severity
       expect(rising.toJson().toString(), isNot(contains('ahi')));
+    });
+
+    test('a wear gap does not pull months-old nights into the window', () {
+      CvhrNight at(String day, double perHour) =>
+          CvhrNight(dayKey: day, cvhrPerHour: perHour, analyzedHours: 7);
+      final june = [
+        for (var d = 1; d <= 30; d++)
+          at('2026-06-${d.toString().padLeft(2, '0')}', 20),
+      ];
+      // Four nights back after three months off: too few to say anything,
+      // rather than 26 June nights standing in for "your usual".
+      final back = cvhrPersonalDistribution([
+        ...june,
+        for (var d = 1; d <= 4; d++) at('2026-10-0$d', 2),
+      ]);
+      expect(back.present, isFalse);
+      expect(back.note, contains('need_baseline:nights=4/5'));
+
+      // Once there are enough, the screen describes only the new nights.
+      final settled = cvhrPersonalDistribution([
+        ...june,
+        for (var d = 1; d <= 6; d++) at('2026-10-0$d', 2),
+      ]);
+      expect(settled.value!.nightsUsed, 6);
+      expect(settled.value!.recentWeightedMean, closeTo(2, 1e-9));
+      expect(settled.value!.quartiles, everyElement(closeTo(2, 1e-9)));
+      expect(settled.note, contains('in the last 30 days'));
+    });
+
+    test('the window spans 30 calendar days ending on the newest night', () {
+      final m = cvhrPersonalDistribution([
+        CvhrNight(dayKey: '2026-02-01', cvhrPerHour: 99, analyzedHours: 7),
+        for (var d = 3; d <= 7; d++)
+          CvhrNight(dayKey: '2026-03-0$d', cvhrPerHour: 10, analyzedHours: 7),
+      ]);
+      // 2026-02-01 is 34 days before 2026-03-07.
+      expect(m.value!.nightsUsed, 5);
+      expect(m.value!.weightedMean, closeTo(10, 1e-9));
+      final edge = cvhrPersonalDistribution([
+        CvhrNight(dayKey: '2026-02-06', cvhrPerHour: 40, analyzedHours: 7),
+        for (var d = 3; d <= 7; d++)
+          CvhrNight(dayKey: '2026-03-0$d', cvhrPerHour: 10, analyzedHours: 7),
+      ]);
+      // 2026-02-06 is 29 days before 2026-03-07: inside.
+      expect(edge.value!.nightsUsed, 6);
+    });
+
+    test('night-to-night noise is not "running higher"', () {
+      // 0.05/h over the old all-nights p75, recent nights inside the range.
+      final noise = cvhrPersonalDistribution([
+        night(1, 4.8),
+        night(2, 5.1),
+        night(3, 4.9),
+        night(4, 5.3),
+        night(5, 5.4),
+      ]);
+      expect(noise.value!.aboveOwnUsual, isNot(isTrue));
+      // A single high newest night is not its own evidence, at the floor or
+      // a few nights past it.
+      for (final n in [5, 6, 8, 12]) {
+        final oneHigh = cvhrPersonalDistribution([
+          for (var d = 1; d < n; d++) night(d, 5),
+          night(n, 9),
+        ]);
+        expect(oneHigh.value!.aboveOwnUsual, isNot(isTrue), reason: 'n=$n');
+      }
+      // Recent nights inside an older, noisier spread stay quiet.
+      final spread = cvhrPersonalDistribution([
+        for (var d = 1; d <= 9; d++) night(d, d.isEven ? 4 : 12),
+        night(10, 13),
+        night(11, 12),
+        night(12, 13),
+      ]);
+      expect(spread.value!.aboveOwnUsual, isFalse);
+    });
+
+    test('too few older nights says nothing comparative', () {
+      // 8 nights: 3 recent, 5 older — under the reference floor however
+      // large the jump.
+      final m = cvhrPersonalDistribution([
+        for (var d = 1; d <= 5; d++) night(d, 5),
+        for (var d = 6; d <= 8; d++) night(d, 40),
+      ]);
+      expect(m.present, isTrue);
+      // null, not false: false would read as "stayed inside your range".
+      expect(m.value!.aboveOwnUsual, isNull);
+      expect(m.value!.toJson()['above_own_usual'], isNull);
+      // one more older night and the same jump reads.
+      final enough = cvhrPersonalDistribution([
+        for (var d = 1; d <= 6; d++) night(d, 5),
+        for (var d = 7; d <= 9; d++) night(d, 40),
+      ]);
+      expect(enough.value!.aboveOwnUsual, isTrue);
     });
 
     test('a re-derived day counts once', () {

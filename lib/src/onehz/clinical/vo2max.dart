@@ -75,7 +75,8 @@ Metric<double> vo2maxSubmaxEstimate({
     );
   }
   final hrReserve = hrMaxBpm - restingHrBpm;
-  if (hrReserve < 20) {
+  // NaN fails every comparison, so `< 20` alone lets a NaN reserve through.
+  if (!hrReserve.isFinite || hrReserve < 20) {
     return Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
@@ -84,11 +85,13 @@ Metric<double> vo2maxSubmaxEstimate({
   }
   final hrr = (avgHrBpm - restingHrBpm) / hrReserve;
   if (!hrr.isFinite || hrr < vo2maxMinHrr || hrr > vo2maxMaxHrr) {
+    // round() throws on NaN/Infinity, so a non-finite %HRR must not reach it.
+    final pct = hrr.isFinite ? '${(hrr * 100).round()}%' : 'non-finite';
     return Metric<double>.absent(
       tier: Tier.estimate,
       inputs_used: inputs,
       note: 'bout intensity outside the submaximal %HRR band '
-          '(${(hrr * 100).round()}%, need '
+          '($pct, need '
           '${(vo2maxMinHrr * 100).round()}-${(vo2maxMaxHrr * 100).round()}%)',
     );
   }

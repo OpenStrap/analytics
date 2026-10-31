@@ -94,10 +94,12 @@ class AlertnessForecast {
 const double _sUpper = 14.3; // ha — asymptote S recovers toward during sleep
 const double _sLower = 2.4; // la — asymptote S decays toward while awake
 const double _tauWake = 1 / 0.0353; // h — 28.33, wake decay (published rate)
-const double _tauSleep = 1 / 0.3813; // h — 2.62, sleep recovery (published rate)
+const double _tauSleep =
+    1 / 0.3813; // h — 2.62, sleep recovery (published rate)
 const double _cAmplitude = 2.5; // Ca — 24 h circadian amplitude
 const double _uAmplitude = 0.5; // Ua — 12 h ultradian amplitude
 const double _uMean = -0.5; // Um — ultradian offset
+const double _uTroughLeadHours = 3.0; // U trough lead before the C acrophase
 const double _wInertia = 5.72; // Wc — sleep-inertia magnitude at wake
 const double _tauInertia = 0.67; // Wd — h, inertia decay
 
@@ -177,10 +179,11 @@ Metric<AlertnessForecast> alertnessForecast({
   final s0 =
       _sUpper - (_sUpper - _sLower) * math.exp(-sleepDurationHours / _tauSleep);
 
-  final phase =
-      (circadianAcrophaseHours != null && circadianAcrophaseHours.isFinite)
-          ? circadianAcrophaseHours
-          : _defaultAcrophaseHours;
+  // One predicate decides both the curve and its disclosure: a non-finite
+  // phase falls back to the population curve, so the note must say so too.
+  final fittedPhase =
+      circadianAcrophaseHours != null && circadianAcrophaseHours.isFinite;
+  final phase = fittedPhase ? circadianAcrophaseHours : _defaultAcrophaseHours;
 
   // THE CURVE ENDS WHEN THE DAY DOES. Until 2026-08-17 it ran a fixed 18 h and
   // the trough search below could only look at windows that fitted inside that
@@ -205,10 +208,16 @@ Metric<AlertnessForecast> alertnessForecast({
           : _sLower + (s - _sLower) * math.exp(-_stepHours / _tauWake);
     }
     final c = _cAmplitude * math.cos(2 * math.pi * (clock - phase) / 24.0);
-    // Process U — the model's 12 h ultradian harmonic, phase-locked to the same
-    // acrophase. Missing until 2026-08-17, which flattened the mid-day wobble.
-    final u =
-        _uAmplitude * math.cos(2 * math.pi * (clock - phase) / 12.0) + _uMean;
+    // Process U — the model's 12 h ultradian harmonic. It exists to put the
+    // post-lunch dip in, so its TROUGH sits 3 h before the circadian acrophase
+    // (Åkerstedt, Folkard & Portin 2004: U = Um − Ua·cos(2π(t − (p − 3))/12)),
+    // ~13:48 at the default phase. Until 2026-10-17 it was a peak at the
+    // acrophase with no offset, which put the dip at 10:48 and a bump at the
+    // real early-afternoon low.
+    final u = _uMean -
+        _uAmplitude *
+            math.cos(
+                2 * math.pi * (clock - (phase - _uTroughLeadHours)) / 12.0);
     final w = _wInertia * math.exp(-(i * _stepHours) / _tauInertia);
     raw.add(s + c + u - w);
   }
@@ -269,7 +278,7 @@ Metric<AlertnessForecast> alertnessForecast({
     tier: Tier.estimate,
     inputs_used: inputs,
     note: 'Three-Process Model shape only — NO SCORE. '
-        '${circadianAcrophaseHours == null ? _assumedPhaseNote : _fittedPhaseNote}'
+        '${fittedPhase ? _fittedPhaseNote : _assumedPhaseNote}'
         'The low window is where this model bottoms out over your waking day — '
         'usually its last hours. It follows from when you woke and how long you '
         'slept, and is not a dip measured on you. '

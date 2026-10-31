@@ -263,6 +263,25 @@ void main() {
       expect(m.confidence, closeTo(0.6, 1e-9));
     });
 
+    test('REGRESSION: load is named only when the load model contributed', () {
+      // With no fitness-fatigue history (cold start, or ctlAtlTsb abstained)
+      // the window comes from recovery alone, so neither the provenance nor
+      // the rationale may claim recent load shaped it.
+      final cold =
+          strainTarget(recovery0to100: 70, ctl: null, atl: null, tsb: null);
+      expect(cold.inputs_used, ['recovery']);
+      expect(cold.value!.rationale, isNot(contains('load')));
+
+      final zero = strainTarget(recovery0to100: 70, ctl: 0, atl: 0, tsb: 0);
+      expect(zero.inputs_used, ['recovery']);
+      expect(zero.value!.rationale, isNot(contains('load')));
+
+      final warm =
+          strainTarget(recovery0to100: 70, ctl: 300, atl: 300, tsb: 0);
+      expect(warm.inputs_used, ['recovery', 'load']);
+      expect(warm.value!.rationale, contains('recent load'));
+    });
+
     test('REGRESSION: a recover target is reachable, not below the floor', () {
       // The bands were sized for a scale the app never produced: "recover 4–8"
       // sat BELOW what an inactive worn day scored (~13 on the old map), so a

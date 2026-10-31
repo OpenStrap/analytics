@@ -351,4 +351,56 @@ void main() {
       expect(m.efficiency, closeTo(850 / 1000, 1e-9));
     });
   });
+  group('night-tail exemption after an evening doze', () {
+    // tz 0, day starts at local midnight. Active until 19:00, optional still
+    // doze 19:00-20:40, active to 21:30, night 21:30-05:00, 20-min arousal,
+    // 50-min re-onset 05:20-06:10, then active.
+    const day = 1699920000; // 2023-11-14 00:00 UTC
+    ({List<GravTs> grav, List<HrTs> hr}) night({required bool doze}) {
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      var t = day + 12 * 3600;
+      void active(int until) {
+        for (var i = 0; t < until; i++, t++) {
+          final phase = math.sin(i * 0.5);
+          grav.add(GravTs(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+          hr.add(HrTs(t, 72 + 2 * math.sin(i / 600.0)));
+        }
+      }
+
+      void still(int until, double bpm) {
+        for (var i = 0; t < until; i++, t++) {
+          grav.add(GravTs(t, 0.001 * math.sin(i * 0.01), 0.001, 1.0));
+          hr.add(HrTs(t, bpm));
+        }
+      }
+
+      const h = 3600;
+      active(day + 19 * h);
+      if (doze) {
+        still(day + 20 * h + 40 * 60, 58);
+      } else {
+        active(day + 20 * h + 40 * 60);
+      }
+      active(day + 21 * h + 30 * 60);
+      still(day + 29 * h, 55);
+      active(day + 29 * h + 20 * 60);
+      still(day + 30 * h + 10 * 60, 56);
+      active(day + 32 * h + 10 * 60);
+      return (grav: grav, hr: hr);
+    }
+
+    for (final doze in [false, true]) {
+      test('pre-dawn tail survives (doze=$doze)', () {
+        final d = night(doze: doze);
+        final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
+        final tail = sessions.where((s) =>
+            s.start >= day + 29 * 3600 && s.end <= day + 30 * 3600 + 15 * 60);
+        expect(tail, hasLength(1),
+            reason: 'a chain that opens on a pre-20:00 doze must still count '
+                'as overnight once the real night joins it, or the short '
+                're-onset after the pre-dawn arousal is dropped');
+      });
+    }
+  });
 }

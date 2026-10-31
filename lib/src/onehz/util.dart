@@ -388,9 +388,6 @@ List<double> freqGrid(double loHz, double hiHz, int n) {
   return List<double>.generate(n, (i) => loHz + step * i);
 }
 
-/// Natural log guard: ln of a positive value, else null.
-double? safeLn(double x) => x > 0 ? math.log(x) : null;
-
 /// Calendar-day index (days since epoch) for each `yyyy-MM-dd` label.
 ///
 /// Trailing windows and "N nights running" counters in this package used to be

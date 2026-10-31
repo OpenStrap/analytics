@@ -22,7 +22,8 @@
 //      two detectors have never been shown to agree on real nights.
 //   2. Enumerate EVERY immobility bout (the nocturnal path keeps only the
 //      longest), bridging brief arousals.
-//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window,
+//   3. Reject hard: off-wrist, charging/workout spans, the main sleep window
+//      and short night tails starting within the continuation gap after it,
 //      and bouts built on seconds the band never measured (`minNapAccelCoverage`).
 //   4. Require an autonomic signature — median HR inside the bout at or below
 //      `napRestingHrMult` × the DAYTIME-AWAKE HR baseline. Stillness alone is
@@ -41,6 +42,7 @@
 
 import '../types.dart';
 import '../util.dart';
+import 'advanced_stager.dart' show AdvancedSleepStager;
 import 'van_hees.dart';
 
 /// An index range [start, end) into the day's arrays marking the MAIN
@@ -155,6 +157,34 @@ const double maxNapOffWristFraction = 0.5;
 /// is ending — the exact phantom the deferral exists to prevent.
 const int napChainGapSec = 60 * 60;
 
+/// A short sleep bout starting within this long after the main sleep ends is
+/// the night going on, not a nap. Same gap the night detector chains
+/// continuations with, so the two detectors agree on where a night can still
+/// be.
+///
+/// The night detector does not keep every continuation it sees: once its
+/// one-shot short-tail exemption is spent, a second short pre-dawn tail falls
+/// to the 60-min floor and the main window ends before it. Those dropped tails
+/// are still, HR-dipped and outside the window, so an overlap test alone books
+/// them as a 6 AM nap and the night reads short.
+///
+/// Only a bout the night detector could actually have dropped is attributed to
+/// the night: at most [napNightTailMaxSec] long, and only once it has already
+/// passed every nap gate (still, measured, HR-dipped). A long still block right
+/// after waking — breakfast, a commute, the start of desk work — is not a tail
+/// and is judged like any other bout.
+///
+/// The night window itself is not extended here, so a genuine short
+/// back-to-sleep within this gap counts toward neither the night nor nap
+/// minutes. That loses a few minutes of sleep; booking them as a nap invents
+/// one and shortens the night.
+const int napNightContinuationSec =
+    AdvancedSleepStager.nightContinuationGapMin * 60;
+
+/// Longest bout that can be a dropped night tail: the night detector's own
+/// minimum-sleep floor, which is what drops it.
+const int napNightTailMaxSec = AdvancedSleepStager.minSleepMin * 60;
+
 /// Minimum awake HR samples needed to define a baseline. Below this the day is
 /// not judged at all: a threshold set by a handful of samples is not a
 /// baseline, and every nap decision hangs off it.
@@ -190,6 +220,7 @@ Metric<List<NapWindow>> detectNaps(
   }
 
   final series = accel.length == n ? accel : accel.sublist(0, n);
+
   final mask = immobilityMask(series);
   final win = mask.sustainedSec;
   final thr = mask.thresholdDeg;
@@ -224,8 +255,29 @@ Metric<List<NapWindow>> detectNaps(
   // can be made better here — the record simply does not say what happened
   // before it — so it is REPORTED instead, via [NapWindow.startsAtRecordEdge]
   // below.
-  bool stillAt(int k) =>
-      mask.deltaDeg[k] < thr && (k == 0 || absAt(k) - absAt(k - 1) == 1);
+  //
+  // "Discontinuity" is judged against the published van Hees epoch, not a
+  // hard-coded 1 s step. The mask accepts any measured cadence up to
+  // [vanHeesMaxCadenceSec] and scales its windows to it, so a 2 s or 5 s stream
+  // failed an `== 1` test at every second and could never produce a nap, and a
+  // 1 Hz stream lost every run that a single skipped second interrupted — both
+  // then published as a judged "no nap". A step inside one published epoch is
+  // the resolution the rule is defined at; anything longer is a real hole.
+  bool continuousAt(int k) {
+    final stepMs = series[k].tsMs - series[k - 1].tsMs;
+    return stepMs > 0 && stepMs <= vanHeesMaxCadenceSec * 1000;
+  }
+
+  bool stillAt(int k) => mask.deltaDeg[k] < thr && (k == 0 || continuousAt(k));
+
+  // Wall-clock seconds one sample stands for in the coverage gates below.
+  // Counting samples as seconds put a fully-measured 5 s stream at 20%
+  // coverage and rejected every bout as unmeasured. The measured cadence is
+  // used as is and the total rounded once: flooring it to whole seconds
+  // credited a 0.5 s sample with a full second (doubling coverage on a 2 Hz
+  // stream) and a 2.5 s sample with two.
+  final secPerSample = mask.cadenceSec ?? 1.0;
+  int samplesToSec(int count) => (count * secPerSample).round();
 
   final runs = <List<int>>[];
   var i = 0;
@@ -355,6 +407,15 @@ Metric<List<NapWindow>> detectNaps(
   // A silent `continue` turns "your 7-hour still block is too long to be a nap"
   // into a bare "no qualifying nap", which tells the caller nothing about why.
   var outOfRange = 0, inMainSleep = 0, noBaseline = 0, unobserved = 0;
+  var nightTail = 0;
+  // Wall-clock end of the main sleep, measured from the window's last second
+  // since index distance is not elapsed time.
+  final mainEndIdx =
+      mainSleep == null ? 0 : (mainSleep.end > n ? n : mainSleep.end);
+  final int? mainEndAbs =
+      mainSleep != null && mainEndIdx > 0 && mainEndIdx > mainSleep.start
+          ? absAt(mainEndIdx - 1) + 1
+          : null;
 
   for (var bi = 0; bi < bouts.length; bi++) {
     final start = bouts[bi][0], end = bouts[bi][1];
@@ -386,10 +447,11 @@ Metric<List<NapWindow>> detectNaps(
     // Wall-clock accel coverage — the seconds inside the bout the band actually
     // measured gravity for, over the bout's elapsed span (so a recording hole
     // counts against it exactly as an invalid sample does).
-    var accelSec = 0;
+    var accelSamples = 0;
     for (var k = start; k < end; k++) {
-      if (series[k].valid) accelSec++;
+      if (series[k].valid) accelSamples++;
     }
+    final accelSec = samplesToSec(accelSamples);
     if (accelSec / tib < minNapAccelCoverage) {
       unobserved++;
       continue;
@@ -406,7 +468,8 @@ Metric<List<NapWindow>> detectNaps(
     for (var k = start; k < end; k++) {
       if (hr[k] > 0) boutHr.add(hr[k]);
     }
-    final coverage = boutHr.length / tib;
+    final hrSec = samplesToSec(boutHr.length);
+    final coverage = hrSec >= tib ? 1.0 : hrSec / tib;
     if (coverage < minNapHrCoverage) {
       unverifiable++;
       continue;
@@ -443,14 +506,32 @@ Metric<List<NapWindow>> detectNaps(
       continue;
     }
 
+    // A short sleep bout inside the night's continuation gap is a night tail
+    // the night detector dropped, not a nap (see [napNightContinuationSec]).
+    // Checked only now, after the bout has proven itself sleep, so the note
+    // never calls an awake sit "continuing the main sleep". It stays in the
+    // awake pool on purpose: removing still, low-HR seconds can only raise the
+    // baseline, which is the direction that invents naps.
+    if (mainEndAbs != null &&
+        tib <= napNightTailMaxSec &&
+        aStart >= mainEndAbs &&
+        aStart - mainEndAbs <= napNightContinuationSec) {
+      nightTail++;
+      continue;
+    }
+
     // Time ASLEEP is the still seconds inside the episode; the bridged arousal
     // is time in bed but not time asleep. This distinction is the whole point:
     // the sleep-need credit must be TST, and crediting TIB systematically
     // over-credits and under-recommends sleep.
-    var tst = 0;
+    // Credited in wall-clock seconds, like `tib`: counting one per still
+    // sample put a fully-still 5 s stream at a fifth of its real sleep time.
+    var stillSamples = 0;
     for (var k = start; k < end; k++) {
-      if (stillAt(k)) tst++;
+      if (stillAt(k)) stillSamples++;
     }
+    var tst = samplesToSec(stillSamples);
+    if (tst > tib) tst = tib;
 
     // Confidence, NOT efficiency. A 20% dip below the awake baseline earns
     // full marks on that axis; the rest rewards evidence, not sleep quality.
@@ -481,6 +562,47 @@ Metric<List<NapWindow>> detectNaps(
     ));
   }
 
+  // An empty list is only a verdict if stillness was observable. Unmeasured
+  // seconds fail the still test, so on a day the band barely decoded gravity
+  // on (an HR-only thin-record day, a long decode gap) no bout ever forms and
+  // the per-bout coverage gate above is never reached. Checked only when
+  // nothing was found: a nap that passed its own per-bout coverage gate stands
+  // even when the rest of the day went unmeasured. Coverage is taken over the
+  // seconds outside the main sleep, since that is the only stretch a nap could
+  // have come from.
+  //
+  // Both sides are wall-clock seconds over the slice's span. Counting rows
+  // never counted the rows that are missing, so two good hours inside an
+  // otherwise empty day read as full coverage and returned a judged "no nap".
+  if (naps.isEmpty) {
+    final spanSec = absAt(n - 1) + 1 - baseSec;
+    var mainSec = 0;
+    if (mainSleep != null) {
+      final ms = mainSleep.start < 0 ? 0 : mainSleep.start;
+      final me = mainSleep.end > n ? n : mainSleep.end;
+      if (me > ms) mainSec = absAt(me - 1) + 1 - absAt(ms);
+    }
+    final outside = spanSec - mainSec;
+    var outsideSamples = 0;
+    for (var k = 0; k < n; k++) {
+      if (mainSleep != null && k >= mainSleep.start && k < mainSleep.end) {
+        continue;
+      }
+      if (series[k].valid) outsideSamples++;
+    }
+    var outsideAccel = samplesToSec(outsideSamples);
+    if (outsideAccel > outside) outsideAccel = outside;
+    if (outside > 0 && outsideAccel / outside < minNapAccelCoverage) {
+      return Metric<List<NapWindow>>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'accel decoded on $outsideAccel of $outside s outside the main '
+            'sleep (need ${(minNapAccelCoverage * 100).round()}%) — stillness '
+            'could not be observed, so naps cannot be judged',
+      );
+    }
+  }
+
   // A still block we could not RULE OUT is not the same as a day with no nap.
   // If nothing was emitted and at least one candidate went unjudged for want of
   // an awake baseline, the day's verdict is unknown — say so, rather than
@@ -502,6 +624,7 @@ Metric<List<NapWindow>> detectNaps(
     if (noBaseline > 0) '$noBaseline without an awake HR baseline',
     if (outOfRange > 0) '$outOfRange outside 15 min–6 h',
     if (inMainSleep > 0) '$inMainSleep inside the main sleep window',
+    if (nightTail > 0) '$nightTail continuing the main sleep',
     if (unobserved > 0) '$unobserved with accel coverage <50% (unmeasured)',
     if (unverifiable > 0) '$unverifiable unverifiable (HR coverage <50%)',
     if (offWrist > 0) '$offWrist off-wrist/excluded',

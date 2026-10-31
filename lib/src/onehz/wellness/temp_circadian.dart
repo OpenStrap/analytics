@@ -87,6 +87,7 @@ class _TempCal {
   /// g of |‖a‖ − 1| above which an epoch is masked. Null = the family sends
   /// no accelerometer with its temperature (a ring), so nothing is masked.
   final double? motionGate;
+
   /// One-sided settle band, in [unit]: a sample more than this far BELOW the
   /// night's median is not settled skin (see [nightlySkinTemp]). Null = this
   /// family has no measured band, so the settled mean REFUSES for it rather
@@ -254,6 +255,14 @@ Metric<SettledSkinTemp> nightlySkinTemp(
 /// every import, every raw replay — REFUSES, because a gen4 ADC count and a
 /// gen5 centi-°C in the same array cannot be told apart afterwards.
 ///
+/// [tzOffsetResolver] maps a unix-second timestamp to the UTC offset (seconds)
+/// in effect at that instant. The acrophase is a clock time and the IS profile
+/// is an hour-of-day profile, so both must be built on LOCAL time: on raw
+/// epoch time the peak comes out as the UTC hour (5.5 h out for a UTC+5:30
+/// user), and a DST change inside the record shifts real behaviour by an hour
+/// against the grid. Resolved per timestamp for that reason. When omitted the
+/// machine's local offset at each instant is used, as in `segmentSleep`.
+///
 /// Returns a RELATIVE-tier metric (phase only). Absent if too little data.
 Metric<TempCircadian> tempCircadian(
   List<AdcSample> samples, {
@@ -261,6 +270,7 @@ Metric<TempCircadian> tempCircadian(
   List<AccelSample>? accel,
   double? motionGate,
   int epochMin = 60,
+  int Function(int tsSec)? tzOffsetResolver,
 }) {
   const inputs = ['skin_temp_adc', 'device_family'];
   final cal = calibrationFor(_tempCal, deviceFamily);
@@ -272,8 +282,14 @@ Metric<TempCircadian> tempCircadian(
     );
   }
   final gate = motionGate ?? cal.motionGate;
+  final int Function(int tsSec) tzAt = tzOffsetResolver ??
+      (int tsSec) => DateTime.fromMillisecondsSinceEpoch(
+            tsSec * 1000,
+            isUtc: false,
+          ).timeZoneOffset.inSeconds;
   // De-mask: drop invalid + high-motion epochs.
   final ts = <double>[];
+  final utcTs = <double>[];
   final adc = <double>[];
   var deMasked = 0;
   for (var i = 0; i < samples.length; i++) {
@@ -289,16 +305,17 @@ Metric<TempCircadian> tempCircadian(
         }
       }
     }
-    ts.add(s.tsMs);
+    // Local wall-clock ms: everything downstream reads hour-of-day off this.
+    ts.add(s.tsMs + tzAt((s.tsMs / 1000).floor()) * 1000.0);
+    utcTs.add(s.tsMs);
     adc.add(s.adc);
   }
 
   if (adc.length < 4) {
     return Metric<TempCircadian>.absent(
       tier: Tier.relative,
-      inputs_used: gate == null || accel == null
-          ? inputs
-          : [...inputs, 'accel'],
+      inputs_used:
+          gate == null || accel == null ? inputs : [...inputs, 'accel'],
       note: 'too few valid temp epochs for circadian analysis',
     );
   }
@@ -308,25 +325,29 @@ Metric<TempCircadian> tempCircadian(
   final cos = cosinor(tHours, adc, periodHours: 24);
 
   // --- Nonparametric IS/IV/RA/L5/M10 ---
-  final np = _nonparam(ts, adc, epochMin: epochMin);
+  final np = _nonparam(utcTs, ts, adc, epochMin: epochMin);
 
-  if (cos.value == null && np == null) {
+  // This metric is the phase. A fit whose zero-amplitude test did not reject
+  // has no acrophase, so it is not reported (nor allowed to set confidence);
+  // the nonparametric half stands on its own.
+  final fit = cos.value?.acrophaseHours == null ? null : cos.value;
+
+  if (fit == null && np == null) {
     return Metric<TempCircadian>.absent(
       tier: Tier.relative,
-      inputs_used: inputs,
+      inputs_used:
+          gate == null || accel == null ? inputs : [...inputs, 'accel'],
       note: 'circadian fit degenerate',
     );
   }
 
   // Confidence: tie to cosinor R² when present, else a modest np-only value.
-  final conf = cos.value != null ? (cos.value!.r2).clamp(0.1, 0.9) : 0.3;
+  final conf = fit != null ? fit.r2.clamp(0.1, 0.9) : 0.3;
   return Metric<TempCircadian>(
-    value: TempCircadian(cos.value, np, cal.unit),
+    value: TempCircadian(fit, np, cal.unit),
     confidence: conf,
     tier: Tier.relative,
-    inputs_used: gate == null || accel == null
-          ? inputs
-          : [...inputs, 'accel'],
+    inputs_used: gate == null || accel == null ? inputs : [...inputs, 'accel'],
     note: 'RELATIVE skin-temp phase only (no °C/fever/core). Wrist temp is '
         'ANTIPHASE to core; activity-demasked epochs dropped=$deMasked '
         '(gate=${gate == null ? 'none, no accel' : '${gate}g'}). Amplitude '
@@ -336,26 +357,36 @@ Metric<TempCircadian> tempCircadian(
 }
 
 /// Witting/van Someren nonparametric circadian statistics. Bins the series into
-/// fixed [epochMin]-minute epochs aligned to wall-clock (hour-of-day from
-/// tsMs), averages within epoch, then computes IS/IV/RA/L5/M10.
+/// fixed [epochMin]-minute epochs, averages within epoch, then computes IS/IV.
+///
+/// The chronology (which epoch follows which, for IV and coverage) runs on
+/// [utcMs]; the epoch-of-day each epoch contributes to IS is read off
+/// [localMs]. Binning the chronology on local time folds the two occurrences
+/// of a repeated fall-back hour into one epoch, dropping a step from IV.
 CircadianNonparam? _nonparam(
-  List<double> tsMs,
+  List<double> utcMs,
+  List<double> localMs,
   List<double> adc, {
   required int epochMin,
 }) {
-  if (tsMs.isEmpty) return null;
+  if (utcMs.isEmpty) return null;
   final epochsPerDay = (24 * 60) ~/ epochMin;
   if (epochsPerDay < 5) return null;
   final epochMs = epochMin * 60 * 1000.0;
 
   // Bin into absolute epoch index (continuous timeline), averaging samples.
+  // The UTC grid is shifted by the first sample's offset so its edges fall on
+  // local epoch boundaries (offsets change by whole hours).
+  final refOffMs = localMs[0] - utcMs[0];
   final sums = <int, double>{};
   final counts = <int, int>{};
+  final eodOf = <int, int>{};
   var minBin = 1 << 62, maxBin = -(1 << 62);
-  for (var i = 0; i < tsMs.length; i++) {
-    final bin = (tsMs[i] / epochMs).floor();
+  for (var i = 0; i < utcMs.length; i++) {
+    final bin = ((utcMs[i] + refOffMs) / epochMs).floor();
     sums[bin] = (sums[bin] ?? 0) + adc[i];
     counts[bin] = (counts[bin] ?? 0) + 1;
+    eodOf.putIfAbsent(bin, () => (localMs[i] / epochMs).floor() % epochsPerDay);
     if (bin < minBin) minBin = bin;
     if (bin > maxBin) maxBin = bin;
   }
@@ -403,8 +434,7 @@ CircadianNonparam? _nonparam(
   for (var i = 0; i < series.length; i++) {
     final v = series[i];
     if (v == null) continue;
-    final eod = (minBin + i) % epochsPerDay; // epoch-of-day
-    final idx = eod < 0 ? eod + epochsPerDay : eod;
+    final idx = eodOf[minBin + i]!; // local epoch-of-day
     phaseSum[idx] += v;
     phaseN[idx] += 1;
   }

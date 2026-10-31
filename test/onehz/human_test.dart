@@ -98,6 +98,48 @@ void main() {
       expect(m.value!.debtHours, isNull);
       expect(m.value!.hasFreeNight, isFalse);
     });
+    test('one or two free nights => no comparison, not a 1-night p75', () {
+      final recent = [7.5, 7.4, 7.6, 7.5, 7.3, 7.6, 5.0];
+      for (final free in [
+        [5.0],
+        [9.8],
+        [9.8, 5.0],
+      ]) {
+        final m = sleepDebt(recent, free);
+        expect(m.present, isTrue);
+        expect(m.value!.hasFreeNight, isTrue);
+        expect(m.value!.osdHours, isNull, reason: '$free');
+        expect(m.value!.debtHours, isNull, reason: '$free');
+        expect(m.value!.habitualHours, closeTo(7.5, 1e-9));
+      }
+    });
+    test('too few free nights => OSD null, need_baseline note', () {
+      // One 11 h Saturday used to come back verbatim as the p75 and set the
+      // user's sleep need.
+      final one = sleepDebt([7.0, 6.8, 7.1, 11.0], const [11.0]);
+      expect(one.present, isTrue);
+      expect(one.value!.osdHours, isNull);
+      expect(one.value!.debtHours, isNull);
+      expect(one.value!.hasFreeNight, isTrue);
+      expect(one.value!.habitualHours, closeTo(7.05, 1e-9));
+      expect(one.note, 'need_baseline:have=1,need=$sleepDebtMinFreeNights');
+      final two = sleepDebt([7.0, 6.8, 7.1, 5.0], const [5.0, 10.5]);
+      expect(two.value!.osdHours, isNull);
+      expect(two.note, 'need_baseline:have=2,need=$sleepDebtMinFreeNights');
+    });
+    test('REGRESSION: a NaN night does not count toward either minimum', () {
+      final m = sleepDebt([7.0, 6.8, 7.1], const [7.0, 6.5, double.nan]);
+      expect(m.value!.osdHours, isNull);
+      expect(m.note, 'need_baseline:have=2,need=$sleepDebtMinFreeNights');
+      final r = sleepDebt([7.0, 6.8, double.nan], const [8.0, 8.2, 8.4]);
+      expect(r.present, isFalse);
+      expect(r.note, 'need_baseline:have=2,need=3');
+    });
+    test('too few recent nights => need_baseline note', () {
+      final m = sleepDebt([7.0, 6.8], const [8.0, 8.2, 8.4]);
+      expect(m.present, isFalse);
+      expect(m.note, 'need_baseline:have=2,need=3');
+    });
     test('free-night rebound => positive debt', () {
       // Habitual ~6 h, free nights ~8.5 h => debt ≈ 2.5 h.
       final m = sleepDebt([6.0, 6.1, 5.9, 6.0, 6.2], [8.4, 8.6, 8.5]);
@@ -254,19 +296,6 @@ void main() {
       // No good end of the scale: position, not verdict.
       expect(percentileOfYou(72, nights, better: Better.neither).value!.label,
           'among your highest');
-    });
-
-    test('record gated by MDC: tiny beat is NOT a record, big beat is', () {
-      final hist = List<double>.generate(30, (i) => 40.0 + (i % 10)); // spread
-      final priorMax = hist.reduce((a, b) => a > b ? a : b);
-      // Barely beats the max => within MDC noise => NOT a record.
-      final small =
-          personalRecord(priorMax + 0.01, hist, better: Better.higher);
-      expect(small.value!.isRecord, isFalse);
-      // Clearly beats it.
-      final big = personalRecord(priorMax + 50, hist, better: Better.higher);
-      expect(big.value!.isRecord, isTrue);
-      expect(big.value!.kind, 'high');
     });
 
     test('short history => absent', () {

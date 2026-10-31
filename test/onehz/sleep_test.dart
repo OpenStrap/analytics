@@ -5,7 +5,7 @@
 // expected value), then sanity-checked against the ~9-min real type-24 snippet.
 //
 // IMPORTANT: ../whoop_hist.jsonl is only ~9 min of 1 Hz records — far too short
-// for a real night. So van Hees / SRI / accounting / staging / CPC / circadian
+// for a real night. So van Hees / SRI / accounting / staging / circadian
 // get SYNTHETIC validation only; on the real capture we only assert the
 // pipeline runs and (where applicable) returns honest "absent" rather than a
 // fabricated night. That limitation is stated honestly here, not faked.
@@ -195,22 +195,106 @@ void main() {
         accel.add(AccelSample(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
         t += 1000.0;
       }
-      // Zero out only the first still-block sample's timestamp.
-      accel[nightStart] = AccelSample(
+      // Zero out only the onset sample's timestamp. The first smoothing epoch
+      // of the still block is still compared against the moving epoch before
+      // it, so the onset lands smoothSec-1 samples into the block.
+      final onsetAt = nightStart + 4;
+      accel[onsetAt] = AccelSample(
         0,
-        accel[nightStart].x,
-        accel[nightStart].y,
-        accel[nightStart].z,
+        accel[onsetAt].x,
+        accel[onsetAt].y,
+        accel[onsetAt].z,
       );
 
       final m = vanHeesSleepWindow(accel);
       expect(m.present, isTrue);
       final w = m.value!;
-      expect(w.onsetIdx, nightStart,
+      expect(w.onsetIdx, onsetAt,
           reason: 'test setup must target the sample the code actually reads');
       expect(w.onsetMs, isNull,
           reason: 'unstamped onset sample must not fabricate epoch 0');
       expect(w.offsetMs, isNotNull);
+    });
+  });
+
+  group('van Hees epoch-to-epoch angle rule', () {
+    // 60 min of slow wrist rolls (20 deg over 6 s, ~3.3 deg/s, every 3 min,
+    // alternating direction) then 90 min perfectly still. No single second
+    // moves 5 deg, but consecutive 5 s epochs differ by well over 5 deg —
+    // van Hees 2015 / GGIR count that as movement.
+    List<AccelSample> slowRolls() {
+      final out = <AccelSample>[];
+      var base = 10.0;
+      var dir = 1.0;
+      for (var i = 0; i < 150 * 60; i++) {
+        var deg = base;
+        if (i < 60 * 60) {
+          final p = i % 180;
+          if (p < 6) deg = base + dir * 20 * (p + 1) / 6;
+          if (p == 5) {
+            base += dir * 20;
+            dir = -dir;
+          }
+        }
+        final r = deg * math.pi / 180;
+        out.add(AccelSample(1000.0 + i * 1000.0, math.cos(r), 0, math.sin(r)));
+      }
+      return out;
+    }
+
+    test('a slow roll spread over several seconds breaks immobility', () {
+      final accel = slowRolls();
+      final mask = immobilityMask(accel);
+      final restless = mask.immobile.sublist(0, 55 * 60);
+      expect(restless.where((s) => s).length, 0,
+          reason: 'pre-fix: every second of the restless hour was immobile');
+      expect(mask.immobile[70 * 60], isTrue);
+
+      final m = vanHeesSleepWindow(accel);
+      expect(m.present, isTrue);
+      expect(m.value!.onsetIdx, greaterThanOrEqualTo(57 * 60),
+          reason: 'pre-fix: onset at 0 — the restless hour was annexed');
+    });
+
+    test('an unmeasured second inside the compared span is not stillness', () {
+      // One undecoded second at index 100 between measured seconds at the same
+      // orientation. The rolling median NaNs only index 100, so the change
+      // from 97 to 102 used to read as a finite 0° across a second nobody saw.
+      final accel = [
+        for (var i = 0; i < 600; i++)
+          i == 100
+              ? AccelSample(i * 1000.0, 0, 0, 0, valid: false)
+              : AccelSample(i * 1000.0, 0, 0, 1)
+      ];
+      final mask = immobilityMask(accel);
+      for (var i = 101; i <= 105; i++) {
+        expect(mask.deltaDeg[i].isNaN, isTrue, reason: 'second $i');
+      }
+      expect(mask.deltaDeg[99].isNaN, isFalse);
+      expect(mask.deltaDeg[106].isNaN, isFalse);
+      for (var i = 101; i <= 104; i++) {
+        expect(mask.immobile[i], isFalse, reason: 'second $i');
+        expect(mask.immobileUnknown[i], isTrue, reason: 'second $i');
+      }
+    });
+
+    test('movement after an unmeasured second in the window is decided', () {
+      // Still until an undecoded second at 100, then a 90° turn at 110. The
+      // window starting at 50 contains both: the turn already fails the
+      // sustained rule on measured data, so that second is not immobile and
+      // not undecidable either.
+      final accel = [
+        for (var i = 0; i < 1200; i++)
+          i == 100
+              ? AccelSample(i * 1000.0, 0, 0, 0, valid: false)
+              : i < 110
+                  ? AccelSample(i * 1000.0, 0, 0, 1)
+                  : AccelSample(i * 1000.0, 1, 0, 0)
+      ];
+      final mask = immobilityMask(accel);
+      expect(mask.immobile[50], isFalse);
+      expect(mask.immobileUnknown[50], isFalse,
+          reason: 'the scan stopped at the gap and never saw the turn');
     });
   });
 
@@ -282,6 +366,34 @@ void main() {
       }
       expect(agree, lessThanOrEqualTo(cases));
       expect(cases, lessThan(m.value!.cases));
+    });
+
+    test(
+        'abstains when no pair clears the coverage floor, and sizes confidence '
+        'from the pairs that do', () {
+      // Eight days of grid, but the mask accepts one minute on day 0 and day
+      // 1. Before the floor gated the total this published SRI=+100 at 0.95.
+      const epochsPerDay = 1440;
+      final vec = List<bool>.filled(8 * epochsPerDay, true);
+      final valid = List<bool>.filled(8 * epochsPerDay, false);
+      valid[100] = true;
+      valid[epochsPerDay + 100] = true;
+      final thin = phillipsSri(vec, epochsPerDay, valid: valid);
+      expect(thin.present, isFalse);
+      expect(thin.value, isNull);
+
+      // Same eight-day grid, only days 0..2 fully observed: two qualifying
+      // pairs, so confidence reflects two comparisons, not seven.
+      final valid2 = List<bool>.generate(
+          8 * epochsPerDay, (i) => i < 3 * epochsPerDay);
+      final two = phillipsSri(vec, epochsPerDay, valid: valid2);
+      expect(two.present, isTrue);
+      expect(two.value!.pairs, hasLength(2));
+      expect(two.confidence, closeTo(0.3, 1e-9));
+
+      // A fully observed week still saturates.
+      final full = phillipsSri(vec, epochsPerDay);
+      expect(full.confidence, closeTo(0.95, 1e-9));
     });
   });
 
@@ -730,28 +842,6 @@ void main() {
     });
   });
 
-  // ---------------------------------------------------------------------- CPC
-  group('Cardiopulmonary Coupling (WITHDRAWN)', () {
-    test('abstains — no respiration channel independent of the beat times', () {
-      // Was: "NN with injected ~0.25 Hz respiration → HF coupling band". That
-      // passed because the respiration surrogate WAS the NN series, so of
-      // course the "coupling" peak sat at the RSA frequency. See cpc.dart.
-      final nn = <double>[];
-      final times = <double>[];
-      var t = 0.0;
-      for (var i = 0; i < 1800; i++) {
-        final rr = 1000 + 40 * math.sin(2 * math.pi * 0.25 * (t / 1000.0));
-        t += rr;
-        nn.add(rr);
-        times.add(t);
-      }
-      // ignore: deprecated_member_use_from_same_package
-      final m = cardiopulmonaryCoupling(nn, times);
-      expect(m.present, isFalse);
-      expect(m.note, contains('respiration channel'));
-    });
-  });
-
   // ----------------------------------------------------------- circadian (NP)
   group('nonparametric circadian IS/IV/RA/L5/M10', () {
     test('clean 24-h cosine activity over 7 days → IS≈1, RA high', () {
@@ -796,7 +886,6 @@ void main() {
           histFile.readAsLinesSync().where((l) => l.trim().isNotEmpty).toList();
       final accel = <AccelSample>[];
       final hr = <double>[];
-      final rrMs = <double>[];
       var t = 0.0;
       for (final line in lines) {
         final obj = jsonDecode(line) as Map<String, dynamic>;
@@ -808,9 +897,6 @@ void main() {
           accel.add(AccelSample(t, a[0], a[1], a[2]));
         }
         hr.add(r.hr.toDouble());
-        for (final rr in r.rrIntervalsMs) {
-          if (rr > 0) rrMs.add(rr.toDouble());
-        }
         t += 1000.0;
       }
       expect(accel.length, greaterThan(100));
@@ -824,18 +910,6 @@ void main() {
         expect(sw.value!.sptSec, greaterThan(0));
       } else {
         expect(sw.confidence, 0);
-      }
-
-      // CPC on real RR via the foundation corrector: should run and produce a
-      // dominant frequency in the physiological respiratory range (or absent).
-      final corr = correctRr(rrMs);
-      if (corr.nn.length >= 60) {
-        // ignore: deprecated_member_use_from_same_package
-        final cpc = cardiopulmonaryCoupling(corr.nn, corr.nnTimesMs);
-        if (cpc.present) {
-          expect(cpc.value!.dominantHz, inInclusiveRange(0.0, 0.45));
-          expect(cpc.value!.hfc, greaterThanOrEqualTo(0));
-        }
       }
     });
   });
@@ -1131,6 +1205,23 @@ void _cv06Tests() {
       final m = nightHrvShape(n.nn, n.t);
       expect(m.present, isFalse);
       expect(m.note, contains('no shape'));
+    });
+
+    test('a night where every bin is a hole is absent, not an empty shape',
+        () {
+      // 400 beats over ~1.1 h: past the beat-count and three-bin gates, but no
+      // 30-min bin reaches the per-bin floor.
+      final nn = <double>[];
+      final t = <double>[];
+      for (var i = 0; i < 400; i++) {
+        nn.add(i.isEven ? 800.0 : 900.0);
+        t.add(i * 9900.0);
+      }
+      final m = nightHrvShape(nn, t);
+      expect(m.present, isFalse);
+      expect(m.value, isNull);
+      expect(m.confidence, 0.0);
+      expect(m.note, contains('$kMinBeatsPerHrvBin beats'));
     });
 
     test('CV-06 does not publish a time-to-max (deliberately cut)', () {
