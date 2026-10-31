@@ -97,7 +97,7 @@ Checked against the WHOOP 4 decoder (`protocol/lib/src/records.dart`, `live.dart
 ## LAYER 2 — Foreground-only (live spot-check tier, ~100 Hz accel/gyro + live RR)
 - **Karlen Smart-Fusion RR** (RIIV+RIAV+RIFV) — needs a high-rate PPG waveform. `UNSUPPORTED on WHOOP 4` (no decoded foreground PPG).
 - **Autocorrelation cadence + step/stride regularity & symmetry** (Moe-Nilssen 2004) — robust gait.
-- **AN-2554 / windowed peak-detection step counter** (100 Hz accel) — gate to ambulation; wrist over/under-count caveats (Tudor-Locke).
+- **Stride-periodicity step counter** (100 Hz accel, `pedometer`/`livePedometer`) — per 1 s segment, autocorrelation over a 4 s window; gait gated on amplitude plus autocorrelation at the stride lag with hysteresis, kept only as runs of ≥ 8 s; steps = gait seconds / measured step period. Known limits: rhythmic arm work at a gait-like rhythm still counts, a sprint above 240 spm reads half, a step-only signal slower than ~67 spm counts double. Measured accuracy is in the `StepParams` doc comment. Replaced an AN-2554-style peak counter.
 - **Madgwick / Mahony quaternion orientation** — limb tracking during workouts.
 - **Frequency-domain activity typing** (dominant freq + spectral entropy, Wang 2009) — walk/run/cycle.
 - **DFA-α1 aerobic threshold** (Rogers 2020) — needs RR at <3% artifact; best on clean foreground/rest reads.

@@ -9,9 +9,9 @@
 // participant's true step count.
 //
 // It runs `pedometer()` — the real production entry point, not a copy — and it
-// CHUNKS THE SIGNAL THE WAY PRODUCTION DOES. That is not a detail: `confirm=8`
-// needs a contiguous run inside one buffer, so the fragment size dominates the
-// answer. `AppState._ingestLiveMagsAt` accumulates `_magMin` and calls
+// CHUNKS THE SIGNAL THE WAY PRODUCTION DOES. That is not a detail: the gait
+// gate needs a run of at least 8 s inside one buffer, so the fragment size
+// moves the answer. `AppState._ingestLiveMagsAt` accumulates `_magMin` and calls
 // `pedometer` on each completed `_minuteSamples = 6000` (60 s @ 100 Hz) block,
 // counting the trailing partial minute once at session end. This harness does
 // exactly that (60 s of whatever the file's rate is), and prints the
