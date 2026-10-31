@@ -46,13 +46,15 @@ class _Series {
   }
 
   List<DetectedWorkout> detect(
-          {List<SavedWorkoutSpan> savedSpans = const []}) =>
+          {List<SavedWorkoutSpan> savedSpans = const [],
+          List<MotionPoint>? motion}) =>
       AutoWorkoutDetector.detect(
         hrTs: ts,
         hrBpm: bpm,
         restingBpm: _rhr,
         maxBpm: _hrMax,
         savedSpans: savedSpans,
+        motion: motion,
       );
 }
 
@@ -73,10 +75,43 @@ void main() {
       expect(w.single.startSec, playStart);
       expect(w.single.endSec, playEnd);
       expect(w.single.durationMin, 57); // 58 min of samples, floor((58·60−1)/60)
-      // The reported average covers the whole session, the sit-down included:
-      // below the 140 of play, above the gate.
-      expect(w.single.avgBpm, lessThan(140));
-      expect(w.single.avgBpm, greaterThan(119));
+      // The reported average covers the whole session, the sit-down included.
+      final window = [
+        for (var k = 0; k < s.ts.length; k++)
+          if (s.ts[k] >= playStart && s.ts[k] <= playEnd) s.bpm[k]
+      ];
+      final mean = window.reduce((a, b) => a + b) / window.length;
+      expect(w.single.avgBpm, mean.round());
+    });
+
+    test('a still sit-down does not fail the motion check of a bridged match',
+        () {
+      // Play at 0.16 g/s clears the motion bar; sitting at 0.01 would pull the
+      // whole window to ~0.139, under it. The run-up from 118 bpm is a rise of
+      // 22, under onsetRiseBpm, so the onset bypass can't rescue the window:
+      // only leaving the rest out of the motion mean keeps it.
+      final s = _Series()..flat(10, 118);
+      final playStart = s.now;
+      s.flat(20, 140);
+      final restStart = s.now;
+      s.recover(8, 140, 90);
+      final restEnd = s.now;
+      s.flat(30, 140);
+      final playEnd = s.now - 1;
+      s.flat(20, 118);
+      final motion = [
+        for (var t = _t0; t < s.now; t++)
+          MotionPoint(
+              t,
+              t < playStart || t > playEnd
+                  ? 0.0
+                  : (t >= restStart && t < restEnd ? 0.01 : 0.16)),
+      ];
+
+      final w = s.detect(motion: motion);
+      expect(w, hasLength(1));
+      expect(w.single.startSec, playStart);
+      expect(w.single.endSec, playEnd);
     });
 
     test('the sit-down really is past the unconditional 5-min merge', () {
