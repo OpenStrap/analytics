@@ -4,7 +4,9 @@
 // DELIBERATELY conservative (low sensitivity): a sustained ≥12-min elevation of
 // HR ≥ max(RHR+[elevatedMarginBPM], RHR+[hrrFloorFraction]·HRR) — RHR+59 at
 // RHR 60 / HRmax 190 — brief (≤90 s) dips tolerated, near windows merged,
-// optional motion confirmation, overlap-excluded against saved spans.
+// observed rests of up to 15 min bridged when their mean HR stays above
+// resting (see [restBridgeMaxS]), optional motion confirmation, overlap-excluded against
+// saved spans.
 // (The header and the note used to quote "RHR+30", the margin this detector
 // deliberately abandoned: see [hrrFloorFraction] for the 30 false windows on a
 // sedentary week that motivated replacing it.)
@@ -117,8 +119,35 @@ class AutoWorkoutDetector {
   /// normal. Absence of data is not evidence of continuity.
   static const int maxGapS = 90;
 
-  /// Two windows whose gap is strictly < this are merged (5 min).
+  /// Two windows whose gap is strictly < this are merged (5 min),
+  /// unconditionally — a gap this short is a dip, not a pause.
   static const int mergeGapS = 5 * 60;
+
+  /// A REST between two bouts up to this long (inclusive) is bridged into ONE
+  /// workout — but only when [_restBridgeHolds] says the pause was observed and
+  /// the heart never went back to rest. 15 min.
+  ///
+  /// [mergeGapS] alone split every sport with real breaks in it: tennis for an
+  /// hour with a 5-10 min sit-down after 20 min, set breaks in padel, a
+  /// half-time, a water stop on a long ride. During the sit-down HR falls
+  /// below the gate, the span closes after [maxDipS], and the two halves sat
+  /// 7-8 min apart — past the 5-min merge — so the user got two "did you work
+  /// out?" prompts for one match. Fifteen minutes covers a sit-down,
+  /// a changeover and a half-time; a morning and an evening run, or a session
+  /// after lunch, are hours apart and never come near it.
+  static const int restBridgeMaxS = 15 * 60;
+
+  /// During a bridged rest the mean HR must stay at or above
+  /// RHR + this fraction of heart-rate reserve (≈ RHR+20 at RHR 60 /
+  /// HRmax 190). Recovery from a real effort holds HR well clear of resting
+  /// for many minutes (post-exercise HR recovery has a fast vagal phase in
+  /// the first minute and a slow phase lasting several more; Imai et al.
+  /// 1994), so a sit-down between games clears this; HR that has fallen back
+  /// to a seated baseline means the effort is over and the next bout is a new
+  /// one. The %HRR form mirrors
+  /// [hrrFloorFraction] so the bar scales with the user's range rather than
+  /// a fixed bpm offset.
+  static const double restBridgeHrrFraction = 0.15;
 
   /// When a motion series is supplied, the window's mean per-second motion
   /// intensity (L2 gravity-vector change/s, in g) must be ≥ this to qualify.
@@ -250,28 +279,62 @@ class AutoWorkoutDetector {
 
     if (spans.isEmpty) return const [];
 
-    // --- 4: merge spans whose gap is strictly < mergeGapS ---
-    final merged = <List<int>>[];
-    var curStart = spans[0][0];
-    var curEnd = spans[0][1];
+    // --- 4: merge spans whose gap is strictly < mergeGapS, and bridge a
+    // rest of up to restBridgeMaxS the heart never recovered from ---
+    // The bridge floor sits between resting and the gate: "still recovering
+    // from effort", not "working out". Never above the gate itself, so a low
+    // HRmax can't make bridging stricter than the bout definition.
+    final bridgeFloor = math.min(
+        floor, (rhr + restBridgeHrrFraction * (maxBpm - rhr)).round());
+    // Two passes. The unconditional < mergeGapS merge runs first, exactly as
+    // it always has; bridging then works on its output. Done the other way
+    // round, a short gap after a bridge would grow the window past
+    // maxWorkoutMin with no cap check and the whole window, efforts that used
+    // to stand on their own included, would be thrown away.
+    final joined = <List<int>>[];
+    var curStart = spans[0][0], curEnd = spans[0][1];
     for (var k = 1; k < spans.length; k++) {
       final next = spans[k];
       if (next[0] - curEnd < mergeGapS) {
         curEnd = math.max(curEnd, next[1]);
       } else {
-        merged.add([curStart, curEnd]);
+        joined.add([curStart, curEnd]);
         curStart = next[0];
         curEnd = next[1];
       }
     }
-    merged.add([curStart, curEnd]);
+    joined.add([curStart, curEnd]);
+
+    final merged = <_Window>[];
+    var cur = _Window(joined[0][0], joined[0][1]);
+    for (var k = 1; k < joined.length; k++) {
+      final next = joined[k];
+      final gap = next[0] - cur.end;
+      if (gap <= restBridgeMaxS &&
+          // Never bridge into a window maxWorkoutMin would then throw away
+          // whole: two honest suggestions beat none.
+          next[1] - cur.start <= maxWorkoutMin * 60 &&
+          // Nor across a saved workout: the overlap check below would drop
+          // the bridged window whole, taking the effort the user never saved
+          // with it. Kept apart, only the saved one is excluded.
+          !savedSpans.any(
+              (s) => _overlaps(cur.start, next[1], s.startSec, s.endSec)) &&
+          _restBridgeHolds(ts, bpm, cur.end, next[0], bridgeFloor)) {
+        cur.rests.add([cur.end, next[0]]);
+        cur.end = math.max(cur.end, next[1]);
+      } else {
+        merged.add(cur);
+        cur = _Window(next[0], next[1]);
+      }
+    }
+    merged.add(cur);
 
     // --- 5+6+7 ---
     final motionSeries =
         (motion == null || motion.isEmpty) ? null : motion;
     final results = <DetectedWorkout>[];
     for (final span in merged) {
-      final start = span[0], end = span[1];
+      final start = span.start, end = span.end;
 
       // A workout is time-bounded — a multi-hour sustained elevation is lifestyle
       // activity, not a workout to suggest.
@@ -282,18 +345,31 @@ class AutoWorkoutDetector {
         continue;
       }
 
-      // window HR samples
+      // window HR samples — all of them (the reported avg/peak describe the
+      // whole session, rests included, as a recorded workout would), and the
+      // EFFORT subset outside the bridged rests, which the gates judge.
       final winBpm = <int>[];
+      var effortSum = 0, effortCnt = 0;
       for (var k = 0; k < n; k++) {
-        if (ts[k] >= start && ts[k] <= end) winBpm.add(bpm[k]);
+        if (ts[k] >= start && ts[k] <= end) {
+          winBpm.add(bpm[k]);
+          if (!span.inRest(ts[k])) {
+            effortSum += bpm[k];
+            effortCnt++;
+          }
+        }
       }
-      if (winBpm.isEmpty) continue;
+      if (winBpm.isEmpty || effortCnt == 0) continue;
 
       // The WHOLE window must be genuinely elevated, not just brief floor
       // crossings that dip-bridging stitched together — require the mean HR to
       // clear the floor too. (A sedentary afternoon oscillating around the gate
-      // averaged below it; a real bout averages well above.)
-      final winMean = winBpm.reduce((a, b) => a + b) / winBpm.length;
+      // averaged below it; a real bout averages well above.) Judged on the
+      // effort minutes only: a bridged rest is by construction below the gate,
+      // and folding it in would turn one bridged match into NO suggestion where
+      // its two halves used to produce two. With no rests this is the whole
+      // window, exactly as before.
+      final winMean = effortSum / effortCnt;
       if (winMean < floor) continue;
 
       // 5: motion confirmation when a continuous motion series was supplied.
@@ -302,7 +378,8 @@ class AutoWorkoutDetector {
         var sum = 0.0;
         var cnt = 0;
         for (final p in motionSeries) {
-          if (p.ts >= start && p.ts <= end) {
+          // Same effort-only rule as the HR mean: a sit-down is still.
+          if (p.ts >= start && p.ts <= end && !span.inRest(p.ts)) {
             sum += p.intensity;
             cnt++;
           }
@@ -358,6 +435,49 @@ class AutoWorkoutDetector {
       ));
     }
     return results;
+  }
+
+  /// Whether the pause between two bouts — from [gapStart] (last sample of
+  /// the earlier span) to [gapEnd] (first sample of the later one) — may be
+  /// bridged as a rest inside one workout. Both must hold:
+  ///
+  ///  * OBSERVED: no hole in the record longer than [maxGapS] anywhere in it.
+  ///    The span builder's rule, for the same reason: absence of data is not
+  ///    evidence of continuity — an off-wrist stretch between two efforts says
+  ///    nothing about whether the user was still at it.
+  ///  * NOT RECOVERED: the mean HR strictly inside the pause is at or above
+  ///    [bridgeFloor] (see [restBridgeHrrFraction]).
+  ///
+  /// No samples strictly inside → can't tell → don't bridge.
+  static bool _restBridgeHolds(
+      List<int> ts, List<int> bpm, int gapStart, int gapEnd, int bridgeFloor) {
+    var k = _lowerBound(ts, gapStart);
+    var prev = gapStart;
+    var sum = 0, cnt = 0;
+    for (; k < ts.length && ts[k] <= gapEnd; k++) {
+      if (ts[k] - prev > maxGapS) return false;
+      prev = ts[k];
+      if (ts[k] > gapStart && ts[k] < gapEnd) {
+        sum += bpm[k];
+        cnt++;
+      }
+    }
+    if (gapEnd - prev > maxGapS) return false;
+    return cnt > 0 && sum / cnt >= bridgeFloor;
+  }
+
+  /// First index with `ts[i] >= x` ([ts] sorted ascending).
+  static int _lowerBound(List<int> ts, int x) {
+    var lo = 0, hi = ts.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >> 1;
+      if (ts[mid] < x) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
   }
 
   /// Closed-interval overlap (touching endpoints count).
@@ -417,4 +537,17 @@ Metric<List<DetectedWorkout>> autoDetectWorkouts({
         '${AutoWorkoutDetector.hrrFloorFraction}·HRR) sustained ≥12 min); '
         'wrist-HR ESTIMATE, not medical advice',
   );
+}
+
+/// One merged candidate: [start, end] plus the bridged rests inside it, each
+/// an open interval (lastEffortSample, firstEffortSample) — see
+/// [AutoWorkoutDetector.restBridgeMaxS].
+class _Window {
+  final int start;
+  int end;
+  final List<List<int>> rests = [];
+  _Window(this.start, this.end);
+
+  /// True when [t] falls strictly inside a bridged rest.
+  bool inRest(int t) => rests.any((r) => t > r[0] && t < r[1]);
 }
