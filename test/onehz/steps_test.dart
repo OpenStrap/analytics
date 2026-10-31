@@ -203,6 +203,12 @@ void main() {
       expect(stepsAt(120, 20), inInclusiveRange(36, 42));
     });
 
+    test('a non-finite sample rate counts nothing instead of throwing', () {
+      final (x, y, z) = _walk(20, 2.0);
+      expect(livePedometer(x, y, z, sampleRateHz: double.infinity).steps, 0);
+      expect(livePedometer(x, y, z, sampleRateHz: double.nan).steps, 0);
+    });
+
     test('one weak footfall does not reset the run', () {
       // The old counter dropped its whole confirm run on one sub-threshold
       // pair — the main reason it under-counted real walking.

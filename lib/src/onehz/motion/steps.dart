@@ -200,7 +200,7 @@ int pedometer(List<double> sig, {double sampleRateHz = StepParams.fs}) =>
     _gaitSteps(sig, sampleRateHz).round();
 
 double _gaitSteps(List<double> sig, double sampleRateHz) {
-  if (sig.isEmpty || !(sampleRateHz > 0)) return 0;
+  if (sig.isEmpty || !sampleRateHz.isFinite || sampleRateHz <= 0) return 0;
   var fs = sampleRateHz;
   // 1. band-pass, then decimate.
   final lp = _trailingMean(_trailingMean(sig, fs * 0.1), fs * 0.1);
