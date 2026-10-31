@@ -22,7 +22,7 @@ void main() {
       expect(_last(1).run(x)!.values.toList(), [5]);
       expect(_last(3).run(x)!.values.toList(), [3, 4, 5]);
       expect(_last(8).run(x)!.values.toList(), [1, 2, 3, 4, 5]); // n < k
-      expect(_last(3).run(col([7, nan]))!.values.toList(), [7, nan]);
+      expect(_last(3).run(col([7, nan]))!.values.toList(), [7, isNaN]);
     });
     test('empty input is null, also through finish(empty())', () {
       for (final k in [1, 3, 8]) {
