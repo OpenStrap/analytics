@@ -114,6 +114,25 @@ void main() {
       expect(w.single.endSec, playEnd);
     });
 
+    test('the bout gate judges a bridged match on its efforts only', () {
+      // Play at 120 clears the gate of 119; with the sit-down counted the
+      // window averages about 116 and would not. The rest averages ~94, above
+      // the bridge floor of 80, so the halves are bridged.
+      final s = _Series()..flat(10, 70);
+      final playStart = s.now;
+      s
+        ..flat(20, 120)
+        ..recover(8, 120, 90)
+        ..flat(30, 120);
+      final playEnd = s.now - 1;
+      s.flat(20, 70);
+
+      final w = s.detect();
+      expect(w, hasLength(1));
+      expect(w.single.startSec, playStart);
+      expect(w.single.endSec, playEnd);
+    });
+
     test('the sit-down really is past the unconditional 5-min merge', () {
       // Guards the test above against passing for the wrong reason: the two
       // halves must come out of span-building > mergeGapS apart, so it is
