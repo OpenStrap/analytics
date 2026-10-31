@@ -133,7 +133,10 @@ class PedometerResult {
 ///   5. GAIT GATE: band-passed SD ≥ [ampG] and autocorrelation AT THE STRIDE
 ///      LAG (2 × step) ≥ [regHi], grown through neighbouring seconds that
 ///      clear [regLo] (hysteresis), and kept only as a run of ≥ [minRun]
-///      consecutive seconds. Below 8 s nothing is credited.
+///      consecutive seconds. Each second is judged on the window around it,
+///      which reaches ~1.5 s before and ~2.5 s after, so still seconds next
+///      to a walk can join its run: a walk of roughly 6–7 s between still
+///      stretches can reach 8 classified seconds and be credited.
 ///   6. COUNT = Σ segment seconds / step period over the gait seconds. Steps
 ///      come from the MEASURED cadence, never from counting individual peaks,
 ///      so one weak footfall cannot reset a run.
@@ -267,7 +270,12 @@ double _gaitSteps(List<double> sig, double sampleRateHz) {
     while (j + 1 < m && gait[j + 1]) {
       j++;
     }
-    if (j - i + 1 >= StepParams.minRun) {
+    // Seconds, not segments: the last segment of a buffer can be short.
+    var runS = 0.0;
+    for (var q = i; q <= j; q++) {
+      runS += segS[q];
+    }
+    if (runS >= StepParams.minRun) {
       for (var q = i; q <= j; q++) {
         steps += segS[q] / stepS[q]!;
       }

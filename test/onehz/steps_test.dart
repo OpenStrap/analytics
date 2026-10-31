@@ -203,6 +203,11 @@ void main() {
       expect(stepsAt(120, 20), inInclusiveRange(36, 42));
     });
 
+    test('the minimum run is measured in seconds, not segments', () {
+      // 7.5 s is eight segments, the last one half a second long.
+      expect(stepsAt(120, 7.5), 0);
+    });
+
     test('a non-finite sample rate counts nothing instead of throwing', () {
       final (x, y, z) = _walk(20, 2.0);
       expect(livePedometer(x, y, z, sampleRateHz: double.infinity).steps, 0);
