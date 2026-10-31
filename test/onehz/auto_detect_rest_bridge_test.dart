@@ -133,6 +133,25 @@ void main() {
       expect(w.single.endSec, playEnd);
     });
 
+    test('a bridged match with low motion throughout is rejected', () {
+      // The bridge doesn't exempt a window from the motion check: play at
+      // 0.01 g/s with a 22 bpm run-up (under onsetRiseBpm) is not a workout.
+      final s = _Series()..flat(10, 118);
+      final playStart = s.now;
+      s
+        ..flat(20, 140)
+        ..recover(8, 140, 90)
+        ..flat(30, 140);
+      final playEnd = s.now - 1;
+      s.flat(20, 118);
+      final motion = [
+        for (var t = _t0; t < s.now; t++)
+          MotionPoint(t, t < playStart || t > playEnd ? 0.0 : 0.01),
+      ];
+
+      expect(s.detect(motion: motion), isEmpty);
+    });
+
     test('the sit-down really is past the unconditional 5-min merge', () {
       // Guards the test above against passing for the wrong reason: the two
       // halves must come out of span-building > mergeGapS apart, so it is
