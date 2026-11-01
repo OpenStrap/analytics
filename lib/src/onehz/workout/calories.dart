@@ -326,41 +326,26 @@ class Calories {
           'cadenceSpmPerMin (${cadenceSpmPerMin.length}) must align with '
           'hrPerMin (${hrPerMin.length}): one entry per wake minute');
     }
-    // (weight/height/age still can't be told apart from their defaults here:
-    // WorkoutUserProfile's own constructor bakes 70/170/30 in at construction,
-    // so by the time a profile object arrives there is no way left to tell "the
-    // caller passed 70kg" from "nobody set a weight". Making those three
-    // nullable at the source is the real fix and a bigger change.)
-    final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
-    final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
-    final age = profile.age > 0 ? profile.age : 30.0;
-    final coeffs = resolveCoeffs(profile.sex);
-    final flexHr = activeGateHr(hrmax, restingHr);
-    if (flexHr == null) return null;
-
-    final bmrDay = mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex);
-    final basalPerMin = bmrDay / 1440.0;
+    // The prep and the per-minute billing are SHARED with [minuteEnergy]
+    // ([_energyCtx], [_bill]) — one definition of the computation, so the
+    // per-minute series and this total cannot drift. (weight/height/age still
+    // can't be told apart from their defaults there: WorkoutUserProfile's own
+    // constructor bakes 70/170/30 in at construction, so by the time a profile
+    // object arrives there is no way left to tell "the caller passed 70kg" from
+    // "nobody set a weight". Making those three nullable at the source is the
+    // real fix and a bigger change.)
+    final ctx = _energyCtx(profile, hrmax, restingHr);
+    if (ctx == null) return null;
+    final basalPerMin = ctx.basalPerMin;
 
     var active = 0.0;
     var walking = 0.0;
     for (var i = 0; i < hrPerMin.length; i++) {
-      final hr = hrPerMin[i];
-      // `hr < flexHr` is false for NaN, so an unfiltered non-finite minute
-      // would bill active and carry its NaN into the day total.
-      if (hr.isFinite && hr >= flexHr) {
-        final activePerMin =
-            activeKcalPerS(coeffs, hr, hrmax, weightKg, age) * 60.0;
-        final surplus = activePerMin - basalPerMin;
-        if (surplus > 0) active += surplus;
-        continue; // HR billed the minute — cadence never doubles it.
-      }
-      // Below flex (or no HR at all — measured gait stands on its own):
-      // a measured walking cadence prices the minute the HR gate refused.
-      final cad = cadenceSpmPerMin?[i];
-      if (cad == null) continue;
-      final met = metFromCadenceSpm(cad);
-      if (met == null) continue;
-      walking += (met - 1.0) * basalPerMin;
+      final b = _bill(ctx, hrPerMin[i], cadenceSpmPerMin?[i]);
+      // Adding the +0.0 of a minute that billed nothing is exact, so this is
+      // the same sum, in the same order, as skipping those minutes.
+      active += b.active;
+      walking += b.walking;
     }
     active += walking;
     final basal = basalPerMin * dayMinutes;
@@ -370,6 +355,271 @@ class Calories {
       basal: basal,
       walking: walking,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shared by [dailyEnergy] and [minuteEnergy]: the ONE definition of how a
+  // minute is billed. Nothing here is new arithmetic — it is the body that used
+  // to sit inside dailyEnergy's loop, moved so the two entry points cannot
+  // diverge. dailyEnergy's outputs are bit-for-bit what they were (golden
+  // tests in test/onehz/minute_energy_test.dart).
+  // ---------------------------------------------------------------------------
+
+  static ({
+    CalorieCoeffs coeffs,
+    double weightKg,
+    double age,
+    double hrmax,
+    double flexHr,
+    double basalPerMin,
+  })? _energyCtx(WorkoutUserProfile profile, double hrmax, double restingHr) {
+    final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
+    final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
+    final age = profile.age > 0 ? profile.age : 30.0;
+    final flexHr = activeGateHr(hrmax, restingHr);
+    if (flexHr == null) return null;
+    return (
+      coeffs: resolveCoeffs(profile.sex),
+      weightKg: weightKg,
+      age: age,
+      hrmax: hrmax,
+      flexHr: flexHr,
+      basalPerMin: mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex) /
+          1440.0,
+    );
+  }
+
+  /// One minute's bill. `source` is null when the minute has nothing measured
+  /// (no usable HR and no billable cadence). `active` is the HR surplus over
+  /// basal (≥ 0) and `walking` the cadence surplus; a minute is only ever one
+  /// of the two.
+  static ({MinuteEnergySource? source, double active, double walking}) _bill(
+    ({
+      CalorieCoeffs coeffs,
+      double weightKg,
+      double age,
+      double hrmax,
+      double flexHr,
+      double basalPerMin,
+    }) ctx,
+    double hr,
+    double? cadenceSpm,
+  ) {
+    // `hr < flexHr` is false for NaN, so an unfiltered non-finite minute
+    // would bill active and carry its NaN into the day total.
+    if (hr.isFinite && hr >= ctx.flexHr) {
+      final activePerMin = activeKcalPerS(
+              ctx.coeffs, hr, ctx.hrmax, ctx.weightKg, ctx.age) *
+          60.0;
+      final surplus = activePerMin - ctx.basalPerMin;
+      // HR billed the minute — cadence never doubles it.
+      return (
+        source: MinuteEnergySource.hr,
+        active: surplus > 0 ? surplus : 0.0,
+        walking: 0.0,
+      );
+    }
+    // Below flex (or no HR at all — measured gait stands on its own):
+    // a measured walking cadence prices the minute the HR gate refused.
+    final met = cadenceSpm == null ? null : metFromCadenceSpm(cadenceSpm);
+    if (met != null) {
+      return (
+        source: MinuteEnergySource.cadence,
+        active: 0.0,
+        walking: (met - 1.0) * ctx.basalPerMin,
+      );
+    }
+    return (
+      source: (hr.isFinite && hr > 0) ? MinuteEnergySource.rest : null,
+      active: 0.0,
+      walking: 0.0,
+    );
+  }
+
+  /// INTRADAY ENERGY: the computation [dailyEnergy] does, one record per
+  /// minute. Same inputs, same gate ([activeGateHr]), same billing — so the
+  /// series folds back to the daily figures EXACTLY:
+  ///
+  ///   `series.active`  == `dailyEnergy(...).active`   (`==`, not "close")
+  ///   `series.walking` == `dailyEnergy(...).walking`
+  ///   `series.basalKcalPerMin * dayMinutes` == `dailyEnergy(...).basal`
+  ///
+  /// [hrPerMin] is index-aligned per-minute mean HR (bpm). Unlike [dailyEnergy]
+  /// the caller should pass the series WITH its gaps in place (0 / NaN for a
+  /// minute with no HR) rather than compacted, so each record keeps its place
+  /// on the clock. [cadenceSpmPerMin] is aligned the same way (see
+  /// [dailyEnergy]). [epochMinutes], when given, is each entry's epoch minute
+  /// (`tsSec ~/ 60`) and becomes [MinuteEnergy.minute]; otherwise `minute` is
+  /// the index. Both must match [hrPerMin]'s length or this throws.
+  ///
+  /// ABSTENTION, per minute, never filled or interpolated:
+  ///   * HR usable (finite, > 0) → the minute is measured. At/above the gate
+  ///     it bills the Keytel surplus ([MinuteEnergySource.hr]); below it, it
+  ///     is measured rest — basal only, `active` 0 ([MinuteEnergySource.rest]).
+  ///   * HR unusable but a billable cadence ([metFromCadenceSpm]) → walking
+  ///     surplus ([MinuteEnergySource.cadence]), exactly as [dailyEnergy] does.
+  ///   * Otherwise the record abstains: `abstained` is
+  ///     [MinuteEnergyAbstain.noHr] and basal/active/walking/total are all null.
+  /// A minute's record depends on that minute's inputs alone.
+  ///
+  /// Returns null when the anchors cannot define a gate, like [dailyEnergy].
+  ///
+  /// The series covers exactly the minutes it is given. [dailyEnergy]'s basal
+  /// floor is pro-rated over `dayMinutes` (the whole covered day, sleep
+  /// included) and is not a per-minute sum; use
+  /// [MinuteEnergySeries.basalKcalPerMin] for that rate.
+  static MinuteEnergySeries? minuteEnergy(
+    List<double> hrPerMin, {
+    required WorkoutUserProfile profile,
+    required double hrmax,
+    required double restingHr,
+    List<double?>? cadenceSpmPerMin,
+    List<int>? epochMinutes,
+  }) {
+    if (cadenceSpmPerMin != null &&
+        cadenceSpmPerMin.length != hrPerMin.length) {
+      throw ArgumentError(
+          'cadenceSpmPerMin (${cadenceSpmPerMin.length}) must align with '
+          'hrPerMin (${hrPerMin.length}): one entry per minute');
+    }
+    if (epochMinutes != null && epochMinutes.length != hrPerMin.length) {
+      throw ArgumentError(
+          'epochMinutes (${epochMinutes.length}) must align with '
+          'hrPerMin (${hrPerMin.length}): one entry per minute');
+    }
+    final ctx = _energyCtx(profile, hrmax, restingHr);
+    if (ctx == null) return null;
+    final basal = ctx.basalPerMin;
+
+    final minutes = <MinuteEnergy>[];
+    // The same two accumulators, in the same order, as dailyEnergy.
+    var hrActive = 0.0;
+    var walking = 0.0;
+    var covered = 0;
+    for (var i = 0; i < hrPerMin.length; i++) {
+      final b = _bill(ctx, hrPerMin[i], cadenceSpmPerMin?[i]);
+      final minute = epochMinutes?[i] ?? i;
+      final src = b.source;
+      if (src == null) {
+        minutes.add(MinuteEnergy._abstained(minute));
+        continue;
+      }
+      covered++;
+      hrActive += b.active;
+      walking += b.walking;
+      final cad = src == MinuteEnergySource.cadence;
+      final active = cad ? b.walking : b.active;
+      minutes.add(MinuteEnergy._(
+        minute: minute,
+        source: src,
+        basal: basal,
+        active: active,
+        walking: cad ? b.walking : null,
+        total: basal + active,
+      ));
+    }
+    return MinuteEnergySeries._(
+      minutes: minutes,
+      basalKcalPerMin: basal,
+      active: hrActive + walking,
+      walking: walking,
+      coveredMinutes: covered,
+    );
+  }
+
+  /// Prepares fixed profile and anchor math once for independent minute bills.
+  /// Returns null under the same anchor gate as [dailyEnergy].
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
+  static MinuteEnergyPricer? minuteEnergyPricer({
+    required WorkoutUserProfile profile,
+    required double hrmax,
+    required double restingHr,
+  }) {
+    final ctx = _energyCtx(profile, hrmax, restingHr);
+    if (ctx == null) return null;
+    return MinuteEnergyPricer._(
+        ctx.basalPerMin, (hr, cadence) => _bill(ctx, hr, cadence));
+  }
+
+  /// Assembles previously priced minute bills without evaluating HR or cadence.
+  /// Intended for keyed incremental callers that retain the exact bills and
+  /// replace only changed minutes. Walking is already included in active.
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
+  static MinuteEnergySeries assembleMinuteEnergySeries(
+    List<
+            ({
+              int minute,
+              MinuteEnergySource? source,
+              double active,
+              double walking
+            })>
+        bills, {
+    required double basalKcalPerMin,
+  }) {
+    final minutes = <MinuteEnergy>[];
+    var hrActive = 0.0, walking = 0.0;
+    var covered = 0;
+    for (final bill in bills) {
+      final source = bill.source;
+      if (source == null) {
+        minutes.add(MinuteEnergy._abstained(bill.minute));
+        continue;
+      }
+      covered++;
+      final cadence = source == MinuteEnergySource.cadence;
+      if (cadence) {
+        walking += bill.walking;
+      } else {
+        hrActive += bill.active;
+      }
+      final active = cadence ? bill.walking : bill.active;
+      minutes.add(MinuteEnergy._(
+        minute: bill.minute,
+        source: source,
+        basal: basalKcalPerMin,
+        active: active,
+        walking: cadence ? bill.walking : null,
+        total: basalKcalPerMin + active,
+      ));
+    }
+    return MinuteEnergySeries._(
+      minutes: minutes,
+      basalKcalPerMin: basalKcalPerMin,
+      active: hrActive + walking,
+      walking: walking,
+      coveredMinutes: covered,
+    );
+  }
+
+  /// Sums [minutes] into hourly buckets, ascending, for hours that have at
+  /// least one record. Only COVERED minutes are summed and nothing is scaled up
+  /// for the rest: an hour with 30 covered minutes reports 30 minutes of
+  /// energy and `coverage` 0.5, and an hour with none reports null sums, not
+  /// zero. The bucket is `floor((minute + minuteOffset) / 60)`: with index
+  /// minutes that is "hours since the series start"; with epoch minutes pass
+  /// the local UTC offset in minutes (e.g. 330) to bucket by local hour.
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
+  static List<HourlyEnergy> hourlyRollup(
+    List<MinuteEnergy> minutes, {
+    int minuteOffset = 0,
+  }) {
+    final byHour = <int, List<MinuteEnergy>>{};
+    for (final m in minutes) {
+      (byHour[(m.minute + minuteOffset) ~/ 60] ??= []).add(m);
+    }
+    final hours = byHour.keys.toList()..sort();
+    return [
+      for (final h in hours) HourlyEnergy._from(h, byHour[h]!),
+    ];
   }
 
   /// Estimate (kcal, kJ) for a workout bout. Each sample is weighted by the
@@ -442,6 +692,162 @@ class Calories {
       kcal: totalKcal,
       kj: totalKcal * 4.184,
       usedDefaultAnchors: usedDefaultAnchors,
+    );
+  }
+}
+
+/// Reusable fixed-profile calorie pricing, with no minute-record allocation.
+class MinuteEnergyPricer {
+  final double basalKcalPerMin;
+  final ({MinuteEnergySource? source, double active, double walking}) Function(
+      double, double?) _price;
+  MinuteEnergyPricer._(this.basalKcalPerMin, this._price);
+
+  ({MinuteEnergySource? source, double active, double walking}) price(
+          double hr, double? cadenceSpm) =>
+      _price(hr, cadenceSpm);
+}
+
+/// Why a minute carries no energy.
+enum MinuteEnergyAbstain {
+  /// No usable HR (0, negative, NaN, infinite) and no billable cadence.
+  noHr,
+}
+
+/// What a non-abstained minute was billed from.
+enum MinuteEnergySource {
+  /// HR at/above the gate: Keytel surplus over basal.
+  hr,
+
+  /// HR unusable or below the gate, but a measured walking cadence at/above
+  /// the CADENCE-Adults floor: walking surplus.
+  cadence,
+
+  /// Measured HR below the gate: resting, basal only.
+  rest,
+}
+
+/// One minute of [Calories.minuteEnergy]. kcal for THAT minute. Either
+/// [abstained] is set and every number is null, or [source] is set and
+/// basal/active/total are non-null.
+class MinuteEnergy {
+  /// Index into the input, or the epoch minute when the caller supplied them.
+  final int minute;
+  final MinuteEnergySource? source;
+  final MinuteEnergyAbstain? abstained;
+
+  /// Mifflin–St Jeor BMR for one minute.
+  final double? basal;
+
+  /// Surplus over basal: the Keytel HR surplus, or the walking surplus for a
+  /// [MinuteEnergySource.cadence] minute. 0 for [MinuteEnergySource.rest].
+  final double? active;
+
+  /// The cadence surplus, already inside [active]. Null unless
+  /// [source] is [MinuteEnergySource.cadence].
+  final double? walking;
+
+  /// `basal + active`.
+  final double? total;
+
+  const MinuteEnergy._({
+    required this.minute,
+    required MinuteEnergySource this.source,
+    required double this.basal,
+    required double this.active,
+    required this.walking,
+    required double this.total,
+  }) : abstained = null;
+
+  const MinuteEnergy._abstained(this.minute)
+      : source = null,
+        abstained = MinuteEnergyAbstain.noHr,
+        basal = null,
+        active = null,
+        walking = null,
+        total = null;
+}
+
+/// Result of [Calories.minuteEnergy].
+class MinuteEnergySeries {
+  /// One record per input minute, in input order.
+  final List<MinuteEnergy> minutes;
+
+  /// Basal kcal per minute (BMR ÷ 1440). `dailyEnergy(...).basal` is this ×
+  /// `dayMinutes`.
+  final double basalKcalPerMin;
+
+  /// Σ active over the series, folded exactly as [Calories.dailyEnergy] folds
+  /// it: `==` its `active`, walking surplus included.
+  final double active;
+
+  /// Σ walking surplus; `==` `dailyEnergy(...).walking`.
+  final double walking;
+
+  /// Minutes that did not abstain.
+  final int coveredMinutes;
+
+  const MinuteEnergySeries._({
+    required this.minutes,
+    required this.basalKcalPerMin,
+    required this.active,
+    required this.walking,
+    required this.coveredMinutes,
+  });
+
+  int get abstainedMinutes => minutes.length - coveredMinutes;
+}
+
+/// One hour of [Calories.hourlyRollup]: sums over the hour's covered minutes.
+class HourlyEnergy {
+  /// `floor((minute + minuteOffset) / 60)`.
+  final int hour;
+
+  /// Covered minutes in this hour (0–60).
+  final int coveredMinutes;
+
+  /// `coveredMinutes / 60`.
+  double get coverage => coveredMinutes / 60.0;
+
+  /// Null when the hour has no covered minute.
+  final double? basal;
+  final double? active;
+  final double? total;
+
+  /// Null when no minute of the hour was billed from cadence.
+  final double? walking;
+
+  const HourlyEnergy._({
+    required this.hour,
+    required this.coveredMinutes,
+    required this.basal,
+    required this.active,
+    required this.walking,
+    required this.total,
+  });
+
+  factory HourlyEnergy._from(int hour, List<MinuteEnergy> ms) {
+    var covered = 0;
+    var basal = 0.0, active = 0.0, total = 0.0, walking = 0.0;
+    var anyWalking = false;
+    for (final m in ms) {
+      if (m.abstained != null) continue;
+      covered++;
+      basal += m.basal!;
+      active += m.active!;
+      total += m.total!;
+      if (m.walking != null) {
+        walking += m.walking!;
+        anyWalking = true;
+      }
+    }
+    return HourlyEnergy._(
+      hour: hour,
+      coveredMinutes: covered,
+      basal: covered == 0 ? null : basal,
+      active: covered == 0 ? null : active,
+      total: covered == 0 ? null : total,
+      walking: anyWalking ? walking : null,
     );
   }
 }
