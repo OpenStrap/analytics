@@ -8,7 +8,7 @@ export 'src/aggregate/primitives.dart';
 export 'src/onehz/clinical/hrv_time_aggregator.dart' hide hrvTimeOneSlice;
 
 
-
+export 'src/onehz/sleep/hypnogram_aggregator.dart';
 
 export 'src/onehz/clinical/prsa_aggregator.dart';
 export 'src/onehz/foundations/rr_sandwich.dart';

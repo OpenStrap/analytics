@@ -30,7 +30,7 @@ export 'segment.dart';
 export 'hr_fallback.dart';
 export 'advanced_stager.dart';
 export 'band_offset.dart';
-
+export 'hypnogram.dart';
 export 'sri.dart';
 export 'accounting.dart';
 // stager.dart provides StagerResult + the shared consolidation post-step. Its
@@ -44,10 +44,10 @@ export 'cardio_stager.dart'
         cleanBeatsInWindowForTest,
         cleanBeatDiffsInWindowForTest,
         windowRmssdRkForTest;
-
-
-
-
+export 'stage_ranges.dart';
+export 'cardio_row_cache.dart';
+export 'epoch_rows.dart';
+export 'causal_stager.dart';
 export 'circadian_np.dart';
 export 'cycles.dart';
 export 'night_hrv_shape.dart';

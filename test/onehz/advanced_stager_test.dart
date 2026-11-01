@@ -9,6 +9,8 @@ import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+import 'support/pre_bump_stager.dart';
+
 void main() {
   // Build a synthetic capture at 1 Hz: [dayH] active day, [nightH] still night
   // with low sleeping HR + physiological RR, then [tailH] active.
@@ -312,6 +314,193 @@ void main() {
       final m = AdvancedSleepStager.mainSleep(d.grav, d.hr, rr: d.rr);
       expect(m.present, isTrue);
       expect(m.note, contains('cardio'));
+    });
+  });
+
+  group('grid option 2: staging anchors its epochs at the session start', () {
+    // Owner decision 2026-10-23: the gap-anchored grid leaves the bump. The
+    // default stager's labels equal the pre-bump stager's (frozen as an oracle
+    // in support/pre_bump_stager.dart, logic of 83fc308), whatever run the
+    // session starts in.
+    test('detected sessions: labels equal the pre-bump stager exactly', () {
+      final d = build(2, 7, 1);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr);
+      expect(sessions, isNotEmpty);
+      for (final s in sessions) {
+        final want = preBumpStageSessionCardio(s.start, s.end, d.grav, d.hr, d.rr);
+        expect(showSegments(s.stages), showSegments(want),
+            reason: 'session ${s.start}..${s.end}');
+      }
+    });
+
+    test('a session that starts mid-run: every boundary is on ITS grid '
+        '(start + k * 30 s), not the run\'s', () {
+      final d = build(2, 7, 1);
+      for (final (from, to) in [(777, 9000), (1234, 20000), (4321, 25000)]) {
+        final start = d.nightStart + from, end = d.nightStart + to;
+        final got = AdvancedSleepStager.stageWindow(start, end, d.grav, d.hr,
+            rr: d.rr);
+        var checked = 0;
+        for (var i = 1; i < got.stages.length; i++) {
+          final g = got.stages[i];
+          if (g.stage == 'unobserved' || got.stages[i - 1].stage == 'unobserved') {
+            continue;
+          }
+          expect((g.start - start) % 30, 0,
+              reason: 'window +$from..+$to, boundary ${g.start}');
+          checked++;
+        }
+        expect(checked, greaterThan(5), reason: 'window +$from..+$to');
+      }
+    });
+
+    test('a session that starts mid-run: labels equal the pre-bump stager '
+        'exactly (epochs from the start, features clipped at the session)', () {
+      // Offsets of 0 and 30 s share the run's phase but not its context: the
+      // pre-bump stager reads nothing outside [start, end).
+      final d = build(2, 7, 1);
+      for (final (from, to) in [(30, 9000), (777, 9000), (1234, 20000), (4321, 25000)]) {
+        final start = d.nightStart + from, end = d.nightStart + to;
+        final got = AdvancedSleepStager.stageWindow(start, end, d.grav, d.hr,
+            rr: d.rr);
+        final want = preBumpStageSessionCardio(start, end, d.grav, d.hr, d.rr);
+        expect(showSegments(got.stages), showSegments(want),
+            reason: 'window +$from..+$to');
+      }
+    });
+
+    test('after a dropout longer than the carry the next sample re-anchors '
+        '(pre-bump); before it the grid is the session start\'s', () {
+      // Two still blocks, 110 s apart (> the 61 s usable-run gap; the second
+      // starts at 8110, 8110 % 30 = 10).
+      final g = stillBlocks([(5000, 3000), (8110, 3000)]);
+      final rr = <RrTs>[
+        for (var t = 5000; t < 11110; t++)
+          if (t < 8000 || t >= 8110) RrTs(t, 1150.0 + (t.isEven ? 20 : -20))
+      ];
+      for (final start in [5000, 5017, 5400]) {
+        final got = AdvancedSleepStager.stageWindow(start, 11110, g.grav, g.hr,
+            rr: rr);
+        var before = 0, after = 0;
+        for (var i = 1; i < got.stages.length; i++) {
+          final a = got.stages[i - 1], b = got.stages[i];
+          if (a.stage == 'unobserved' || b.stage == 'unobserved') continue;
+          if (b.start < 8000) {
+            expect((b.start - start) % 30, 0, reason: 'start $start, run 1: ${b.start}');
+            before++;
+          } else {
+            expect((b.start - 8110) % 30, 0, reason: 'start $start, run 2: ${b.start}');
+            after++;
+          }
+        }
+        expect(before, greaterThan(0), reason: 'start $start');
+        expect(after, greaterThan(0), reason: 'start $start');
+      }
+    });
+  });
+
+  group('pre-bump parity edge cases', () {
+    void parity(int start, int end, List<GravTs> grav, List<HrTs> hr,
+        [List<RrTs> rr = const <RrTs>[]]) {
+      final got = AdvancedSleepStager.stageWindow(start, end, grav, hr, rr: rr);
+      final want = preBumpStageSessionCardio(start, end, grav, hr, rr);
+      expect(showSegments(got.stages), showSegments(want));
+    }
+
+    List<GravTs> flatGrav(int from, int to) =>
+        [for (var t = from; t < to; t++) GravTs(t, 0, 0, 1)];
+
+    test('sparse HR (0, 30, 60 s) over [0,90): light, as before', () {
+      parity(0, 90, flatGrav(0, 90), [for (final t in [0, 30, 60]) HrTs(t, 60)]);
+    });
+
+    test('sparse HR (seconds 0..44 only) over [0,119)', () {
+      parity(0, 119, flatGrav(0, 119), [for (var t = 0; t < 45; t++) HrTs(t, 60)]);
+    });
+
+    test('gravity context across an accel gap [500,580)', () {
+      const bump = {
+        19: 1.03, 20: 1.02, 22: 1.02, 23: 1.02, 27: 1.03, 29: 1.02,
+        30: 1.02, 31: 1.01, 32: 1.02, 36: 1.02, 38: 1.03, 39: 1.03,
+      };
+      final grav = [
+        for (var t = 0; t < 1200; t++)
+          if (t < 500 || t >= 580) GravTs(t, 0, 0, bump[t ~/ 30] ?? 1.0)
+      ];
+      parity(0, 1200, grav, [for (var t = 0; t < 1200; t++) HrTs(t, 60)]);
+    });
+
+    for (final (name, bad) in [('NaN', double.nan), ('infinite', double.infinity)]) {
+      test('non-finite RR ($name) does not throw; labels equal the oracle', () {
+        parity(0, 90, flatGrav(0, 90), [for (var t = 0; t < 90; t++) HrTs(t, 60)],
+            [RrTs(10, bad)]);
+      });
+    }
+
+    test('duplicate HR timestamps (60 then 0): last value wins as before', () {
+      parity(0, 90, flatGrav(0, 90), [
+        for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]
+      ]);
+    });
+
+    test('a pre-81b9b4b (EPOCH2) cache entry is never served', () {
+      // Keys and values as the old extractor stored them for gravity (0,0,1)
+      // each second and HR 60 then 0 at each second over [0,90): HR 60 where
+      // the oracle's last-wins reading has none (0-90:unobserved).
+      final stale = CardioRowCache.fromJson({
+        'version': 2,
+        'rows': [
+          for (final (s, fp) in [
+            (0, '-518569928497453641'),
+            (30, '6424718457559164343'),
+            (60, '6000305869726000567'),
+          ])
+            {
+              'startSec': s,
+              'epochSec': 30,
+              'fingerprint': fp,
+              'motion': 0.0,
+              'hr': 60.0,
+              'hrSd': 0.0,
+              'rmssd': 'NaN',
+              'lfhf': 'NaN',
+              'rk': 'NaN',
+              'sdnn': 'NaN',
+            }
+        ],
+      });
+      final grav = flatGrav(0, 90);
+      final hr = [for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]];
+      final got = AdvancedSleepStager.stageWindow(0, 90, grav, hr,
+          rowCache: stale);
+      expect(stale.hits, 0, reason: 'old-identity entries must not hit');
+      expect(showSegments(got.stages),
+          showSegments(preBumpStageSessionCardio(0, 90, grav, hr, const [])));
+    });
+
+    test('gravity in reverse time order: labels equal the oracle', () {
+      parity(0, 90, flatGrav(0, 90).reversed.toList(),
+          [for (var t = 0; t < 90; t++) HrTs(t, 60)]);
+    });
+
+    test('HR in reverse time order: labels equal the oracle', () {
+      parity(0, 90, flatGrav(0, 90),
+          [for (var t = 89; t >= 0; t--) HrTs(t, 60)]);
+    });
+
+    test('unsorted HR with duplicate seconds keeps list-order last-wins', () {
+      // Seconds descending, but within a second the records stay (0, 60): the
+      // oracle keeps 60 (the later record), so the night is stageable.
+      parity(0, 90, flatGrav(0, 90), [
+        for (var t = 89; t >= 0; t--) ...[HrTs(t, 0), HrTs(t, 60)]
+      ]);
+    });
+
+    test('RR in reverse time order does not throw (Sol r3)', () {
+      // [0,30): the oracle abstains even with assertions on (longer windows
+      // assert sorted RR there).
+      parity(0, 30, flatGrav(0, 30), [for (var t = 0; t < 30; t++) HrTs(t, 60)],
+          [RrTs(1, 900), RrTs(0, 900)]);
     });
   });
 
