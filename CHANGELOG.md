@@ -10,3 +10,9 @@ The 32-beat cap is an internal ESTIMATE rule with low confidence, not a publishe
 
 Method: Lipponen & Tarvainen 2019; Peltola 2012. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Reduce spectral error on epoch timestamps
+
+Evaluate trigonometric arguments relative to the first sample. The mathematical spectrum is time-shift invariant; floating-point band powers and threshold decisions can change for all Lomb-Scargle callers.
+
+Method: Lomb 1976; Scargle 1982; Press & Rybicki 1989. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

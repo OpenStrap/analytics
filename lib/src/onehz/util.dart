@@ -345,6 +345,7 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   }
   final span = tMax - tMin;
   if (span <= 0) return null;
+  final t0 = t[0];
   // One-sided periodogram → density: 2·Δt, with Δt the MEAN sample interval.
   final psdScale = 2.0 * span / (n - 1);
 
@@ -358,14 +359,14 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
     // τ: phase reference for time-shift invariance.
     var sin2 = 0.0, cos2 = 0.0;
     for (final ti in t) {
-      sin2 += math.sin(2 * w * ti);
-      cos2 += math.cos(2 * w * ti);
+      sin2 += math.sin(2 * w * (ti - t0));
+      cos2 += math.cos(2 * w * (ti - t0));
     }
     final tau = math.atan2(sin2, cos2) / (2 * w);
 
     var cNum = 0.0, cDen = 0.0, sNum = 0.0, sDen = 0.0;
     for (var i = 0; i < n; i++) {
-      final arg = w * (t[i] - tau);
+      final arg = w * ((t[i] - t0) - tau);
       final c = math.cos(arg);
       final s = math.sin(arg);
       cNum += yc[i] * c;

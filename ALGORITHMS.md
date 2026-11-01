@@ -164,3 +164,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Leave long RR artifact runs as gaps | Lipponen & Tarvainen 2019; Peltola 2012; The 32-beat cap is an internal ESTIMATE rule with low confidence, not a published threshold. Longer runs split the series; each side is corrected independently. The synthetic 33-beat case keeps 200 NN beats and drops 33. |
+
+<!-- Split #99: spectral -->
+
+| Batch change | Method and limits |
+|---|---|
+| Reduce spectral error on epoch timestamps | Lomb 1976; Scargle 1982; Press & Rybicki 1989; Evaluate trigonometric arguments relative to the first sample. The mathematical spectrum is time-shift invariant; floating-point band powers and threshold decisions can change for all Lomb-Scargle callers. |
