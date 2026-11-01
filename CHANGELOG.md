@@ -52,3 +52,9 @@ IS and IV may move in their last digits. Batch circular profile sums and first-w
 
 Method: Witting 1990; van Someren 1999; Welford 1962 centered variance. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Compute HRV moments without subtracting a large mean
+
+Use origin-shifted moments for NN levels and five-minute bins, and centered lag co-moments for ACF. Last digits and decisions within rounding of jitter gates can change. Existing respiratory-line exemptions, coverage gates and absent-value rules remain.
+
+Method: Task Force 1996; Welford 1962 centered sums and products. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

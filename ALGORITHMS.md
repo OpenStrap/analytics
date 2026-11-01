@@ -206,3 +206,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Compute circadian variance with centered moments | Witting 1990; van Someren 1999; Welford 1962 centered variance; IS and IV may move in their last digits. Batch circular profile sums and first-winner tie selection are unchanged on the rebased head. Chunked merges can reorder profile sums and move near-tie L5/M10 start epochs; that stream-specific behavior belongs with the aggregators. |
+
+<!-- Split #99: hrv -->
+
+| Batch change | Method and limits |
+|---|---|
+| Compute HRV moments without subtracting a large mean | Task Force 1996; Welford 1962 centered sums and products; Use origin-shifted moments for NN levels and five-minute bins, and centered lag co-moments for ACF. Last digits and decisions within rounding of jitter gates can change. Existing respiratory-line exemptions, coverage gates and absent-value rules remain. |
