@@ -68,7 +68,14 @@ There is **one** sleep source (`segmentSleep`) and **one** headline readiness
 
 ## Tests
 
+On Linux, `nix develop` supplies the pinned Flutter 3.41.6 / Dart 3.11.4
+toolchain used by Edge, plus Git, Clang, CMake, Ninja, and pkg-config.
+The interactive shell enters an FHS environment for native build tools.
+For a command without an interactive shell, use `nix develop -c dart test`;
+`nix develop -c analytics-fhs <command>` also supplies the FHS environment.
+
 ```bash
+nix develop
 dart pub get
 dart analyze
 dart test

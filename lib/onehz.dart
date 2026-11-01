@@ -18,6 +18,7 @@ export 'src/onehz/device.dart';
 
 // Layer 0: foundations.
 export 'src/onehz/foundations/rr_correction.dart';
+
 export 'src/onehz/foundations/baseline.dart';
 export 'src/onehz/foundations/ewma_baselines.dart';
 export 'src/onehz/foundations/fusion.dart';
@@ -33,6 +34,8 @@ export 'src/onehz/clinical/cosinor.dart';
 export 'src/onehz/clinical/load_trimp.dart';
 export 'src/onehz/clinical/stress_si.dart';
 export 'src/onehz/clinical/irregular_rhythm.dart';
+
+
 export 'src/onehz/clinical/cardiac_coherence.dart';
 export 'src/onehz/clinical/vo2max.dart';
 
@@ -43,3 +46,10 @@ export 'src/onehz/motion/motion.dart';
 export 'src/onehz/workout/workout.dart';
 export 'src/onehz/wellness/wellness.dart';
 export 'src/onehz/human/human.dart';
+
+
+
+// Calculation-group registry (design 06): the groups this package declares.
+
+
+export 'src/onehz/incremental_core.dart';
