@@ -632,6 +632,15 @@ Metric<HrvTime> hrvTime(
     );
   }
 
+  if (nnTimesMs != null &&
+      nnTimesMs.length == nnMs.length &&
+      nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
   // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
@@ -816,6 +825,13 @@ Metric<double> nocturnalRmssd(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few NN intervals for windowed nocturnal RMSSD',
+    );
+  }
+  if (nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
     );
   }
   final t0 = nnTimesMs.first;
@@ -1042,6 +1058,13 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     );
   }
 
+  if (rrTsMs.any((t) => !t.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   final buckets = <int, List<double>>{};
   final bucketsTs = <int, List<double>>{};
   final inRr = <double>[];

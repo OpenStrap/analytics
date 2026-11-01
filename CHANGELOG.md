@@ -16,3 +16,9 @@ Evaluate trigonometric arguments relative to the first sample. The mathematical 
 
 Method: Lomb 1976; Scargle 1982; Press & Rybicki 1989. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Abstain when a beat has no finite time
+
+HRV frequency/time, nocturnal and session RMSSD, RSA and CVHR return absent metrics for non-finite beat times. This prevents endless segment walks and invalid integer conversions. Finite-input formulas are unchanged.
+
+Method: Task Force 1996 HRV; Welch 1967 spectra; input-validity guard is an implementation rule. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

@@ -84,6 +84,13 @@ Metric<HrvFreq> hrvFreq(
 
   // Times in seconds for Hz output; tachogram value = NN (ms).
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<HrvFreq>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<HrvFreq>.absent(

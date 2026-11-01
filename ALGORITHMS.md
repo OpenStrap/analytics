@@ -170,3 +170,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Reduce spectral error on epoch timestamps | Lomb 1976; Scargle 1982; Press & Rybicki 1989; Evaluate trigonometric arguments relative to the first sample. The mathematical spectrum is time-shift invariant; floating-point band powers and threshold decisions can change for all Lomb-Scargle callers. |
+
+<!-- Split #99: nonfinite -->
+
+| Batch change | Method and limits |
+|---|---|
+| Abstain when a beat has no finite time | Task Force 1996 HRV; Welch 1967 spectra; input-validity guard is an implementation rule; HRV frequency/time, nocturnal and session RMSSD, RSA and CVHR return absent metrics for non-finite beat times. This prevents endless segment walks and invalid integer conversions. Finite-input formulas are unchanged. |
