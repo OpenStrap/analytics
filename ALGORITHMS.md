@@ -182,3 +182,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Refuse unidentifiable cosinor fits | Nelson et al. 1979, Methods for cosinor-rhythmometry; Welford 1962 centered co-moments; Use centered least squares and a relative determinant gate of 1e-12 of the diagonal product. This is a numerical policy. Nearly collinear phase columns abstain, and ordinary fit parameters can move in their last digits. Upstream zero-amplitude significance gating is retained. |
+
+<!-- Split #99: trimp -->
+
+| Batch change | Method and limits |
+|---|---|
+| Retain small TRIMP contributions in the total | Morton, Fitz-Clarke & Banister 1990; Neumaier 1974 compensated summation; Compensate the per-minute sum. The reserve and sex-specific weighting are unchanged; the synthetic total moves in its last digits. |

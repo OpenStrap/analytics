@@ -28,3 +28,9 @@ Use centered least squares and a relative determinant gate of 1e-12 of the diago
 
 Method: Nelson et al. 1979, Methods for cosinor-rhythmometry; Welford 1962 centered co-moments. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Retain small TRIMP contributions in the total
+
+Compensate the per-minute sum. The reserve and sex-specific weighting are unchanged; the synthetic total moves in its last digits.
+
+Method: Morton, Fitz-Clarke & Banister 1990; Neumaier 1974 compensated summation. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

@@ -63,7 +63,8 @@ Metric<double> banisterTrimp(
     );
   }
   final reserve = maxHr - restingHr;
-  var trimp = 0.0;
+  // Neumaier (1974), Rundungsfehleranalyse einiger Verfahren zur Summation.
+  var trimp = 0.0, correction = 0.0;
   for (final hr in hrPerMin) {
     if (!hr.isFinite || hr <= 0) continue; // off-skin + non-finite guard
     var hrr = (hr - restingHr) / reserve;
@@ -71,10 +72,16 @@ Metric<double> banisterTrimp(
     if (hrr > 1) hrr = 1;
     // ONE Banister implementation for the whole package: the sex-specific
     // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
-    trimp += 1.0 * hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
+    final value = hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
+    final next = trimp + value;
+    if (next.isFinite) {
+      correction += trimp.abs() >= value.abs()
+          ? (trimp - next) + value : (value - next) + trimp;
+    }
+    trimp = next;
   }
   return Metric<double>(
-    value: trimp,
+    value: trimp + correction,
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,
