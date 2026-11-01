@@ -15,8 +15,10 @@
 // makes it behaviour — see that constant for the measurement and the threshold.
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
 import '../util.dart';
+import 'hrv_time_aggregator.dart';
 import 'rmssd_gate.dart';
 
 /// Lag-1 ACF floor for the NN successive-difference series, below which RMSSD
@@ -422,6 +424,8 @@ Metric<HrvTime> hrvTime(
     );
   }
 
+  // A non-finite beat time has no place on the clock: the 5-min segmenting
+  // threw on it. Same refusal as hrvFreq / rsaRespRate.
   if (nnTimesMs != null &&
       nnTimesMs.length == nnMs.length &&
       nnTimesMs.any((t) => !t.isFinite)) {
@@ -431,95 +435,40 @@ Metric<HrvTime> hrvTime(
       note: 'non-finite beat time',
     );
   }
+
+  // The values come from the same numeric core as [hrvTimeAggregator], run
+  // in one slice; this function adds only the envelope (confidence, note).
+  //
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
   // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
   // can sit either side of a seconds-long hole; differencing straight down the
   // list manufactured one large difference per dropped run. Same `keep`-mask
   // treatment irregular_rhythm.dart already applies. A pair is contiguous iff
-  // the elapsed time between the two beat times is the interval itself.
+  // the elapsed time between the two beat times is the interval itself. The
+  // differences are kept as contiguous RUNS (a seam ends a run) so the same
+  // pass feeds the lag-1 ACF without ever forming a pair across a hole.
   //
-  // The differences are kept as contiguous RUNS (a seam ends a run) so the same
-  // pass feeds [nnDiffAcf1] without ever forming a lag-1 pair across a hole.
-  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
-  final runs = <List<double>>[];
-  var run = <double>[];
-  for (var i = 1; i < nnMs.length; i++) {
-    if (gapAware && nnTimesMs[i] - nnTimesMs[i - 1] > nnMs[i] + 0.5) {
-      if (run.isNotEmpty) {
-        runs.add(run);
-        run = <double>[];
-      }
-      continue;
-    }
-    run.add(nnMs[i] - nnMs[i - 1]);
-  }
-  if (run.isNotEmpty) runs.add(run);
-
-  var ssd = 0.0;
-  var nn50 = 0;
-  var pairs = 0;
-  for (final r in runs) {
-    for (final d in r) {
-      ssd += d * d;
-      if (d.abs() > 50) nn50++;
-      pairs++;
-    }
-  }
   // RMSSD and pNN50 are the two outputs made of successive differences, so they
   // are the two the jitter floor refuses. SDNN/SDANN are made of the levels and
   // are far less contaminated (jitter share 1–27 % against RMSSD's 11–100 % on
   // the audit corpus) — they keep publishing, which is what the header has
-  // always advised.
-  // Welford (1962) centered sums/products, Task Force (1996) HRV.
-  // Accumulate difference moments and lagged co-moments in sample order.
-  var dn = 0, ln = 0;
-  var dm = 0.0, d2 = 0.0, ma = 0.0, mb = 0.0, co = 0.0;
-  for (final r in runs) {
-    for (var i = 0; i < r.length; i++) {
-      final d = r[i];
-      dn++;
-      final delta = d - dm;
-      dm += delta / dn;
-      d2 += delta * (d - dm);
-      if (i > 0) {
-        ln++;
-        final da = r[i - 1] - ma;
-        final db = d - mb;
-        ma += da / ln;
-        mb += db / ln;
-        co += da * (d - mb);
-      }
-    }
-  }
-  final double? acf1 = dn >= 30 && d2 > 0
-      ? (co + ln * (ma - dm) * (mb - dm)) / d2 : null;
-  final jittery = _jitterRefused(acf1, runs);
+  // always advised. Refused: a long record may still show a breathing line
+  // steady in Hz; then RMSSD alone comes from those 5-min windows.
+  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
+  final nn = Float64List.fromList(nnMs);
+  final times = gapAware ? Float64List.fromList(nnTimesMs) : Float64List(nn.length);
+  final v = hrvTimeOneSlice(Beats(nn, times),
+      originMs: gapAware ? times[0] : null, gapAware: gapAware);
+  final acf1 = v.diffAcf1;
+  // pNN50 is null with a real ACF1 (>= 30 pairs) only when the floor refused.
+  final jittery = acf1 != null && v.pnn50 == null;
   // More beat-time than elapsed: the stream itself is wrong, so neither the
   // differences nor any breathing line in them describe one heart.
   final overCounted = coverage?.overCounted == true;
-  final usable = pairs > 0 && !jittery && !overCounted;
-  var rmssd = usable ? math.sqrt(ssd / pairs) : null;
-  final pnn50 = usable ? 100.0 * nn50 / pairs : null;
-  // Refused: a long record may still show a breathing line steady in Hz
-  // ([_steadyBreathingWindows]); then RMSSD alone comes from those 5-min windows.
-  if (jittery && gapAware && !overCounted) {
-    rmssd = _breathingRmssd(nnMs, nnTimesMs);
-  }
+  final rmssd = overCounted ? null : v.rmssd;
+  final pnn50 = overCounted ? null : v.pnn50;
   final byBreathing = jittery && rmssd != null;
-  final sdnn = _centeredMoments(nnMs).sd;
-
-  double? sdann, sdnnIndex;
-  if (gapAware) {
-    final seg = _fiveMinSegments(nnMs, nnTimesMs);
-    if (seg.length >= 2) {
-      final moments = [for (final s in seg) _centeredMoments(s)];
-      final means = [for (final m in moments) m.mean!];
-      sdann = _centeredMoments(means).sd;
-      final sds = [for (final m in moments) m.sd].whereType<double>().toList();
-      sdnnIndex = sds.isEmpty ? null : mean(sds);
-    }
-  }
 
   // Confidence scales with beat count (ultra-short reads are less reliable),
   // with the artifact fraction we were handed, and with the measured jitter
@@ -538,9 +487,9 @@ Metric<HrvTime> hrvTime(
   return Metric<HrvTime>(
     value: HrvTime(
       rmssd: rmssd,
-      sdnn: sdnn,
-      sdann: sdann,
-      sdnnIndex: sdnnIndex,
+      sdnn: v.sdnn,
+      sdann: v.sdann,
+      sdnnIndex: v.sdnnIndex,
       pnn50: pnn50,
       nBeats: nnMs.length,
       diffAcf1: acf1,
@@ -552,46 +501,12 @@ Metric<HrvTime> hrvTime(
         ? '${_overcountNote(coverage!)}. SDNN/SDANN survive it and are the '
             'lead here. PRV not ECG-HRV.'
         : jittery
-        ? '${_jitterNote(acf1!)}. SDNN/SDANN survive it and are the lead here. '
+        ? '${_jitterNote(acf1)}. SDNN/SDANN survive it and are the lead here. '
             '${byBreathing ? 'RMSSD only from 5-min windows on a breathing '
                 'line steady in Hz, at floor confidence. ' : ''}PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
             '— lead with SDNN/SDANN',
   );
-}
-
-/// RMSSD pooled over the 5-min windows of [nn] that sit on a breathing line
-/// steady in Hz, or null. Same seam rule as [hrvTime].
-double? _breathingRmssd(List<double> nn, List<double> times) {
-  final wins = <int, List<List<double>>>{};
-  final rrSum = <int, double>{}, rrN = <int, int>{};
-  var prevWin = -1;
-  for (var i = 0; i < nn.length; i++) {
-    final w = ((times[i] - times.first) / 300000.0).floor();
-    rrSum[w] = (rrSum[w] ?? 0) + nn[i];
-    rrN[w] = (rrN[w] ?? 0) + 1;
-    final runs = wins[w] ??= <List<double>>[];
-    if (i > 0 && w == prevWin && times[i] - times[i - 1] <= nn[i] + 0.5) {
-      runs.last.add(nn[i] - nn[i - 1]);
-    } else {
-      runs.add(<double>[]);
-    }
-    prevWin = w;
-  }
-  final keys = wins.keys.toList()..sort();
-  final idx = _steadyBreathingWindows(
-      [for (final k in keys) wins[k]!], [for (final k in keys) rrSum[k]! / rrN[k]!]);
-  if (idx == null) return null;
-  var ss = 0.0, n = 0;
-  for (final i in idx) {
-    for (final r in wins[keys[i]]!) {
-      for (final d in r) {
-        ss += d * d;
-        n++;
-      }
-    }
-  }
-  return n == 0 ? null : math.sqrt(ss / n);
 }
 
 /// Robust NOCTURNAL RMSSD (ms).
@@ -713,29 +628,7 @@ Metric<double> nocturnalRmssd(
     meanRr.add(mean([for (final i in seg) nnMs[i]])!);
     rmssds.add(math.sqrt(ssd / nd));
   }
-  // Welford (1962) centered sums/products, Task Force (1996) HRV.
-  // Accumulate difference moments and lagged co-moments in sample order.
-  var dn = 0, ln = 0;
-  var dm = 0.0, d2 = 0.0, ma = 0.0, mb = 0.0, co = 0.0;
-  for (final r in runs) {
-    for (var i = 0; i < r.length; i++) {
-      final d = r[i];
-      dn++;
-      final delta = d - dm;
-      dm += delta / dn;
-      d2 += delta * (d - dm);
-      if (i > 0) {
-        ln++;
-        final da = r[i - 1] - ma;
-        final db = d - mb;
-        ma += da / ln;
-        mb += db / ln;
-        co += da * (d - mb);
-      }
-    }
-  }
-  final double? acf1 = dn >= 30 && d2 > 0
-      ? (co + ln * (ma - dm) * (mb - dm)) / d2 : null;
+  final acf1 = nnDiffAcf1(runs);
   final refused = _jitterRefused(acf1, runs);
   if (rmssds.isEmpty && !refused) {
     return const Metric<double>.absent(
@@ -900,6 +793,7 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
       note: 'non-finite beat time',
     );
   }
+
   final buckets = <int, List<double>>{};
   final bucketsTs = <int, List<double>>{};
   final inRr = <double>[];
@@ -1001,29 +895,7 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
   // THE HEADLINE nightly RMSSD (→ ln_rmssd → readiness). When the differences
   // are noise, the honest output is no headline, not a plausible one — the
   // readiness composite already treats a null HRV driver as absent.
-  // Welford (1962) centered sums/products, Task Force (1996) HRV.
-  // Accumulate difference moments and lagged co-moments in sample order.
-  var dn = 0, ln = 0;
-  var dm = 0.0, d2 = 0.0, ma = 0.0, mb = 0.0, co = 0.0;
-  for (final r in runs) {
-    for (var i = 0; i < r.length; i++) {
-      final d = r[i];
-      dn++;
-      final delta = d - dm;
-      dm += delta / dn;
-      d2 += delta * (d - dm);
-      if (i > 0) {
-        ln++;
-        final da = r[i - 1] - ma;
-        final db = d - mb;
-        ma += da / ln;
-        mb += db / ln;
-        co += da * (d - mb);
-      }
-    }
-  }
-  final double? acf1 = dn >= 30 && d2 > 0
-      ? (co + ln * (ma - dm) * (mb - dm)) / d2 : null;
+  final acf1 = nnDiffAcf1(runs);
   final refused = _jitterRefused(acf1, runs);
   if (rmssds.isEmpty && !refused) {
     return Metric<SessionRmssd>.absent(
@@ -1065,28 +937,6 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows'
         '$dropped.${kept.note}',
   );
-}
-
-/// Group NN intervals into consecutive 5-minute (300 000 ms) segments by beat
-/// time. Segments with <2 beats are dropped.
-List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
-  const segMs = 300000.0;
-  final out = <List<double>>[];
-  if (nn.isEmpty) return out;
-  final t0 = times.first;
-  var curIdx = 0;
-  var cur = <double>[];
-  for (var i = 0; i < nn.length; i++) {
-    final idx = ((times[i] - t0) / segMs).floor();
-    if (idx != curIdx) {
-      if (cur.length >= 2) out.add(cur);
-      cur = <double>[];
-      curIdx = idx;
-    }
-    cur.add(nn[i]);
-  }
-  if (cur.length >= 2) out.add(cur);
-  return out;
 }
 
 /// Range-filter [300, 2000] ms + Malik-style ectopic rejection against a local
@@ -1161,23 +1011,4 @@ List<List<double>> _cleanWindowRuns(List<double> rr, List<double> ts) {
   }
   if (run.isNotEmpty) runs.add(run);
   return runs;
-}
-
-// Welford, B. P. (1962), Technometrics 4(3):419-420.
-// Origin-shifted batch recurrence; skips NaN just as #99's Moments does.
-({double? mean, double? sd}) _centeredMoments(List<double> values) {
-  var n = 0;
-  var origin = 0.0, offset = 0.0, m2 = 0.0;
-  for (final value in values) {
-    if (value.isNaN) continue;
-    if (!value.isFinite) throw ArgumentError.value(value, 'value', 'Must be finite');
-    if (n == 0) { origin = value; n = 1; continue; }
-    final centered = value - origin;
-    final delta = centered - offset;
-    n++;
-    offset += delta / n;
-    m2 += delta * (centered - offset);
-  }
-  return (mean: n == 0 ? null : origin + offset,
-    sd: n < 2 ? null : math.sqrt(m2 / (n - 1)));
 }

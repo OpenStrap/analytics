@@ -22,5 +22,6 @@ library onehz_respiration;
 
 export 'resp_rate.dart';
 export 'cvhr_apnea.dart';
+export 'cvhr_stream.dart';
 export 'relative_odi.dart';
 export 'brv_trend.dart';
