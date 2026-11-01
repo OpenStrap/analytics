@@ -6,6 +6,24 @@ import 'dart:math' as math;
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:openstrap_analytics/src/onehz/util.dart' as u;
 
+// Deterministic differential cases, shared by the tool and parity tests.
+List<Map<String, dynamic>> reproductionCases(Map<String, dynamic> base) => [
+  for (var i = 0; i < 12; i++) (() {
+    final f = jsonDecode(jsonEncode(base)) as Map<String, dynamic>;
+    f['hrv']['count'] = i < 6 ? 1800 : 5400;
+    f['hrv']['frequency'] = [.17, .7, 2.4, 2.9][i % 4];
+    f['hrv']['gapped'] = i.isOdd;
+    f['spectral']['origin'] = i.isEven ? 1800000000.0 : 0.0;
+    f['spectral']['frequency'] = .037 + i * .019;
+    f['rr']['run'] = [1, 16, 30, 31, 32, 33][i % 6];
+    f['cosinor']['step'] = .31 + i * .11;
+    f['load']['count'] = 30 + i * 7;
+    f['zones']['count'] = 50 + i * 11;
+    f['circadian']['days'] = 1 + i % 4;
+    return f;
+  })()
+];
+
 Map<String, Object?> reproduce(Map<String, dynamic> f) {
   final out = <String, Object?>{};
   final r = f['rr'] as Map<String, dynamic>;
@@ -26,9 +44,9 @@ Map<String, Object?> reproduce(Map<String, dynamic> f) {
   final n=f['near_singular'] as Map<String,dynamic>;
   final nt=[for(var i=0;i<(n['count'] as int);i++) (n['origin'] as num).toDouble()+i*(n['step'] as num)];
   out['near_singular']=cosinor(nt,[for(var i=0;i<nt.length;i++) 60+i*.01]).present;
-  final nn=[for(var i=0;i<(f['hrv']['count'] as int);i++) 900+30*math.sin(i*.17)+5*math.cos(i*.071)];
+  final nn=[for(var i=0;i<(f['hrv']['count'] as int);i++) 900+30*math.sin(i*((f['hrv']['frequency'] as num?)?.toDouble() ?? .17))+5*math.cos(i*.071)];
   var now=0.0;
-  final times=[for(final v in nn) now+=v];
+  final times=[for(var i=0;i<nn.length;i++) now+=nn[i]+(f['hrv']['gapped']==true && i>0 && i%400==0 ? 10000 : 0)];
   final hv=hrvTime(nn,nnTimesMs:times).value!;
   out['hrv']=[hv.rmssd,hv.sdnn,hv.sdann,hv.sdnnIndex,hv.diffAcf1];
   try {
@@ -51,6 +69,7 @@ Map<String, Object?> reproduce(Map<String, dynamic> f) {
 }
 void main(List<String> args) {
   final f=jsonDecode(File('test/fixtures/output_changes.json').readAsStringSync()) as Map<String,dynamic>;
+  if(args.contains('--corpus-json')) { print(jsonEncode([for(final c in reproductionCases(f)) reproduce(c)])); return; }
   final values=reproduce(f);
   if(args.contains('--json')) { print(jsonEncode(values)); return; }
   print('| Change | up/main 3a7ca34 | Current batch |');
