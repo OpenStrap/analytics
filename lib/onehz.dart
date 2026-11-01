@@ -29,7 +29,8 @@ export 'src/onehz/clinical/hrv_freq.dart';
 export 'src/onehz/clinical/prsa.dart';
 export 'src/onehz/clinical/nocturnal.dart';
 export 'src/onehz/clinical/illness_cusum.dart';
-export 'src/onehz/clinical/readiness_lnrmssd.dart';
+export 'src/onehz/clinical/readiness_lnrmssd.dart'
+    hide readinessLnRmssdFromSuffix;
 export 'src/onehz/clinical/cosinor.dart';
 export 'src/onehz/clinical/load_trimp.dart';
 export 'src/onehz/clinical/stress_si.dart';

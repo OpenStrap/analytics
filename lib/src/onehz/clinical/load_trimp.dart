@@ -23,8 +23,11 @@
 // prediction.
 
 import 'dart:math' as math;
+import 'dart:typed_data';
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
+import 'load_trimp_aggregator.dart';
 
 /// Banister TRIMP over a series of per-minute mean HRs.
 ///
@@ -45,48 +48,11 @@ Metric<double> banisterTrimp(
   required double? maxHr,
   required Sex sex,
 }) {
-  const inputs = ['hr_per_min', 'resting_hr', 'max_hr'];
-  // `maxHr <= restingHr` is FALSE when either is NaN, so the finiteness checks
-  // are load-bearing: a NaN anchor otherwise makes a NaN reserve, and every
-  // clamp below (`hrr < 0`, `hrr > 1`) is false for NaN too, so the sum comes
-  // out NaN inside a PRESENT metric.
-  if (restingHr == null ||
-      maxHr == null ||
-      !restingHr.isFinite ||
-      !maxHr.isFinite ||
-      maxHr <= restingHr ||
-      hrPerMin.isEmpty) {
-    return const Metric<double>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)',
-    );
-  }
-  final reserve = maxHr - restingHr;
-  // Neumaier (1974), Rundungsfehleranalyse einiger Verfahren zur Summation.
-  var trimp = 0.0, correction = 0.0;
-  for (final hr in hrPerMin) {
-    if (!hr.isFinite || hr <= 0) continue; // off-skin + non-finite guard
-    var hrr = (hr - restingHr) / reserve;
-    if (hrr < 0) hrr = 0;
-    if (hrr > 1) hrr = 1;
-    // ONE Banister implementation for the whole package: the sex-specific
-    // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
-    final value = hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
-    final next = trimp + value;
-    if (next.isFinite) {
-      correction += trimp.abs() >= value.abs()
-          ? (trimp - next) + value : (value - next) + trimp;
-    }
-    trimp = next;
-  }
-  return Metric<double>(
-    value: trimp + correction,
-    confidence: 0.6,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: 'Banister exponential TRIMP (wrist HR estimate)',
-  );
+  // Runs [banisterTrimpAggregator] over the whole column in one slice, so the
+  // batch and chunked paths share one implementation. The aggregator carries
+  // the finiteness guards on the anchors and the off-skin / non-finite filter.
+  return banisterTrimpAggregator(restingHr: restingHr, maxHr: maxHr, sex: sex)
+      .run(DoubleColumn(Float64List.fromList(hrPerMin)));
 }
 
 /// Fraction of heart-rate reserve that simply BEING AWAKE costs — THE REFERENCE
@@ -852,52 +818,13 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     double atlDays = 7,
     int minDays = ctlAtlMinDays,
     int primeDays = 7}) {
-  const inputs = ['daily_trimp'];
-  if (dailyTrimp.length < minDays) {
-    return Metric<LoadState>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: needBaselineNote(have: dailyTrimp.length, need: minDays),
-    );
-  }
-  final lc = 1 - math.exp(-1 / ctlDays);
-  final la = 1 - math.exp(-1 / atlDays);
-  final prime = math.min(math.max(primeDays, 1), dailyTrimp.length);
-  // Neumaier (1974) compensation for the bounded-prefix mean.
-  var sum = 0.0, correction = 0.0;
-  for (final value in dailyTrimp.take(prime)) {
-    if (value.isNaN) continue;
-    final next = sum + value;
-    if (next.isFinite) {
-      correction += sum.abs() >= value.abs()
-          ? (sum - next) + value : (value - next) + sum;
-    }
-    sum = next;
-  }
-  final seed = (sum + correction) / prime;
-  // Banister et al. (1975) recurrence evaluated as an affine map.
-  // f(x) = scale*x + offset, with keep = 1-lambda.
-  double evaluate(double lambda) {
-    var scale = 1.0, offset = 0.0;
-    final keep = 1 - lambda;
-    for (var i = prime; i < dailyTrimp.length; i++) {
-      final value = dailyTrimp[i];
-      if (value.isNaN) continue;
-      scale *= keep;
-      offset = keep * offset + lambda * value;
-    }
-    return scale * seed + offset;
-  }
-  final ctl = evaluate(lc);
-  final atl = evaluate(la);
-  final conf = (dailyTrimp.length / 42.0).clamp(0.3, 0.85);
-  return Metric<LoadState>(
-    value: LoadState(ctl, atl, ctl - atl),
-    confidence: conf,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note:
-        'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $prime observed '
-        'days; descriptive load, not injury risk',
-  );
+  // Runs [ctlAtlTsbAggregator] over the whole series in one slice. The
+  // aggregator holds the abstain rule (below [minDays]), the prime mean of the
+  // first [primeDays] days and the EWMA over the remainder.
+  return ctlAtlTsbAggregator(
+          ctlDays: ctlDays,
+          atlDays: atlDays,
+          minDays: minDays,
+          primeDays: primeDays)
+      .run(DoubleColumn(Float64List.fromList(dailyTrimp)));
 }
