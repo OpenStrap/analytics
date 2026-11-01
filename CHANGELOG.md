@@ -40,3 +40,9 @@ Evaluate the same EWMA recurrence as scale times seed plus offset. This matches 
 
 Method: Banister et al. 1975; Morton et al. 1990; Neumaier 1974 prefix summation. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Count repeated zone intervals before summing
+
+Group equal duration credits by zone. Cadence validation, median capping and tail credit are retained. Grouped multiplication changes the last digits of zone seconds.
+
+Method: Karvonen 1957 supports reserve zones only; interval credit is an internal ESTIMATE rule. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

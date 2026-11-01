@@ -194,3 +194,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Evaluate training-load decay with affine arithmetic | Banister et al. 1975; Morton et al. 1990; Neumaier 1974 prefix summation; Evaluate the same EWMA recurrence as scale times seed plus offset. This matches the arithmetic used by the later incremental implementation. Last digits change; 42/7-day defaults and bounded-prefix priming remain implementation choices. |
+
+<!-- Split #99: zones -->
+
+| Batch change | Method and limits |
+|---|---|
+| Count repeated zone intervals before summing | Karvonen 1957 supports reserve zones only; interval credit is an internal ESTIMATE rule; Group equal duration credits by zone. Cadence validation, median capping and tail credit are retained. Grouped multiplication changes the last digits of zone seconds. |
