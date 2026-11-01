@@ -34,3 +34,9 @@ Compensate the per-minute sum. The reserve and sex-specific weighting are unchan
 
 Method: Morton, Fitz-Clarke & Banister 1990; Neumaier 1974 compensated summation. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Evaluate training-load decay with affine arithmetic
+
+Evaluate the same EWMA recurrence as scale times seed plus offset. This matches the arithmetic used by the later incremental implementation. Last digits change; 42/7-day defaults and bounded-prefix priming remain implementation choices.
+
+Method: Banister et al. 1975; Morton et al. 1990; Neumaier 1974 prefix summation. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

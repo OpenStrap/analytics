@@ -863,13 +863,33 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
   final lc = 1 - math.exp(-1 / ctlDays);
   final la = 1 - math.exp(-1 / atlDays);
   final prime = math.min(math.max(primeDays, 1), dailyTrimp.length);
-  final seed = mean(dailyTrimp.sublist(0, prime))!;
-  var ctl = seed;
-  var atl = seed;
-  for (var i = prime; i < dailyTrimp.length; i++) {
-    ctl = ctl + lc * (dailyTrimp[i] - ctl);
-    atl = atl + la * (dailyTrimp[i] - atl);
+  // Neumaier (1974) compensation for the bounded-prefix mean.
+  var sum = 0.0, correction = 0.0;
+  for (final value in dailyTrimp.take(prime)) {
+    if (value.isNaN) continue;
+    final next = sum + value;
+    if (next.isFinite) {
+      correction += sum.abs() >= value.abs()
+          ? (sum - next) + value : (value - next) + sum;
+    }
+    sum = next;
   }
+  final seed = (sum + correction) / prime;
+  // Banister et al. (1975) recurrence evaluated as an affine map.
+  // f(x) = scale*x + offset, with keep = 1-lambda.
+  double evaluate(double lambda) {
+    var scale = 1.0, offset = 0.0;
+    final keep = 1 - lambda;
+    for (var i = prime; i < dailyTrimp.length; i++) {
+      final value = dailyTrimp[i];
+      if (value.isNaN) continue;
+      scale *= keep;
+      offset = keep * offset + lambda * value;
+    }
+    return scale * seed + offset;
+  }
+  final ctl = evaluate(lc);
+  final atl = evaluate(la);
   final conf = (dailyTrimp.length / 42.0).clamp(0.3, 0.85);
   return Metric<LoadState>(
     value: LoadState(ctl, atl, ctl - atl),

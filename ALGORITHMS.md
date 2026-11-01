@@ -188,3 +188,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Retain small TRIMP contributions in the total | Morton, Fitz-Clarke & Banister 1990; Neumaier 1974 compensated summation; Compensate the per-minute sum. The reserve and sex-specific weighting are unchanged; the synthetic total moves in its last digits. |
+
+<!-- Split #99: ctl -->
+
+| Batch change | Method and limits |
+|---|---|
+| Evaluate training-load decay with affine arithmetic | Banister et al. 1975; Morton et al. 1990; Neumaier 1974 prefix summation; Evaluate the same EWMA recurrence as scale times seed plus offset. This matches the arithmetic used by the later incremental implementation. Last digits change; 42/7-day defaults and bounded-prefix priming remain implementation choices. |
