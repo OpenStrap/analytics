@@ -158,3 +158,9 @@ al. 2017 · Pimentel et al. · Brage et al. 2004 · Keytel et al. 2005 · Tudor-
 2019 · Hopkins 2004 ·
 Mahalanobis 1936 · Killick et al. 2012 · Wittmann & Roenneberg 2006 · Pietilä et al. 2018 ·
 Malik et al.
+
+<!-- Split #99: rr -->
+
+| Batch change | Method and limits |
+|---|---|
+| Leave long RR artifact runs as gaps | Lipponen & Tarvainen 2019; Peltola 2012; The 32-beat cap is an internal ESTIMATE rule with low confidence, not a published threshold. Longer runs split the series; each side is corrected independently. The synthetic 33-beat case keeps 200 NN beats and drops 33. |

@@ -1,3 +1,11 @@
+// Lipponen & Tarvainen 2019 classification with Peltola 2012 correction policy.
+// The unpublished artifact-run cap is an internal rule, ESTIMATE with low
+// confidence:
+// over-cap runs become gaps and each side is re-corrected. Without a cap split
+// the result equals uncapped correction. Shared kernel arithmetic and raw seam
+// context preserve capped batch NN/classes; settled stream plus provisional tail
+// equals capped batch. RrSandwich preserves source-beat absolute timestamps;
+// uncapped arbitrarily long artifact runs have no exactness guarantee.
 // FOUNDATION — RR artifact correction.
 //
 // Lipponen & Tarvainen 2019 ("A robust algorithm for heart rate variability
@@ -13,8 +21,14 @@
 // This is PRV. Output = cleaned NN series + per-beat artifact mask + clean
 // fraction. Multi-beat gaps are never silently bridged.
 
-import 'dart:math' as math;
-import '../util.dart';
+import 'rr_correction_kernel.dart';
+
+/// Longest artifact run (beats) the corrector will carry. A longer run is not a
+/// correction problem but an absence: it breaks the series into independent
+/// segments and its beats are left out (a gap). 32 beats leaves no run on the
+/// owner's 18 days of data over the cap (longest seen: 16) and bounds the
+/// streaming state; see combined-bump/brief.md.
+const int kMaxArtifactRun = 32;
 
 /// Artifact label for a single beat.
 enum BeatClass { normal, ectopic, longShort, missed, extra }
@@ -33,6 +47,13 @@ class RrCorrectionResult {
   /// `rrTsMs`. Without `rrTsMs` it is a pure cumsum and the dropouts are
   /// spliced out; pass the timestamps.
   final List<double> nnTimesMs;
+
+  /// For each NN, the index of the input beat it came from: the beat itself,
+  /// or, for a spline-corrected beat, that beat's own index. Strictly
+  /// increasing; the input beats not listed here were dropped. Lets a caller
+  /// pair each NN with that beat's own (absolute) timestamp. Empty on a
+  /// hand-built result that did not track it.
+  final List<int> nnSourceIndex;
 
   /// Per-input-beat classification (same length as the input rr).
   final List<BeatClass> classes;
@@ -53,6 +74,7 @@ class RrCorrectionResult {
     required this.cleanFraction,
     required this.droppedCount,
     required this.correctedCount,
+    this.nnSourceIndex = const [],
   });
 }
 
@@ -74,6 +96,10 @@ class RrCorrectionResult {
 /// `rec_ts*1000` and therefore whole-second — and re-anchors to the real
 /// timestamp whenever the wall step exceeds the interval by more than
 /// [reanchorGapMs], i.e. at a dropout.
+///
+/// [maxArtifactRun] caps a run of artifact beats: a longer run splits the series
+/// (output = correctRr(before) ++ correctRr(after), times absolute, the run's
+/// beats absent). null = uncapped, the pre-cap behaviour.
 RrCorrectionResult correctRr(
   List<double> rrMs, {
   List<double>? rrTsMs,
@@ -81,7 +107,55 @@ RrCorrectionResult correctRr(
   int windowBeats = 91,
   double minThresholdMs = 100,
   double reanchorGapMs = 1000,
+  int? maxArtifactRun = kMaxArtifactRun,
 }) {
+  if (maxArtifactRun != null && maxArtifactRun < 1) {
+    throw ArgumentError.value(maxArtifactRun, 'maxArtifactRun');
+  }
+  if (windowBeats < 1) throw ArgumentError.value(windowBeats, 'windowBeats');
+  if (maxArtifactRun != null) {
+    // The overwhelmingly common path has no run over the cap. Reuse the
+    // original vectorized correction verbatim, including its clock, and only
+    // evaluate split windows when a run actually requires a cut.
+    var hardRun = 0, hardGap = false;
+    for (final rr in rrMs) {
+      hardRun = rr < 300 || rr > 2000 ? hardRun + 1 : 0;
+      if (hardRun > maxArtifactRun) { hardGap = true; break; }
+    }
+    if (!hardGap) {
+      final ordinary = correctRr(rrMs, rrTsMs: rrTsMs, alpha: alpha,
+          windowBeats: windowBeats, minThresholdMs: minThresholdMs,
+          reanchorGapMs: reanchorGapMs, maxArtifactRun: null);
+      var run = 0, gap = false;
+      for (final cls in ordinary.classes) {
+        run = cls == BeatClass.normal ? 0 : run + 1;
+        if (run > maxArtifactRun) { gap = true; break; }
+      }
+      if (!gap) return ordinary;
+    }
+    final w = RrCapWindow.evaluate(rrMs,
+        ts: rrTsMs, cap: maxArtifactRun, alpha: alpha,
+        windowBeats: windowBeats, minThresholdMs: minThresholdMs,
+        reanchorGapMs: reanchorGapMs);
+    final nn = <double>[], times = <double>[], source = <int>[];
+    var normal = 0, dropped = 0, corrected = 0;
+    for (var i = 0; i < rrMs.length; i++) {
+      if (w.classes[i] == BeatClass.normal) normal++;
+      final v = w.values[i];
+      if (v == null) {
+        dropped++;
+      } else {
+        nn.add(v);
+        times.add(w.times[i]);
+        source.add(i);
+        if (w.classes[i] != BeatClass.normal) corrected++;
+      }
+    }
+    return RrCorrectionResult(nn: nn, nnTimesMs: times, classes: w.classes,
+        cleanFraction: rrMs.isEmpty ? 0 : normal / rrMs.length,
+        droppedCount: dropped, correctedCount: corrected,
+        nnSourceIndex: source);
+  }
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
   // every branch below reads a clock instead of advancing its own.
@@ -105,10 +179,12 @@ RrCorrectionResult correctRr(
     ];
     final nn = <double>[];
     final times = <double>[];
+    final source = <int>[];
     for (var i = 0; i < n; i++) {
       if (classes[i] == BeatClass.normal) {
         nn.add(rrMs[i]);
         times.add(tAll[i]);
+        source.add(i);
       }
     }
     return RrCorrectionResult(
@@ -118,6 +194,7 @@ RrCorrectionResult correctRr(
       cleanFraction: nn.length / n,
       droppedCount: n - nn.length,
       correctedCount: 0,
+      nnSourceIndex: source,
     );
   }
 
@@ -133,32 +210,13 @@ RrCorrectionResult correctRr(
 
   // medRR: rr minus local median (for missed/extra long-range tests).
   final med = _slidingMedian(rrMs, windowBeats);
-  final mRR = List<double>.generate(n, (i) {
-    final d = rrMs[i] - med[i];
-    return d < 0 ? d * 2 : d; // paper asymmetry weight
-  });
+  final mRR = List<double>.generate(n, (i) => medianDeviation(rrMs[i], med[i]));
   final th2 = _slidingThreshold(mRR, windowBeats, alpha, minThresholdMs);
 
-  final classes = List<BeatClass>.filled(n, BeatClass.normal);
-  for (var i = 0; i < n; i++) {
-    final hardLong = rrMs[i] > 2000;
-    final hardShort = rrMs[i] < 300;
-    final bigJump = dRR[i].abs() > th1[i];
-    final bigDev = mRR[i].abs() > th2[i];
-    if (hardLong || (bigDev && mRR[i] > 0)) {
-      // Long interval: likely a MISSED beat (interval ~ multiple of normal).
-      classes[i] = (med[i] > 0 && rrMs[i] > 1.5 * med[i])
-          ? BeatClass.missed
-          : BeatClass.longShort;
-    } else if (hardShort || (bigDev && mRR[i] < 0)) {
-      // Short interval: likely an EXTRA (spurious) beat.
-      classes[i] = (med[i] > 0 && rrMs[i] < 0.6 * med[i])
-          ? BeatClass.extra
-          : BeatClass.longShort;
-    } else if (bigJump) {
-      classes[i] = BeatClass.ectopic;
-    }
-  }
+  final classes = [
+    for (var i = 0; i < n; i++)
+      classifyBeat(rrMs[i], dRR[i], th1[i], med[i], mRR[i], th2[i])
+  ];
 
   // Compensatory-pair reconciliation. A single ectopic/extra beat shows up as
   // TWO successive dRR spikes of opposite sign (the bad beat, then the
@@ -169,17 +227,13 @@ RrCorrectionResult correctRr(
   // single isolated artifact rather than a spurious 2-beat run.
   for (var k = 1; k < n; k++) {
     if (classes[k] != BeatClass.ectopic) continue;
-    final prevBad = classes[k - 1] == BeatClass.extra ||
-        classes[k - 1] == BeatClass.missed ||
-        classes[k - 1] == BeatClass.ectopic ||
-        classes[k - 1] == BeatClass.longShort;
-    if (!prevBad) continue;
-    final oppositeSign = dRR[k] * dRR[k - 1] < 0;
-    final valueNormal = med[k] > 0 &&
-        rrMs[k] >= 300 &&
-        rrMs[k] <= 2000 &&
-        (rrMs[k] - med[k]).abs() <= 0.2 * med[k];
-    if (oppositeSign && valueNormal) {
+    final prevBad = classes[k - 1] != BeatClass.normal;
+    if (isRecoveryBeat(
+        prevIsArtifact: prevBad,
+        rr: rrMs[k],
+        dRR: dRR[k],
+        dRRPrev: dRR[k - 1],
+        med: med[k])) {
       classes[k] = BeatClass.normal;
     }
   }
@@ -189,6 +243,7 @@ RrCorrectionResult correctRr(
   final isArtifact = [for (final c in classes) c != BeatClass.normal];
   final nn = <double>[];
   final times = <double>[];
+  final source = <int>[];
   var dropped = 0;
   var corrected = 0;
   var i = 0;
@@ -196,6 +251,7 @@ RrCorrectionResult correctRr(
     if (!isArtifact[i]) {
       nn.add(rrMs[i]);
       times.add(tAll[i]);
+      source.add(i);
       i++;
       continue;
     }
@@ -216,6 +272,7 @@ RrCorrectionResult correctRr(
         // — 1.6 % of a night at one missed beat in sixty.
         nn.add(corr);
         times.add(tAll[i]);
+        source.add(i);
         corrected++;
       } else {
         dropped++; // no anchors -> honest drop; the clock already elapsed
@@ -241,6 +298,7 @@ RrCorrectionResult correctRr(
     cleanFraction: normalCount / n,
     droppedCount: dropped,
     correctedCount: corrected,
+    nnSourceIndex: source,
   );
 }
 
@@ -306,40 +364,61 @@ List<double> _slidingThreshold(
   final n = x.length;
   final out = List<double>.filled(n, 0);
   final half = win ~/ 2;
+  final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
-    final lo = math.max(0, i - half);
-    final hi = math.min(n - 1, i + half);
-    final seg = <double>[];
-    for (var k = lo; k <= hi; k++) {
-      seg.add(x[k]);
-    }
-    final q1 = percentile(seg, 25) ?? 0;
-    final q3 = percentile(seg, 75) ?? 0;
-    final qd = (q3 - q1) / 2;
-    // Floor keeps a gross outlier detectable on (near-)quantized clean data
-    // where the QD genuinely collapses to 0 (constant RR). On any series with
-    // real beat-to-beat variability α·QD dominates the floor, so the floor
-    // never governs a physiological signal.
-    out[i] = math.max(alpha * qd, floor);
+    w.advanceTo(i);
+    out[i] = thresholdOfSorted(w.a, alpha, floor);
   }
   return out;
 }
 
+/// Median of the window around each beat EXCLUDING the beat itself (falls back
+/// to the beat when the window holds nothing else). Same value as sorting the
+/// window-minus-self per beat, but the window is kept sorted as it slides and
+/// the self element is skipped by index arithmetic instead of copied out.
 List<double> _slidingMedian(List<double> x, int win) {
   final n = x.length;
   final out = List<double>.filled(n, 0);
   final half = win ~/ 2;
+  final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
-    final lo = math.max(0, i - half);
-    final hi = math.min(n - 1, i + half);
-    final seg = <double>[];
-    for (var k = lo; k <= hi; k++) {
-      if (k == i) continue;
-      seg.add(x[k]);
-    }
-    out[i] = median(seg) ?? x[i];
+    w.advanceTo(i);
+    out[i] = medianExcluding(w.a, x[i]) ?? x[i];
   }
   return out;
+}
+
+/// Ascending-sorted copy of `x[max(0,i-half) .. min(n-1,i+half)]`, maintained
+/// incrementally as [advanceTo] steps i forward by one (O(log w) search plus a
+/// w-element memmove per beat instead of an O(w log w) sort).
+class _SortedWindow {
+  final List<double> _x;
+  final int _half;
+  final _set = SortedMultiset();
+  List<double> get a => _set.a;
+  int _lo = 0;
+  int _hi = -1; // inclusive; -1 = empty
+
+  _SortedWindow(this._x, this._half);
+
+  void advanceTo(int i) {
+    final n = _x.length;
+    final newLo = i - _half < 0 ? 0 : i - _half;
+    final newHi = i + _half > n - 1 ? n - 1 : i + _half;
+    if (_hi < _lo) {
+      // First call: build once.
+      _set.resetFrom(_x.getRange(newLo, newHi + 1));
+    } else {
+      while (_lo < newLo) {
+        _set.remove(_x[_lo++]);
+      }
+      while (_hi < newHi) {
+        _set.add(_x[++_hi]);
+      }
+    }
+    _lo = newLo;
+    _hi = newHi;
+  }
 }
 
 /// Catmull-Rom cubic interpolation at the artifact index using the nearest two
@@ -353,19 +432,5 @@ double? _splineCorrect(List<double> rr, List<bool> isArtifact, int idx) {
   for (var k = idx + 1; k < rr.length && right.length < 2; k++) {
     if (!isArtifact[k]) right.add(rr[k]);
   }
-  if (left.isEmpty || right.isEmpty) return null;
-  final p1 = left.last;
-  final p2 = right.first;
-  final p0 = left.length >= 2 ? left.first : p1;
-  final p3 = right.length >= 2 ? right.last : p2;
-  // Catmull-Rom at t=0.5 between p1 and p2.
-  const t = 0.5;
-  final t2 = t * t;
-  final t3 = t2 * t;
-  final v = 0.5 *
-      ((2 * p1) +
-          (-p0 + p2) * t +
-          (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-          (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
-  return v;
+  return splineMid(left, right);
 }
