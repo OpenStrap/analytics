@@ -258,6 +258,24 @@ void main() {
       }
       final s =
           AdvancedSleepStager.stageWindow(_t0, _t0 + span, grav, hr, rr: rr);
+      final cache = CardioRowCache();
+      final cold = AdvancedSleepStager.stageWindow(_t0, _t0 + span, grav, hr,
+          rr: rr, rowCache: cache);
+      final warm = AdvancedSleepStager.stageWindow(_t0, _t0 + span, grav, hr,
+          rr: rr, rowCache: cache);
+      expect(cache.hits, greaterThan(0));
+      final expected = [for (final seg in s.stages) seg.toJson()];
+      expect([for (final seg in cold.stages) seg.toJson()], expected);
+      expect([for (final seg in warm.stages) seg.toJson()], expected);
+      final rows = EpochRows(anchorMs: _t0 * 1000);
+      rows.fold(
+          hr: [for (final h in hr) HrSample(h.ts * 1000.0, h.bpm)],
+          accel: [for (final g in grav) AccelSample(g.ts * 1000.0, g.x, g.y, g.z)],
+          rrMs: [for (final r in rr) r.rrMs],
+          rrTsMs: [for (final r in rr) r.ts * 1000.0],
+          throughMs: (_t0 + span) * 1000 - 1);
+      expect([for (final seg in rows.stageWindow(_t0, _t0 + span)) seg.toJson()],
+          expected);
       final inBlock = <String, int>{};
       for (final seg in s.stages) {
         final a = math.max(seg.start, wS), b = math.min(seg.end, wE);

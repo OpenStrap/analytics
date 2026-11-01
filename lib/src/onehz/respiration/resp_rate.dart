@@ -38,6 +38,7 @@ import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
 import '../foundations/fusion.dart';
+import '../../aggregate/json_support.dart';
 
 /// Hard physiological + Nyquist band for adult respiration on a 1 Hz signal.
 /// Lower 0.1 Hz = 6 br/min; upper 0.5 Hz = 30 br/min (the 1 Hz Nyquist limit).
@@ -187,6 +188,15 @@ Metric<RespEstimate> rsaRespRate(
     );
   }
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  // A non-finite beat time has no place on the clock, and an infinite last
+  // time made the sub-window walk below endless (it never reaches infinity).
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<RespEstimate>.absent(
@@ -242,69 +252,69 @@ Metric<RespEstimate> rsaRespRate(
           'respiratory peak against itself over time',
     );
   }
-  final peaks = <double>[]; // br/min
-  final peakHz = <double>[]; // the same peaks in Hz, index-aligned
-  final peakPwr = <double>[]; // their spectral power, index-aligned
-  var atCeiling = 0;
-  var atFloor = 0;
-  // The ceilings those sub-windows peaked at, br/min — their own, which
-  // move with heart rate; not the whole input's.
-  var ceilingLo = double.infinity, ceilingHi = 0.0;
-  var belowBand = 0;
-  var thin = 0;
-  var gappy = 0;
-  for (var s = tSec.first; s + segSec <= tSec.last + 1e-9; s += segSec / 2) {
-    final lo = _lowerBound(tSec, s);
-    final hi = _lowerBound(tSec, s + segSec);
-    final k = hi - lo;
-    // A sub-window has to be BOTH time-complete and beat-dense: a dropout in
-    // the middle leaves few beats spanning the full 5 minutes, and its
-    // periodogram is a window function, not a spectrum.
-    final segT = tSec.sublist(lo, hi);
-    final segNn = nnMs.sublist(lo, hi);
-    // TIME-COMPLETE = the kept beats COVER ≥ 80 % of the sub-window. Σ NN, not
-    // first-to-last span: two beats near the edges with a 3-minute hole between
-    // them passed the span test and handed Lomb–Scargle a window function.
-    // Judged first, so a sub-window a sensor gap emptied is named a gap.
-    final coveredSec = segNn.fold<double>(0, (a, b) => a + b) / 1000.0;
-    if (coveredSec < segSec * 0.8) {
-      gappy++;
-      continue;
-    }
-    if (k < 30) {
-      thin++;
-      continue;
-    }
-    final segSpan = segT.last - segT.first; // still sets the grid resolution
-    // Per sub-window Nyquist: heart rate moves through the night, so the
-    // resolvable ceiling does too. A sub-window whose beat rate cannot cover
-    // the HF band is dropped for the SAME alias reason as the whole window —
-    // from its median beat interval, gap-free, like the whole-input check.
-    final segHi = rsaCeilingHz(median(segNn)! / 1000.0);
-    if (segHi < rsaHiHz) {
-      belowBand++;
-      continue;
-    }
-    final grid = math.max(64, ((segHi - rsaLoHz) * 4 * segSpan).ceil());
-    final ls = lombScargle(segT, segNn, freqGrid(rsaLoHz, segHi, grid));
-    if (ls == null) {
-      thin++;
-      continue;
-    }
-    final pk = ls.peakFreq(rsaLoHz, segHi);
-    if (pk == null) {
-      thin++;
-      continue;
-    }
-    // A peak pinned to the top of the searchable band means the true rate is
-    // at or above what this sub-window can resolve. That is an ABSENCE, not a
-    // rate: reporting the edge would publish the ceiling as a measurement.
-    if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
-      atCeiling++;
-      ceilingLo = math.min(ceilingLo, segHi * 60);
-      ceilingHi = math.max(ceilingHi, segHi * 60);
-      continue;
-    }
+  final segments = <_RsaSegmentResult>[];
+  for (var i = 0;; i++) {
+    final s = tSec.first + i * (segSec / 2);
+    if (s + segSec > tSec.last + 1e-9) break;
+    segments.add(_rsaSegment(tSec, nnMs, s, segSec));
+  }
+  return _rsaMetricFromSegments(segments,
+      artifactFraction: artifactFraction,
+      tolBrpm: tolBrpm,
+      minConsensus: minConsensus,
+      segSec: segSec,
+      hiHz: hiHz);
+}
+
+class _RsaSegmentResult {
+  // 0 = usable peak, 1 = ceiling, 2 = below HF band, 3 = thin, 5 = floor, 4 = gappy
+  // (kept beats cover < 80 % of the sub-window).
+  final int kind;
+  final double? brpm, peakHz, power;
+  // kind 1 only: the sub-window's own ceiling, br/min.
+  final double? ceilingBrpm;
+  const _RsaSegmentResult(this.kind,
+      [this.brpm, this.peakHz, this.power, this.ceilingBrpm]);
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind,
+        'brpm': brpm == null ? null : encodeDouble(brpm!),
+        'peakHz': peakHz == null ? null : encodeDouble(peakHz!),
+        'power': power == null ? null : encodeDouble(power!),
+        'ceiling': ceilingBrpm == null ? null : encodeDouble(ceilingBrpm!),
+      };
+}
+
+_RsaSegmentResult _rsaSegment(
+    List<double> tSec, List<double> nnMs, double start, double segSec) {
+  final lo = _lowerBound(tSec, start);
+  final hi = _lowerBound(tSec, start + segSec);
+  final k = hi - lo;
+  // A sub-window has to be BOTH time-complete and beat-dense: a dropout in
+  // the middle leaves few beats spanning the full 5 minutes, and its
+  // periodogram is a window function, not a spectrum.
+  final segT = tSec.sublist(lo, hi);
+  final segNn = nnMs.sublist(lo, hi);
+  // TIME-COMPLETE = the kept beats COVER ≥ 80 % of the sub-window. Σ NN, not
+  // first-to-last span: two beats near the edges with a 3-minute hole between
+  // them passed the span test and handed Lomb–Scargle a window function.
+  // Judged first, so a sub-window a sensor gap emptied is named a gap.
+  final coveredSec = segNn.fold<double>(0, (a, b) => a + b) / 1000.0;
+  if (coveredSec < segSec * 0.8) return const _RsaSegmentResult(4);
+  if (k < 30) return const _RsaSegmentResult(3);
+  final segSpan = segT.last - segT.first; // still sets the grid resolution
+  // Per sub-window Nyquist from its median beat interval, gap-free, like the
+  // whole-input check.
+  final segHi = rsaCeilingHz(median(segNn)! / 1000.0);
+  if (segHi < rsaHiHz) return const _RsaSegmentResult(2);
+  final grid = math.max(64, ((segHi - rsaLoHz) * 4 * segSpan).ceil());
+  final ls = lombScargle(segT, segNn, freqGrid(rsaLoHz, segHi, grid));
+  if (ls == null) return const _RsaSegmentResult(3);
+  final pk = ls.peakFreq(rsaLoHz, segHi);
+  if (pk == null) return const _RsaSegmentResult(3);
+  if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
+    return _RsaSegmentResult(1, null, null, null, segHi * 60);
+  }
     // The same absence at the BOTTOM edge. A true rate below [rsaLoHz] (slow
     // deep-sleep or paced breathing at 7.5–9 br/min) leaves only the skirt of
     // its main lobe inside the band, so the in-band maximum sits on or just
@@ -319,12 +329,45 @@ Metric<RespEstimate> rsaRespRate(
     // sub-windows) 2/segSpan is 1.33 br/min and blanked a true 10 br/min,
     // while the floor failure there already sits on the first bin.
     if (pk <= rsaLoHz + math.min(2 / segSpan, 2 / rsaSegmentSec)) {
-      atFloor++;
-      continue;
+      return const _RsaSegmentResult(5);
     }
-    peaks.add(pk * 60.0);
-    peakHz.add(pk);
-    peakPwr.add(_powerAt(ls, pk));
+  return _RsaSegmentResult(0, pk * 60.0, pk, _powerAt(ls, pk));
+}
+
+Metric<RespEstimate> _rsaMetricFromSegments(
+  List<_RsaSegmentResult> segments, {
+  required double artifactFraction,
+  required double tolBrpm,
+  required double minConsensus,
+  required double segSec,
+  required double hiHz,
+}) {
+  const inputs = ['rr_cleaned', 'beat_times'];
+  final peaks = <double>[];
+  final peakHz = <double>[];
+  final peakPwr = <double>[];
+  var atCeiling = 0, atFloor = 0, belowBand = 0, thin = 0, gappy = 0;
+  // The ceilings those sub-windows peaked at, br/min — their own, which
+  // move with heart rate; not the whole input's.
+  var ceilingLo = double.infinity, ceilingHi = 0.0;
+  for (final segment in segments) {
+    if (segment.kind == 0) {
+      peaks.add(segment.brpm!);
+      peakHz.add(segment.peakHz!);
+      peakPwr.add(segment.power!);
+    } else if (segment.kind == 1) {
+      atCeiling++;
+      ceilingLo = math.min(ceilingLo, segment.ceilingBrpm!);
+      ceilingHi = math.max(ceilingHi, segment.ceilingBrpm!);
+    } else if (segment.kind == 2) {
+      belowBand++;
+    } else if (segment.kind == 5) {
+      atFloor++;
+    } else if (segment.kind == 4) {
+      gappy++;
+    } else {
+      thin++;
+    }
   }
   final dropped = atCeiling + atFloor + belowBand + thin + gappy;
   final total = peaks.length + dropped;
@@ -427,6 +470,266 @@ Metric<RespEstimate> rsaRespRate(
         'all come from the medoid sub-window); PRV-derived; this window could '
         'resolve up to ${round6(hiHz * 60)} br/min',
   );
+}
+
+/// Exact, append-only Welch state for [rsaRespRate].
+///
+/// The whole-input ceiling comes from the MEDIAN beat interval, so every folded
+/// NN is kept once more in [_sorted] ([double.compareTo] order, as `median`
+/// sorts); a snapshot merges the tail in. Checkpoint version 3 also carries
+/// the floor outcomes. Versions 1 and 2
+/// are refused because their closed windows did not apply the floor guard.
+// Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker &
+// Strackee 1984, as in rsaRespRate(). Shared segment scoring, retained exact NN
+// median and provisional windows reproduce batch.
+class RsaRespStream {
+  final List<double> _nn = [], _times = [];
+  List<double> _sorted = [];
+  final List<_RsaSegmentResult> _closed = [];
+  int _n = 0;
+  double? _first, _last, _nextStart;
+
+  RsaRespStream();
+
+  factory RsaRespStream.fromJson(Map<String, dynamic> json) {
+    try {
+      final j = decodeMap(json);
+      if (field(j, 'type') != 'RsaRespStream') {
+        throw const FormatException('not an RsaRespStream checkpoint');
+      }
+      if (field(j, 'version') != 3) {
+        throw const FormatException('unsupported RsaRespStream version');
+      }
+      final n = decodeCount(field(j, 'n'));
+      final first = decodeDoubleOrNull(field(j, 'first'));
+      final last = decodeDoubleOrNull(field(j, 'last'));
+      final next = decodeDoubleOrNull(field(j, 'nextStart'));
+      final nn = decodeDoubles(field(j, 'nn'));
+      final times = decodeDoubles(field(j, 'times'));
+      final encoded = decodeList(field(j, 'closed'));
+      final sorted = decodeDoubles(field(j, 'sorted'));
+      if (nn.length != times.length ||
+          sorted.length != n ||
+          !_nondecreasingBy(sorted) ||
+          (n == 0 && (first != null || last != null || next != null)) ||
+          (n > 0 && (first == null || last == null || next == null))) {
+        throw const FormatException('inconsistent RsaRespStream checkpoint');
+      }
+      final s = RsaRespStream()
+        .._n = n
+        .._first = first
+        .._last = last
+        .._nextStart = next
+        .._nn.addAll(nn)
+        .._times.addAll(times)
+        .._sorted = sorted;
+      if (!_nondecreasing(s._times)) {
+        throw const FormatException('decreasing checkpoint times');
+      }
+      for (final value in encoded) {
+        final r = decodeMap(value);
+        final kind = field(r, 'kind');
+        if (kind is! int || kind < 0 || kind > 5) {
+          throw const FormatException('invalid RSA segment');
+        }
+        final brpm = decodeDoubleOrNull(field(r, 'brpm'));
+        final peakHz = decodeDoubleOrNull(field(r, 'peakHz'));
+        final power = decodeDoubleOrNull(field(r, 'power'));
+        final ceiling = decodeDoubleOrNull(field(r, 'ceiling'));
+        if ((kind == 0) != (brpm != null && peakHz != null && power != null) ||
+            (kind == 1) != (ceiling != null)) {
+          throw const FormatException('invalid RSA segment');
+        }
+        s._closed.add(_RsaSegmentResult(kind, brpm, peakHz, power, ceiling));
+      }
+      return s;
+    } on FormatException {
+      rethrow;
+    } catch (e) {
+      throw FormatException('malformed RsaRespStream checkpoint: $e');
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+        'type': 'RsaRespStream',
+        'version': 3,
+        'n': _n,
+        'first': _first == null ? null : encodeDouble(_first!),
+        'last': _last == null ? null : encodeDouble(_last!),
+        'nextStart': _nextStart == null ? null : encodeDouble(_nextStart!),
+        'nn': [for (final x in _nn) encodeDouble(x)],
+        'times': [for (final x in _times) encodeDouble(x)],
+        'closed': [for (final x in _closed) x.toJson()],
+        'sorted': [for (final x in _sorted) encodeDouble(x)],
+      };
+
+  void fold(List<double> nnMs, List<double> nnTimesMs) {
+    if (nnMs.length != nnTimesMs.length) {
+      throw ArgumentError('nnMs and nnTimesMs must have the same length');
+    }
+    if (nnMs.isEmpty) return;
+    final times = [for (final t in nnTimesMs) t / 1000.0];
+    // Checked before any state changes: an infinite time would make [_settle]
+    // endless, and a fold cannot be undone.
+    if (times.any((t) => !t.isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
+    if (!_nondecreasing(times) ||
+        (_last != null && times.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
+    }
+    _first ??= times.first;
+    _nextStart ??= _first;
+    _nn.addAll(nnMs);
+    _times.addAll(times);
+    _sorted = _mergeSorted(_sorted, [...nnMs]..sort());
+    _n += nnMs.length;
+    _last = times.last;
+    final span = _last! - _first!;
+    if (span >= 2 * rsaSegmentSec) {
+      _settle();
+      _compact();
+    }
+  }
+
+  Metric<RespEstimate> snapshot({
+    List<double> tailNnMs = const [],
+    List<double> tailNnTimesMs = const [],
+    required double artifactFraction,
+    double tolBrpm = 2.0,
+    double minConsensus = 0.5,
+    double maxArtifact = 0.30,
+  }) {
+    if (tailNnMs.length != tailNnTimesMs.length) {
+      throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
+    }
+    final tail = [for (final t in tailNnTimesMs) t / 1000.0];
+    if (!_nondecreasing(tail) ||
+        (tail.isNotEmpty && _last != null && tail.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
+    }
+    final n = _n + tailNnMs.length;
+    // A non-finite tail time: the batch's own answer (it abstains).
+    if (n < 20 || _first == null || tail.any((t) => !t.isFinite)) {
+      return rsaRespRate([..._nn, ...tailNnMs],
+          [..._times.map((x) => x * 1000.0), ...tailNnTimesMs],
+          artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm,
+          minConsensus: minConsensus,
+          maxArtifact: maxArtifact);
+    }
+    if (artifactFraction > maxArtifact) {
+      return Metric<RespEstimate>.absent(
+          tier: Tier.high,
+          inputs_used: const ['rr_cleaned', 'beat_times'],
+          note: 'artifact fraction ${round6(artifactFraction)} > gate '
+              '— RSA peak unreliable');
+    }
+    final times = [..._times, ...tail];
+    final nn = [..._nn, ...tailNnMs];
+    final last = times.last;
+    final span = last - _first!;
+    if (span <= 0) {
+      return rsaRespRate(nn, [for (final t in times) t * 1000.0],
+          artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm,
+          minConsensus: minConsensus,
+          maxArtifact: maxArtifact);
+    }
+    // Same median the batch takes over settled ++ tail.
+    final beatSec =
+        percentileSorted(_mergeSorted(_sorted, [...tailNnMs]..sort()), 50)! /
+            1000.0;
+    final hiHz = rsaCeilingHz(beatSec);
+    if (hiHz < rsaHiHz) {
+      return Metric<RespEstimate>.absent(
+          tier: Tier.high,
+          inputs_used: const ['rr_cleaned', 'beat_times'],
+          note: 'sleeping heart rate ${round6(60 / beatSec)} bpm (median beat '
+              'interval ${round6(beatSec)} s) can resolve breathing from beat '
+              'timing only up to ${round6(hiHz * 60)} br/min, below the top of '
+              'the normal 9–24 br/min band, so any peak could be an alias; rate '
+              'withheld');
+    }
+    var segSec = rsaSegmentSec;
+    if (span < 2 * segSec) segSec = span / 2;
+    if (segSec < 60) {
+      return rsaRespRate(nn, [for (final t in times) t * 1000.0],
+          artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm,
+          minConsensus: minConsensus,
+          maxArtifact: maxArtifact);
+    }
+    if (span < 2 * rsaSegmentSec) {
+      return rsaRespRate(nn, [for (final t in times) t * 1000.0],
+          artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm,
+          minConsensus: minConsensus,
+          maxArtifact: maxArtifact);
+    }
+    final segments = <_RsaSegmentResult>[..._closed];
+    for (var i = _closed.length;; i++) {
+      final start = _first! + i * (rsaSegmentSec / 2);
+      if (start + rsaSegmentSec > last + 1e-9) break;
+      segments.add(_rsaSegment(times, nn, start, rsaSegmentSec));
+    }
+    return _rsaMetricFromSegments(segments,
+        artifactFraction: artifactFraction,
+        tolBrpm: tolBrpm,
+        minConsensus: minConsensus,
+        segSec: rsaSegmentSec,
+        hiHz: hiHz);
+  }
+
+  void _settle() {
+    while (_nextStart! + rsaSegmentSec < _last! - 1e-9) {
+      _closed.add(_rsaSegment(_times, _nn, _nextStart!, rsaSegmentSec));
+      _nextStart = _first! + _closed.length * (rsaSegmentSec / 2);
+    }
+  }
+
+  void _compact() {
+    var cut = 0;
+    while (cut < _times.length && _times[cut] < _nextStart!) {
+      cut++;
+    }
+    if (cut > 0) {
+      _times.removeRange(0, cut);
+      _nn.removeRange(0, cut);
+    }
+  }
+}
+
+/// [a] and [b] sorted by [double.compareTo]; the merge is sorted the same way.
+List<double> _mergeSorted(List<double> a, List<double> b) {
+  if (b.isEmpty) return a;
+  if (a.isEmpty) return b;
+  final out = List<double>.filled(a.length + b.length, 0);
+  var i = 0, j = 0, k = 0;
+  while (i < a.length && j < b.length) {
+    out[k++] = a[i].compareTo(b[j]) <= 0 ? a[i++] : b[j++];
+  }
+  while (i < a.length) {
+    out[k++] = a[i++];
+  }
+  while (j < b.length) {
+    out[k++] = b[j++];
+  }
+  return out;
+}
+
+bool _nondecreasingBy(List<double> values) {
+  for (var i = 1; i < values.length; i++) {
+    if (values[i].compareTo(values[i - 1]) < 0) return false;
+  }
+  return true;
+}
+
+bool _nondecreasing(List<double> values) {
+  for (var i = 1; i < values.length; i++) {
+    if (values[i] < values[i - 1]) return false;
+  }
+  return true;
 }
 
 /// RIIV respiratory rate from the 1 Hz green PPG ADC.

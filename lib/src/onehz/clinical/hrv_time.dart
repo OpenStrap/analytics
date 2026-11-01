@@ -15,8 +15,11 @@
 // makes it behaviour — see that constant for the measurement and the threshold.
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
 import '../util.dart';
+import 'hrv_time_aggregator.dart';
+import 'rmssd_gate.dart';
 
 /// Lag-1 ACF floor for the NN successive-difference series, below which RMSSD
 /// and pNN50 are REFUSED (SDNN / SDANN survive it and are the honest lead).
@@ -121,82 +124,13 @@ const double kNnDiffNoiseShareCeiling = 0.7;
 /// clear of the floor, or diffs on a beat-time grid coarse against their size
 /// (see [_onCoarseLattice]).
 double? nnDiffNoiseShare(List<List<double>> diffRuns, {int minSegments = 20}) {
-  const n = 64, kLo = 10, kHi = n ~/ 2; // kLo/n ≈ 0.15 cycles/beat
-  final w = [
-    for (var i = 0; i < n; i++) 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
-  ];
-  var w2 = 0.0;
-  for (final x in w) {
-    w2 += x * x;
-  }
-  final cosT = [
-    for (var k = kLo; k <= kHi; k++)
-      [for (var i = 0; i < n; i++) math.cos(2 * math.pi * k * i / n)]
-  ];
-  final sinT = [
-    for (var k = kLo; k <= kHi; k++)
-      [for (var i = 0; i < n; i++) math.sin(2 * math.pi * k * i / n)]
-  ];
-  final psd = List<double>.filled(kHi + 1, 0.0);
-  var segs = 0, nd = 0;
-  var ssd = 0.0, wsd = 0.0, wsum = 0.0, pSum = 0.0, p2Sum = 0.0;
+  final sums = NoiseShareSums();
   for (final r in diffRuns) {
-    for (final d in r) {
-      ssd += d * d;
-      nd++;
-    }
-    // Integrate the run back to RR levels (up to a constant the mean removes).
-    final x = List<double>.filled(r.length + 1, 0.0);
-    for (var i = 0; i < r.length; i++) {
-      x[i + 1] = x[i] + r[i];
-    }
-    final cov = List<double>.filled(x.length, 0.0); // Σ w² per sample
-    for (var s = 0; s + n <= x.length; s += n ~/ 2) {
-      var m = 0.0;
-      for (var i = 0; i < n; i++) {
-        m += x[s + i];
-        cov[s + i] += w[i] * w[i];
-      }
-      m /= n;
-      final v = [for (var i = 0; i < n; i++) (x[s + i] - m) * w[i]];
-      var p = 0.0;
-      for (var k = kLo; k <= kHi; k++) {
-        final c = cosT[k - kLo], sn = sinT[k - kLo];
-        var re = 0.0, im = 0.0;
-        for (var i = 0; i < n; i++) {
-          re += v[i] * c[i];
-          im -= v[i] * sn[i];
-        }
-        psd[k] += re * re + im * im;
-        p += re * re + im * im;
-      }
-      pSum += p;
-      p2Sum += p * p;
-      segs++;
-    }
-    for (var i = 0; i < r.length; i++) {
-      final c = (cov[i] + cov[i + 1]) / 2;
-      wsd += c * r[i] * r[i];
-      wsum += c;
-    }
+    sums.addRun(r);
   }
-  if (segs < minSegments || ssd == 0 || wsd == 0) return null;
-  if (_onCoarseLattice(diffRuns, ssd / nd)) return null;
-  // One loud stretch dominates the average: count segments by power, not number.
-  if (pSum * pSum / p2Sum < 0.75 * minSegments) return null;
-  final band = psd.sublist(kLo);
-  var peak = 0;
-  for (var k = 1; k < band.length; k++) {
-    if (band[k] > band[peak]) peak = k;
-  }
-  if (peak + kLo >= kHi - 1) return null; // ~0.477–0.5 band, see above
-  if (band.last > 0.2 * band[peak]) return null; // hump on Nyquist, see above
-  final med = median(band)!;
-  if (band[peak] < 4.5 * med) return null; // no line, no exemption
-  final floor = med / segs / w2;
-  final vetted = wsd / wsum, all = ssd / nd;
-  // 1 − (structured share of RMSSD²); equals 2σ²/mean(d²) when stationary.
-  return 1 - (vetted - 2 * floor) / math.max(vetted, all);
+  return noiseShareFrom(sums,
+      lattice: () => _onCoarseLattice(diffRuns, sums.ssd / sums.nd),
+      minSegments: minSegments);
 }
 
 /// True when every successive difference is a whole multiple of one step q and
@@ -208,22 +142,8 @@ double? nnDiffNoiseShare(List<List<double>> diffRuns, {int minSegments = 20}) {
 /// sets RMSSD.
 // ponytail: exact lattice only; a grid re-rounded to whole ms (7.8 ms → 7/8)
 // breaks the common step and is not caught.
-bool _onCoarseLattice(List<List<double>> diffRuns, double msd) {
-  var q = double.infinity;
-  for (final r in diffRuns) {
-    for (final d in r) {
-      if (d.abs() > 1e-6 && d.abs() < q) q = d.abs();
-    }
-  }
-  if (q.isInfinite || msd >= 2 * q * q) return false;
-  for (final r in diffRuns) {
-    for (final d in r) {
-      final k = d.abs() / q;
-      if ((k - k.roundToDouble()).abs() > 1e-3) return false;
-    }
-  }
-  return true;
-}
+bool _onCoarseLattice(List<List<double>> diffRuns, double msd) =>
+    coarseLattice([for (final r in diffRuns) for (final d in r) d.abs()], msd);
 
 /// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND
 /// the spectrum does not show a respiratory line on a low white floor.
@@ -256,48 +176,6 @@ List<double> _clearedWindows(double? nightAcf1, List<double> rmssds,
   ];
 }
 
-final _hann128 = [
-  for (var i = 0; i < 128; i++) 0.5 - 0.5 * math.cos(2 * math.pi * i / 127)
-];
-final _hann128Sq = _hann128.fold(0.0, (a, w) => a + w * w);
-
-/// Welch power (128-beat Hann, 50 % overlap, averaged over segments) of one
-/// window's RR, rebuilt from its difference runs, at cycles-per-beat
-/// frequencies [f]. Null when no run holds a full segment.
-List<double>? _windowPsd(List<List<double>> diffRuns, List<double> f) {
-  const n = 128;
-  final p = List<double>.filled(f.length, 0.0);
-  var segs = 0;
-  for (final r in diffRuns) {
-    final x = List<double>.filled(r.length + 1, 0.0);
-    for (var i = 0; i < r.length; i++) {
-      x[i + 1] = x[i] + r[i];
-    }
-    for (var s = 0; s + n <= x.length; s += n ~/ 2) {
-      var m = 0.0;
-      for (var i = 0; i < n; i++) {
-        m += x[s + i];
-      }
-      m /= n;
-      for (var j = 0; j < f.length; j++) {
-        final c = math.cos(2 * math.pi * f[j]), sn = math.sin(2 * math.pi * f[j]);
-        var cr = 1.0, ci = 0.0, re = 0.0, im = 0.0;
-        for (var i = 0; i < n; i++) {
-          final v = (x[s + i] - m) * _hann128[i];
-          re += v * cr;
-          im += v * ci;
-          final t = cr * c - ci * sn;
-          ci = cr * sn + ci * c;
-          cr = t;
-        }
-        p[j] += re * re + im * im;
-      }
-      segs++;
-    }
-  }
-  return segs == 0 ? null : [for (final v in p) v / segs];
-}
-
 /// Last resort for a night the jitter gate refused: the windows whose
 /// breathing line holds still in Hz while the heart rate moves.
 ///
@@ -324,115 +202,29 @@ List<int>? _steadyBreathingWindows(
       nd++;
     }
   }
-  if (nd == 0 || _onCoarseLattice(all, ssd / nd)) return null;
-  final ref = median([for (final m in meanRrMs) if (m > 0) m]);
-  if (ref == null) return null;
-  // 0.15–0.5 cycles/beat at the night's median beat.
-  final fc = [for (var j = 38; j <= 128; j++) j / 256];
-  final byBeat = List<double>.filled(fc.length, 0.0);
-  final byHz = List<double>.filled(fc.length, 0.0);
-  final cover = List<int>.filled(fc.length, 0);
-  final peakHz = <int, double>{}; // window -> its own peak, cycles per ms
-  final psd = <int, List<double>>{}; // window -> its cycles-per-beat PSD
-  for (var w = 0; w < winRuns.length; w++) {
-    if (meanRrMs[w] <= 0) continue;
-    final pb = _windowPsd(winRuns[w], fc);
-    if (pb == null) continue;
-    final norm = median(pb)!;
-    if (norm <= 0) continue;
-    final k = meanRrMs[w] / ref;
-    final fh = [for (final f in fc) f * k];
-    final ph = _windowPsd(winRuns[w], fh)!;
-    var best = -1;
-    for (var j = 0; j < fc.length; j++) {
-      byBeat[j] += pb[j] / norm;
-      if (fh[j] > 0.5) continue;
-      byHz[j] += ph[j] / norm;
-      cover[j]++;
-      if (best < 0 || ph[j] > ph[best]) best = j;
-    }
-    if (best >= 0) peakHz[w] = fc[best] / ref;
-    psd[w] = pb;
-  }
-  final nw = peakHz.length;
-  if (nw < 12) return null;
-  final bins = [for (var j = 0; j < fc.length; j++) if (cover[j] == nw) j];
-  if (bins.length < 20) return null;
-  final hz = [for (final j in bins) byHz[j]];
-  final bt = [for (final j in bins) byBeat[j]];
-  var pk = 0;
-  for (var i = 1; i < hz.length; i++) {
-    if (hz[i] > hz[pk]) pk = i;
-  }
-  if (pk == 0 || pk == hz.length - 1) return null;
-  final f0 = fc[bins[pk]] / ref;
-  final brpm = f0 * 60000;
-  if (brpm < 8 || brpm > 30) return null;
-  // Same bins, same normalisation: the line must stand taller aligned in Hz
-  // than the beat pooling stands anywhere within ±12 bins of it.
-  var near = 0.0;
-  for (var i = math.max(0, pk - 12); i <= math.min(bt.length - 1, pk + 12); i++) {
-    near = math.max(near, bt[i]);
-  }
-  // The pooled noise ripple shrinks as 1/√windows, so the bar does too.
-  final promHz = hz[pk] / median(hz)!;
-  if (promHz < math.max(2.5, 1.5 + 7 / math.sqrt(nw))) return null;
-  if (promHz < 1.1 * near / median(bt)!) return null;
-  // Alternation lives at Nyquist on the beat axis, outside these bins.
-  if (byBeat.last / median(bt)! >= 0.5 * promHz) return null;
-  final keep = [
-    for (final e in peakHz.entries)
-      if (math.log(e.value / f0).abs() <= 0.15) e.key
-  ];
-  if (keep.length < 6) return null;
-  // The line proves breathing is there, not that it carries RMSSD: beat-time
-  // jitter loud enough to fail the gate would still be most of the number.
-  // Same ceiling as [nnDiffNoiseShare], over the kept windows. Jitter σ² has
-  // an RR spectrum σ²·(2 − 2cos ω), flat once divided by that shape, and its
-  // differences carry 6σ²; physiology only adds power on top. Breathing
-  // wanders across the night and its line spreads with it, so each window
-  // drops the bins of every rate the kept windows peaked at (plus a Hann
-  // main lobe), mapped onto its own beats. σ² is the floor of what is left,
-  // pooled over windows and smoothed over four resolution cells.
-  var lo = double.infinity, hi = 0.0;
-  for (final w in keep) {
-    lo = math.min(lo, peakHz[w]!);
-    hi = math.max(hi, peakHz[w]!);
-  }
-  var sq = 0.0, nAll = 0;
-  final acc = List<double>.filled(fc.length, 0.0);
-  final wt = List<double>.filled(fc.length, 0.0);
-  for (final w in keep) {
-    var n = 0;
-    for (final r in winRuns[w]) {
-      for (final d in r) {
-        sq += d * d;
-        n++;
+  return steadyBreathingFrom(
+    windows: winRuns.length,
+    meanRrMs: meanRrMs,
+    psdAt: (w, f) => windowPsd(winRuns[w], f),
+    diffs: (w) {
+      var n = 0;
+      for (final r in winRuns[w]) {
+        n += r.length;
       }
-    }
-    nAll += n;
-    final a = lo * meanRrMs[w] - 3 / 128, b = hi * meanRrMs[w] + 3 / 128;
-    for (var j = 0; j < fc.length; j++) {
-      if (fc[j] > a && fc[j] < b) continue;
-      acc[j] += n * psd[w]![j] / (2 - 2 * math.cos(2 * math.pi * fc[j]));
-      wt[j] += n;
-    }
-  }
-  var floor = double.infinity;
-  for (var j = 8; j < fc.length - 8; j++) {
-    var s = 0.0, m = 0;
-    for (var i = j - 8; i <= j + 8; i++) {
-      if (wt[i] < nAll / 2) break;
-      s += acc[i] / wt[i];
-      m++;
-    }
-    if (m == 17) floor = math.min(floor, s / 17);
-  }
-  if (floor == double.infinity) return null;
-  // The lowest stretch of a noisy curve reads below its mean; 1.1 puts the
-  // floor back at these pooled sizes, so jitter alone is not undercounted.
-  final noise = 1.1 * 6 * floor / _hann128Sq * nAll;
-  return noise < kNnDiffNoiseShareCeiling * sq ? keep : null;
+      return n;
+    },
+    addSquares: (w, acc) {
+      for (final r in winRuns[w]) {
+        for (final d in r) {
+          acc += d * d;
+        }
+      }
+      return acc;
+    },
+    allSsd: ssd,
+    allNd: nd,
+    lattice: (msd) => _onCoarseLattice(all, msd),
+  );
 }
 
 /// The window RMSSDs a windowed headline publishes, or null for none: the
@@ -632,72 +424,51 @@ Metric<HrvTime> hrvTime(
     );
   }
 
+  // A non-finite beat time has no place on the clock: the 5-min segmenting
+  // threw on it. Same refusal as hrvFreq / rsaRespRate.
+  if (nnTimesMs != null &&
+      nnTimesMs.length == nnMs.length &&
+      nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+
+  // The values come from the same numeric core as [hrvTimeAggregator], run
+  // in one slice; this function adds only the envelope (confidence, note).
+  //
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
   // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
   // can sit either side of a seconds-long hole; differencing straight down the
   // list manufactured one large difference per dropped run. Same `keep`-mask
   // treatment irregular_rhythm.dart already applies. A pair is contiguous iff
-  // the elapsed time between the two beat times is the interval itself.
+  // the elapsed time between the two beat times is the interval itself. The
+  // differences are kept as contiguous RUNS (a seam ends a run) so the same
+  // pass feeds the lag-1 ACF without ever forming a pair across a hole.
   //
-  // The differences are kept as contiguous RUNS (a seam ends a run) so the same
-  // pass feeds [nnDiffAcf1] without ever forming a lag-1 pair across a hole.
-  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
-  final runs = <List<double>>[];
-  var run = <double>[];
-  for (var i = 1; i < nnMs.length; i++) {
-    if (gapAware && nnTimesMs[i] - nnTimesMs[i - 1] > nnMs[i] + 0.5) {
-      if (run.isNotEmpty) {
-        runs.add(run);
-        run = <double>[];
-      }
-      continue;
-    }
-    run.add(nnMs[i] - nnMs[i - 1]);
-  }
-  if (run.isNotEmpty) runs.add(run);
-
-  var ssd = 0.0;
-  var nn50 = 0;
-  var pairs = 0;
-  for (final r in runs) {
-    for (final d in r) {
-      ssd += d * d;
-      if (d.abs() > 50) nn50++;
-      pairs++;
-    }
-  }
   // RMSSD and pNN50 are the two outputs made of successive differences, so they
   // are the two the jitter floor refuses. SDNN/SDANN are made of the levels and
   // are far less contaminated (jitter share 1–27 % against RMSSD's 11–100 % on
   // the audit corpus) — they keep publishing, which is what the header has
-  // always advised.
-  final acf1 = nnDiffAcf1(runs);
-  final jittery = _jitterRefused(acf1, runs);
+  // always advised. Refused: a long record may still show a breathing line
+  // steady in Hz; then RMSSD alone comes from those 5-min windows.
+  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
+  final nn = Float64List.fromList(nnMs);
+  final times = gapAware ? Float64List.fromList(nnTimesMs) : Float64List(nn.length);
+  final v = hrvTimeOneSlice(Beats(nn, times),
+      originMs: gapAware ? times[0] : null, gapAware: gapAware);
+  final acf1 = v.diffAcf1;
+  // pNN50 is null with a real ACF1 (>= 30 pairs) only when the floor refused.
+  final jittery = acf1 != null && v.pnn50 == null;
   // More beat-time than elapsed: the stream itself is wrong, so neither the
   // differences nor any breathing line in them describe one heart.
   final overCounted = coverage?.overCounted == true;
-  final usable = pairs > 0 && !jittery && !overCounted;
-  var rmssd = usable ? math.sqrt(ssd / pairs) : null;
-  final pnn50 = usable ? 100.0 * nn50 / pairs : null;
-  // Refused: a long record may still show a breathing line steady in Hz
-  // ([_steadyBreathingWindows]); then RMSSD alone comes from those 5-min windows.
-  if (jittery && gapAware && !overCounted) {
-    rmssd = _breathingRmssd(nnMs, nnTimesMs);
-  }
+  final rmssd = overCounted ? null : v.rmssd;
+  final pnn50 = overCounted ? null : v.pnn50;
   final byBreathing = jittery && rmssd != null;
-  final sdnn = stddev(nnMs);
-
-  double? sdann, sdnnIndex;
-  if (gapAware) {
-    final seg = _fiveMinSegments(nnMs, nnTimesMs);
-    if (seg.length >= 2) {
-      final means = [for (final s in seg) mean(s)!];
-      sdann = stddev(means);
-      final sds = [for (final s in seg) stddev(s)].whereType<double>().toList();
-      sdnnIndex = sds.isEmpty ? null : mean(sds);
-    }
-  }
 
   // Confidence scales with beat count (ultra-short reads are less reliable),
   // with the artifact fraction we were handed, and with the measured jitter
@@ -716,9 +487,9 @@ Metric<HrvTime> hrvTime(
   return Metric<HrvTime>(
     value: HrvTime(
       rmssd: rmssd,
-      sdnn: sdnn,
-      sdann: sdann,
-      sdnnIndex: sdnnIndex,
+      sdnn: v.sdnn,
+      sdann: v.sdann,
+      sdnnIndex: v.sdnnIndex,
       pnn50: pnn50,
       nBeats: nnMs.length,
       diffAcf1: acf1,
@@ -730,46 +501,12 @@ Metric<HrvTime> hrvTime(
         ? '${_overcountNote(coverage!)}. SDNN/SDANN survive it and are the '
             'lead here. PRV not ECG-HRV.'
         : jittery
-        ? '${_jitterNote(acf1!)}. SDNN/SDANN survive it and are the lead here. '
+        ? '${_jitterNote(acf1)}. SDNN/SDANN survive it and are the lead here. '
             '${byBreathing ? 'RMSSD only from 5-min windows on a breathing '
                 'line steady in Hz, at floor confidence. ' : ''}PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
             '— lead with SDNN/SDANN',
   );
-}
-
-/// RMSSD pooled over the 5-min windows of [nn] that sit on a breathing line
-/// steady in Hz, or null. Same seam rule as [hrvTime].
-double? _breathingRmssd(List<double> nn, List<double> times) {
-  final wins = <int, List<List<double>>>{};
-  final rrSum = <int, double>{}, rrN = <int, int>{};
-  var prevWin = -1;
-  for (var i = 0; i < nn.length; i++) {
-    final w = ((times[i] - times.first) / 300000.0).floor();
-    rrSum[w] = (rrSum[w] ?? 0) + nn[i];
-    rrN[w] = (rrN[w] ?? 0) + 1;
-    final runs = wins[w] ??= <List<double>>[];
-    if (i > 0 && w == prevWin && times[i] - times[i - 1] <= nn[i] + 0.5) {
-      runs.last.add(nn[i] - nn[i - 1]);
-    } else {
-      runs.add(<double>[]);
-    }
-    prevWin = w;
-  }
-  final keys = wins.keys.toList()..sort();
-  final idx = _steadyBreathingWindows(
-      [for (final k in keys) wins[k]!], [for (final k in keys) rrSum[k]! / rrN[k]!]);
-  if (idx == null) return null;
-  var ss = 0.0, n = 0;
-  for (final i in idx) {
-    for (final r in wins[keys[i]]!) {
-      for (final d in r) {
-        ss += d * d;
-        n++;
-      }
-    }
-  }
-  return n == 0 ? null : math.sqrt(ss / n);
 }
 
 /// Robust NOCTURNAL RMSSD (ms).
@@ -816,6 +553,13 @@ Metric<double> nocturnalRmssd(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few NN intervals for windowed nocturnal RMSSD',
+    );
+  }
+  if (nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
     );
   }
   final t0 = nnTimesMs.first;
@@ -1042,6 +786,14 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     );
   }
 
+  if (rrTsMs.any((t) => !t.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+
   final buckets = <int, List<double>>{};
   final bucketsTs = <int, List<double>>{};
   final inRr = <double>[];
@@ -1185,28 +937,6 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
     note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows'
         '$dropped.${kept.note}',
   );
-}
-
-/// Group NN intervals into consecutive 5-minute (300 000 ms) segments by beat
-/// time. Segments with <2 beats are dropped.
-List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
-  const segMs = 300000.0;
-  final out = <List<double>>[];
-  if (nn.isEmpty) return out;
-  final t0 = times.first;
-  var curIdx = 0;
-  var cur = <double>[];
-  for (var i = 0; i < nn.length; i++) {
-    final idx = ((times[i] - t0) / segMs).floor();
-    if (idx != curIdx) {
-      if (cur.length >= 2) out.add(cur);
-      cur = <double>[];
-      curIdx = idx;
-    }
-    cur.add(nn[i]);
-  }
-  if (cur.length >= 2) out.add(cur);
-  return out;
 }
 
 /// Range-filter [300, 2000] ms + Malik-style ectopic rejection against a local

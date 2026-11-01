@@ -35,6 +35,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import '../../aggregate/json_support.dart';
 
 class CvhrResult {
   final int cycleCount; // detected CVHR cycles
@@ -127,6 +128,16 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  // A non-finite beat time has no place on the 1 Hz grid: NaN slipped past
+  // every gap test and then failed the resample, and an infinite one would be
+  // a stretch of its own. Same answer as rsaRespRate / hrvFreq.
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<CvhrResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   if (tSec.last - tSec.first <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
@@ -135,45 +146,68 @@ Metric<CvhrResult> cvhrApneaScreen(
     );
   }
 
-  // SEGMENT AT GAPS. Beats more than [maxGapSec] apart are two recordings, not
-  // one: interpolating a straight line across the hole invents a flat stretch
-  // with no cycles in it, and charging the hole to `analyzedHours` divides a
-  // real cycle count by time we never observed. Both push the index DOWN, so a
-  // charging break used to read as an improvement.
-  final segStart = <int>[0];
-  for (var i = 1; i < tSec.length; i++) {
-    if (tSec[i] - tSec[i - 1] > maxGapSec) segStart.add(i);
-  }
-
-  var cycleCount = 0;
-  var analyzedHours = 0.0;
-  final depths = <double>[]; // ms
-  final widths = <double>[]; // s
-  for (var s = 0; s < segStart.length; s++) {
-    final lo = segStart[s];
-    final hi = (s + 1 < segStart.length ? segStart[s + 1] : tSec.length) - 1;
-    final segT = tSec.sublist(lo, hi + 1);
-    final segNn = nnMs.sublist(lo, hi + 1);
-    final spanSec = segT.last - segT.first;
-    // Too short to hold even one cycle plus its baseline window — it also can't
-    // be scored, so it contributes neither cycles nor hours.
-    if (segT.length < 60 || spanSec < 60) continue;
-    analyzedHours += spanSec / 3600.0;
-    _scoreSegment(
-      segT,
-      segNn,
+  return _cvhrMetric(_segmentContributions(tSec, nnMs,
       minWidthSec: minWidthSec,
       maxWidthSec: maxWidthSec,
       depthWidthRatioMin: depthWidthRatioMin,
       envWindowSec: envWindowSec,
-      onCycle: (depth, width) {
-        cycleCount++;
+      maxGapSec: maxGapSec), artifactFraction);
+}
+
+class _CvhrContribution {
+  final double hours;
+  final List<double> depths, widths;
+  const _CvhrContribution(this.hours, this.depths, this.widths);
+
+  Map<String, dynamic> toJson() => {
+        'hours': encodeDouble(hours),
+        'depths': [for (final x in depths) encodeDouble(x)],
+        'widths': [for (final x in widths) encodeDouble(x)],
+      };
+}
+
+List<_CvhrContribution> _segmentContributions(List<double> t, List<double> nn,
+    {required double minWidthSec,
+    required double maxWidthSec,
+    required double depthWidthRatioMin,
+    required double envWindowSec,
+    required double maxGapSec}) {
+  final out = <_CvhrContribution>[];
+  var lo = 0;
+  for (var hi = 1; hi <= t.length; hi++) {
+    if (hi != t.length && t[hi] - t[hi - 1] <= maxGapSec) continue;
+    final segT = t.sublist(lo, hi);
+    final spanSec = segT.last - segT.first;
+    if (segT.length >= 60 && spanSec >= 60) {
+      final depths = <double>[];
+      final widths = <double>[];
+      _scoreSegment(segT, nn.sublist(lo, hi),
+          minWidthSec: minWidthSec,
+          maxWidthSec: maxWidthSec,
+          depthWidthRatioMin: depthWidthRatioMin,
+          envWindowSec: envWindowSec,
+          onCycle: (depth, width) {
         depths.add(depth);
         widths.add(width);
-      },
-    );
+      });
+      out.add(_CvhrContribution(spanSec / 3600.0, depths, widths));
+    }
+    lo = hi;
   }
+  return out;
+}
 
+Metric<CvhrResult> _cvhrMetric(
+    List<_CvhrContribution> contributions, double artifactFraction) {
+  const inputs = ['rr_cleaned', 'beat_times'];
+  var analyzedHours = 0.0;
+  final depths = <double>[];
+  final widths = <double>[];
+  for (final c in contributions) {
+    analyzedHours += c.hours;
+    depths.addAll(c.depths);
+    widths.addAll(c.widths);
+  }
   if (analyzedHours <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
@@ -181,7 +215,7 @@ Metric<CvhrResult> cvhrApneaScreen(
       note: 'no gap-free stretch long enough for a CVHR screen (<60 s)',
     );
   }
-
+  final cycleCount = depths.length;
   final perHour = cycleCount / analyzedHours;
   // Confidence also scales with how much time was analysed. Any gap-free
   // stretch of a minute counts, so a night that dropout left with one clean
@@ -209,6 +243,343 @@ Metric<CvhrResult> cvhrApneaScreen(
         'single-night CVHR has substantial night-to-night variability, '
         'interpret as a trend over multiple nights',
   );
+}
+
+/// Exact, append-only state for [cvhrApneaScreen]. Closed gap-free stretches
+/// are reduced to their scored contributions; only the current stretch's beats
+/// are retained for the provisional end-window calculation.
+// Hayano 2011 CVHR screening, as in cvhrApneaScreen(). Closed gap-free stretches
+// retain scored contributions; the current stretch is rescored provisionally
+// with shared batch stages.
+class CvhrStream {
+  final double minWidthSec, maxWidthSec, depthWidthRatioMin, envWindowSec,
+      maxGapSec;
+  final List<_CvhrContribution> _closed = [];
+  final List<double> _rawNn = [], _rawTimes = [];
+  final List<double> _grid = [], _smooth = [], _base = [], _exc = [];
+  int _n = 0;
+  int _openCount = 0;
+  double? _first, _last, _openStart;
+
+  CvhrStream({
+    this.minWidthSec = 10,
+    this.maxWidthSec = 120,
+    this.depthWidthRatioMin = 0.7,
+    this.envWindowSec = 130,
+    this.maxGapSec = 30,
+  });
+
+  factory CvhrStream.fromJson(Map<String, dynamic> json) {
+    try {
+      final j = decodeMap(json);
+      if (field(j, 'type') != 'CvhrStream') {
+        throw const FormatException('not a CvhrStream checkpoint');
+      }
+      if (field(j, 'version') != 1) {
+        throw const FormatException('unsupported CvhrStream version');
+      }
+      final minWidthSec = decodeDouble(field(j, 'minWidthSec'));
+      final maxWidthSec = decodeDouble(field(j, 'maxWidthSec'));
+      final depthWidthRatioMin = decodeDouble(field(j, 'depthWidthRatioMin'));
+      final envWindowSec = decodeDouble(field(j, 'envWindowSec'));
+      final maxGapSec = decodeDouble(field(j, 'maxGapSec'));
+      final n = decodeCount(field(j, 'n'));
+      final first = decodeDoubleOrNull(field(j, 'first'));
+      final last = decodeDoubleOrNull(field(j, 'last'));
+      final openStart = decodeDoubleOrNull(field(j, 'openStart'));
+      final openCount = decodeCount(field(j, 'openCount'));
+      final rawNn = decodeDoubles(field(j, 'rawNn'));
+      final rawTimes = decodeDoubles(field(j, 'rawTimes'));
+      final grid = decodeDoubles(field(j, 'grid'));
+      final smooth = decodeDoubles(field(j, 'smooth'));
+      final base = decodeDoubles(field(j, 'base'));
+      final exc = decodeDoubles(field(j, 'exc'));
+      final encodedClosed = decodeList(field(j, 'closed'));
+      if (!minWidthSec.isFinite || !maxWidthSec.isFinite ||
+          !depthWidthRatioMin.isFinite || !envWindowSec.isFinite ||
+          !maxGapSec.isFinite || rawNn.length != rawTimes.length ||
+          smooth.length > grid.length || base.length > smooth.length ||
+          exc.length != base.length || n < openCount ||
+          (n == 0 && (first != null || last != null || openStart != null ||
+              openCount != 0 || rawNn.isNotEmpty || grid.isNotEmpty)) ||
+          (n > 0 && (first == null || last == null || openStart == null ||
+              openCount == 0 || rawNn.isEmpty))) {
+        throw const FormatException('inconsistent CvhrStream checkpoint');
+      }
+      final s = CvhrStream(
+        minWidthSec: minWidthSec,
+        maxWidthSec: maxWidthSec,
+        depthWidthRatioMin: depthWidthRatioMin,
+        envWindowSec: envWindowSec,
+        maxGapSec: maxGapSec,
+      )
+        .._n = n
+        .._first = first
+        .._last = last
+        .._openStart = openStart
+        .._openCount = openCount
+        .._rawNn.addAll(rawNn)
+        .._rawTimes.addAll(rawTimes)
+        .._grid.addAll(grid)
+        .._smooth.addAll(smooth)
+        .._base.addAll(base)
+        .._exc.addAll(exc);
+      if (n > 0 &&
+          (s._rawTimes.isEmpty || !_cvhrNondecreasing(s._rawTimes))) {
+        throw const FormatException('decreasing checkpoint times');
+      }
+      for (final value in encodedClosed) {
+        final c = decodeMap(value);
+        final hours = decodeDouble(field(c, 'hours'));
+        final depths = decodeDoubles(field(c, 'depths'));
+        final widths = decodeDoubles(field(c, 'widths'));
+        if (!hours.isFinite || hours < 0 || depths.length != widths.length) {
+          throw const FormatException('invalid CVHR segment');
+        }
+        s._closed.add(_CvhrContribution(hours, depths.toList(), widths.toList()));
+      }
+      return s;
+    } on FormatException {
+      rethrow;
+    } catch (e) {
+      throw FormatException('malformed CvhrStream checkpoint: $e');
+    }
+  }
+
+  Map<String, dynamic> toJson() => {
+        'type': 'CvhrStream',
+        'version': 1,
+        'minWidthSec': encodeDouble(minWidthSec),
+        'maxWidthSec': encodeDouble(maxWidthSec),
+        'depthWidthRatioMin': encodeDouble(depthWidthRatioMin),
+        'envWindowSec': encodeDouble(envWindowSec),
+        'maxGapSec': encodeDouble(maxGapSec),
+        'n': _n,
+        'first': _first == null ? null : encodeDouble(_first!),
+        'last': _last == null ? null : encodeDouble(_last!),
+        'openStart': _openStart == null ? null : encodeDouble(_openStart!),
+        'openCount': _openCount,
+        'rawNn': [for (final x in _rawNn) encodeDouble(x)],
+        'rawTimes': [for (final x in _rawTimes) encodeDouble(x)],
+        'grid': [for (final x in _grid) encodeDouble(x)],
+        'smooth': [for (final x in _smooth) encodeDouble(x)],
+        'base': [for (final x in _base) encodeDouble(x)],
+        'exc': [for (final x in _exc) encodeDouble(x)],
+        'closed': [for (final x in _closed) x.toJson()],
+      };
+
+  void fold(List<double> nnMs, List<double> nnTimesMs) {
+    if (nnMs.length != nnTimesMs.length) {
+      throw ArgumentError('nnMs and nnTimesMs must have the same length');
+    }
+    if (nnMs.isEmpty) return;
+    final times = [for (final t in nnTimesMs) t / 1000.0];
+    // Checked before any state changes (a fold cannot be undone): the batch
+    // abstains on such a time, so no snapshot after it could be the batch's.
+    if (times.any((t) => !t.isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
+    if (!_cvhrNondecreasing(times) ||
+        (_last != null && times.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
+    }
+    _first ??= times.first;
+    for (var i = 0; i < times.length; i++) {
+      if (_openCount > 0 && times[i] - _last! > maxGapSec) {
+        _closeOpen();
+      }
+      _openStart ??= times[i];
+      _openCount++;
+      _rawNn.add(nnMs[i]);
+      _rawTimes.add(times[i]);
+      _last = times[i];
+      _settleOpen();
+    }
+    _n += nnMs.length;
+  }
+
+  Metric<CvhrResult> snapshot({
+    List<double> tailNnMs = const [],
+    List<double> tailNnTimesMs = const [],
+    required double artifactFraction,
+    double maxArtifact = 0.30,
+  }) {
+    if (tailNnMs.length != tailNnTimesMs.length) {
+      throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
+    }
+    final tailTimes = [for (final t in tailNnTimesMs) t / 1000.0];
+    if (!_cvhrNondecreasing(tailTimes) ||
+        (tailTimes.isNotEmpty && _last != null && tailTimes.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
+    }
+    const inputs = ['rr_cleaned', 'beat_times'];
+    final n = _n + tailNnMs.length;
+    if (n < 60) {
+      return const Metric<CvhrResult>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'too few beats for a CVHR screen (need ≥60)',
+      );
+    }
+    if (artifactFraction > maxArtifact) {
+      return Metric<CvhrResult>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'artifact fraction ${round6(artifactFraction)} > gate '
+            '— CVHR dip detection unreliable',
+      );
+    }
+    // The folded times are finite (fold refuses others); a non-finite tail
+    // time gets the batch's answer.
+    if (tailTimes.any((t) => !t.isFinite)) {
+      return const Metric<CvhrResult>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'non-finite beat time',
+      );
+    }
+    // Nothing folded yet: the tail's first beat is the origin, as in the batch.
+    final first = _first ?? (tailTimes.isEmpty ? null : tailTimes.first);
+    final last = tailTimes.isEmpty ? _last : tailTimes.last;
+    if (first == null || last == null || last - first <= 0) {
+      return const Metric<CvhrResult>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'degenerate beat times',
+      );
+    }
+    return _cvhrMetric(_snapshotContributions(tailNnMs, tailTimes),
+        artifactFraction);
+  }
+
+  void _closeOpen() {
+    final c = _openContribution();
+    if (c != null) _closed.add(c);
+    _rawNn.clear();
+    _rawTimes.clear();
+    _grid.clear();
+    _smooth.clear();
+    _base.clear();
+    _exc.clear();
+    _openCount = 0;
+    _openStart = null;
+  }
+
+  void _settleOpen() {
+    final start = _openStart!;
+    while (start + _grid.length < _rawTimes.last) {
+      final g = start + _grid.length;
+      _grid.add(_resampleLinear(_rawTimes, _rawNn, [g])[0]);
+    }
+    while (_smooth.length + 7 < _grid.length) {
+      _smooth.add(_savgolAt(_grid, _smooth.length, 7));
+    }
+    final half = (envWindowSec / 2).round();
+    while (_base.length + half < _smooth.length) {
+      final i = _base.length;
+      final b = _medianAt(_smooth, i, half);
+      _base.add(b);
+      _exc.add(math.max(0.0, _smooth[i] - b));
+    }
+    var keep = 0;
+    final lastGrid = start + _grid.length - 1;
+    while (keep + 1 < _rawTimes.length && _rawTimes[keep + 1] <= lastGrid) {
+      keep++;
+    }
+    if (keep > 0) {
+      _rawTimes.removeRange(0, keep);
+      _rawNn.removeRange(0, keep);
+    }
+  }
+
+  List<_CvhrContribution> _snapshotContributions(
+      List<double> tailNn, List<double> tailTimes) {
+    final out = <_CvhrContribution>[..._closed];
+    if (_openCount == 0) {
+      if (tailTimes.isNotEmpty) {
+        out.addAll(_segmentContributions(tailTimes, tailNn,
+            minWidthSec: minWidthSec,
+            maxWidthSec: maxWidthSec,
+            depthWidthRatioMin: depthWidthRatioMin,
+            envWindowSec: envWindowSec,
+            maxGapSec: maxGapSec));
+      }
+      return out;
+    }
+    var split = 0;
+    var previous = _last!;
+    while (split < tailTimes.length && tailTimes[split] - previous <= maxGapSec) {
+      previous = tailTimes[split++];
+    }
+    final open = _openContribution(tailNn.sublist(0, split),
+        tailTimes.sublist(0, split));
+    if (open != null) out.add(open);
+    if (split < tailTimes.length) {
+      out.addAll(_segmentContributions(tailTimes.sublist(split), tailNn.sublist(split),
+          minWidthSec: minWidthSec,
+          maxWidthSec: maxWidthSec,
+          depthWidthRatioMin: depthWidthRatioMin,
+          envWindowSec: envWindowSec,
+          maxGapSec: maxGapSec));
+    }
+    return out;
+  }
+
+  _CvhrContribution? _openContribution(
+      [List<double> tailNn = const [], List<double> tailTimes = const []]) {
+    final start = _openStart!;
+    final count = _openCount + tailNn.length;
+    final last = tailTimes.isEmpty ? _last! : tailTimes.last;
+    if (count < 60 || last - start < 60) return null;
+    final exc = _openExcursion(tailNn, tailTimes);
+    final depths = <double>[];
+    final widths = <double>[];
+    _cvhrCycles(exc,
+        minWidthSec: minWidthSec,
+        maxWidthSec: maxWidthSec,
+        depthWidthRatioMin: depthWidthRatioMin,
+        onCycle: (depth, width) {
+      depths.add(depth);
+      widths.add(width);
+    });
+    return _CvhrContribution((last - start) / 3600.0, depths, widths);
+  }
+
+  List<double> _openExcursion(List<double> tailNn, List<double> tailTimes) {
+    final rawNn = [..._rawNn, ...tailNn];
+    final rawTimes = [..._rawTimes, ...tailTimes];
+    final grid = <double>[..._grid];
+    final start = _openStart!;
+    final last = rawTimes.last;
+    while (start + grid.length < last) {
+      grid.add(_resampleLinear(rawTimes, rawNn, [start + grid.length])[0]);
+    }
+    final nGrid = (last - start).floor() + 1;
+    while (grid.length < nGrid) {
+      grid.add(_resampleLinear(rawTimes, rawNn, [start + grid.length])[0]);
+    }
+    final smooth = <double>[..._smooth];
+    while (smooth.length < grid.length) {
+      smooth.add(_savgolAt(grid, smooth.length, 7));
+    }
+    final half = (envWindowSec / 2).round();
+    final base = <double>[..._base];
+    while (base.length < smooth.length) {
+      base.add(_medianAt(smooth, base.length, half));
+    }
+    return [
+      ..._exc,
+      for (var i = _exc.length; i < smooth.length; i++)
+        math.max(0.0, smooth[i] - base[i]),
+    ];
+  }
+}
+
+bool _cvhrNondecreasing(List<double> values) {
+  for (var i = 1; i < values.length; i++) {
+    if (values[i] < values[i - 1]) return false;
+  }
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,6 +866,16 @@ void _scoreSegment(
   required double envWindowSec,
   required void Function(double depthMs, double widthSec) onCycle,
 }) {
+  final exc = _cvhrExcursion(t, nn, envWindowSec);
+  _cvhrCycles(exc,
+      minWidthSec: minWidthSec,
+      maxWidthSec: maxWidthSec,
+      depthWidthRatioMin: depthWidthRatioMin,
+      onCycle: onCycle);
+}
+
+List<double> _cvhrExcursion(
+    List<double> t, List<double> nn, double envWindowSec) {
   // Resample NN onto a uniform 1 Hz grid by piecewise-linear interpolation of
   // the tachogram (NN vs beat time). This gives evenly-spaced points for the
   // sliding-window baseline and the polynomial smoother. Only ever called on a
@@ -514,18 +895,22 @@ void _scoreSegment(
   // The CVHR bradycardia shows up as a local NN MAXIMUM (NN ↑ ⇔ HR ↓) standing
   // proud of this baseline; the following tachycardia is the recovery valley.
   final halfEnv = (envWindowSec / 2).round();
-  final base = List<double>.filled(nGrid, 0);
-  for (var j = 0; j < nGrid; j++) {
-    final lo = math.max(0, j - halfEnv);
-    final hi = math.min(nGrid - 1, j + halfEnv);
-    base[j] = median(smooth.sublist(lo, hi + 1)) ?? smooth[j];
-  }
+  final base = slidingMedians(smooth, halfEnv);
   // Baseline-subtracted bradycardic excursion (clip negatives — we only score
   // the NN-up bradycardia, not the tachycardia trough).
   final exc = [
     for (var j = 0; j < nGrid; j++) math.max(0.0, smooth[j] - base[j])
   ];
 
+  return exc;
+}
+
+void _cvhrCycles(List<double> exc,
+    {required double minWidthSec,
+    required double maxWidthSec,
+    required double depthWidthRatioMin,
+    required void Function(double depthMs, double widthSec) onCycle}) {
+  final nGrid = exc.length;
   // Prominence threshold: a dip must clear a robust noise floor AND a fraction
   // of the typical excursion amplitude. We anchor it BELOW the median positive
   // excursion (Hayano's adaptive amplitude criterion is permissive enough to
@@ -544,13 +929,15 @@ void _scoreSegment(
   // the run width and the peak depth; apply the width + depth/width gates.
   var i = 0;
   while (i < nGrid) {
-    if (exc[i] <= prom) {
+    // `!(x > prom)` rather than `x <= prom`: a NaN excursion is neither, and
+    // would stall this loop. A non-finite excursion never starts a dip.
+    if (!_above(exc[i], prom)) {
       i++;
       continue;
     }
     final start = i;
     var peakDepth = 0.0;
-    while (i < nGrid && exc[i] > prom) {
+    while (i < nGrid && _above(exc[i], prom)) {
       if (exc[i] > peakDepth) peakDepth = exc[i];
       i++;
     }
@@ -562,6 +949,10 @@ void _scoreSegment(
     onCycle(peakDepth, widthSec);
   }
 }
+
+/// True when [e] is a finite excursion above [prom]. NaN and +-Infinity never
+/// are, so they can neither start nor extend a dip.
+bool _above(double e, double prom) => e.isFinite && e > prom;
 
 /// Piecewise-linear resample of (t,y) onto a sorted [grid] of times (same unit).
 /// Out-of-range grid points clamp to the nearest endpoint value.
@@ -596,36 +987,41 @@ List<double> _savgolQuadratic(List<double> x, {int halfWin = 7}) {
   final n = x.length;
   final out = List<double>.filled(n, 0);
   for (var i = 0; i < n; i++) {
-    final lo = math.max(0, i - halfWin);
-    final hi = math.min(n - 1, i + halfWin);
-    final m = hi - lo + 1;
-    if (m < 3) {
-      out[i] = x[i];
-      continue;
-    }
-    // Fit y = a + b·u + c·u² with u centred at i; return a (value at u=0).
-    var s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0;
-    var sy = 0.0, suy = 0.0, su2y = 0.0;
-    for (var k = lo; k <= hi; k++) {
-      final u = (k - i).toDouble();
-      final u2 = u * u;
-      s0 += 1;
-      s1 += u;
-      s2 += u2;
-      s3 += u2 * u;
-      s4 += u2 * u2;
-      sy += x[k];
-      suy += u * x[k];
-      su2y += u2 * x[k];
-    }
-    // Solve the 3x3 normal equations for [a,b,c]; we only need a.
-    final a = _solve3(
-      [s0, s1, s2, s1, s2, s3, s2, s3, s4],
-      [sy, suy, su2y],
-    );
-    out[i] = a == null ? x[i] : a[0];
+    out[i] = _savgolAt(x, i, halfWin);
   }
   return out;
+}
+
+double _savgolAt(List<double> x, int i, int halfWin) {
+  final lo = math.max(0, i - halfWin);
+  final hi = math.min(x.length - 1, i + halfWin);
+  final m = hi - lo + 1;
+  if (m < 3) return x[i];
+  var s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0;
+  var sy = 0.0, suy = 0.0, su2y = 0.0;
+  for (var k = lo; k <= hi; k++) {
+    final u = (k - i).toDouble();
+    final u2 = u * u;
+    s0 += 1;
+    s1 += u;
+    s2 += u2;
+    s3 += u2 * u;
+    s4 += u2 * u2;
+    sy += x[k];
+    suy += u * x[k];
+    su2y += u2 * x[k];
+  }
+  final a = _solve3(
+    [s0, s1, s2, s1, s2, s3, s2, s3, s4],
+    [sy, suy, su2y],
+  );
+  return a == null ? x[i] : a[0];
+}
+
+double _medianAt(List<double> x, int i, int halfWin) {
+  final lo = math.max(0, i - halfWin);
+  final hi = math.min(x.length - 1, i + halfWin);
+  return slidingMedians(x.sublist(lo, hi + 1), hi - lo + 1)[0];
 }
 
 /// Solve a 3x3 linear system (row-major A, rhs b) via Cramer's rule. Null if
