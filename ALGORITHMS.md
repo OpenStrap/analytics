@@ -176,3 +176,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Abstain when a beat has no finite time | Task Force 1996 HRV; Welch 1967 spectra; input-validity guard is an implementation rule; HRV frequency/time, nocturnal and session RMSSD, RSA and CVHR return absent metrics for non-finite beat times. This prevents endless segment walks and invalid integer conversions. Finite-input formulas are unchanged. |
+
+<!-- Split #99: ['cosinor', 'near_singular'] -->
+
+| Batch change | Method and limits |
+|---|---|
+| Refuse unidentifiable cosinor fits | Nelson et al. 1979, Methods for cosinor-rhythmometry; Welford 1962 centered co-moments; Use centered least squares and a relative determinant gate of 1e-12 of the diagonal product. This is a numerical policy. Nearly collinear phase columns abstain, and ordinary fit parameters can move in their last digits. Upstream zero-amplitude significance gating is retained. |

@@ -22,3 +22,9 @@ HRV frequency/time, nocturnal and session RMSSD, RSA and CVHR return absent metr
 
 Method: Task Force 1996 HRV; Welch 1967 spectra; input-validity guard is an implementation rule. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Refuse unidentifiable cosinor fits
+
+Use centered least squares and a relative determinant gate of 1e-12 of the diagonal product. This is a numerical policy. Nearly collinear phase columns abstain, and ordinary fit parameters can move in their last digits. Upstream zero-amplitude significance gating is retained.
+
+Method: Nelson et al. 1979, Methods for cosinor-rhythmometry; Welford 1962 centered co-moments. Reproduce with `dart run tool/reproduce_outputs.dart`.
+
