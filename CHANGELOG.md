@@ -46,3 +46,9 @@ Group equal duration credits by zone. Cadence validation, median capping and tai
 
 Method: Karvonen 1957 supports reserve zones only; interval credit is an internal ESTIMATE rule. Reproduce with `dart run tool/reproduce_outputs.dart`.
 
+### Compute circadian variance with centered moments
+
+IS and IV may move in their last digits. Batch circular profile sums and first-winner tie selection are unchanged on the rebased head. Chunked merges can reorder profile sums and move near-tie L5/M10 start epochs; that stream-specific behavior belongs with the aggregators.
+
+Method: Witting 1990; van Someren 1999; Welford 1962 centered variance. Reproduce with `dart run tool/reproduce_outputs.dart`.
+

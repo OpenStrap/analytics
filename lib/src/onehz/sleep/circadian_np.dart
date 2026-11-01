@@ -74,10 +74,19 @@ Metric<CircadianNp> circadianNonparametric(
   final lEp = l5Epochs ?? (epochsPerDay * 5 ~/ 24);
 
   final grand = mean(x)!;
-  var ssTot = 0.0;
-  for (final v in x) {
-    final d = v - grand;
-    ssTot += d * d;
+  // Welford (1962) centered variance; Witting (1990), van Someren (1999)
+  // indices retain their formulas. Circular profile sums keep input order.
+  var ssTot = 0.0, center = 0.0, count = 0;
+  for (final value in x) {
+    count++;
+    if (!value.isFinite) {
+      ssTot = double.nan;
+      center = x.take(count).fold<double>(0, (a, b) => a + b) / count;
+      continue;
+    }
+    final delta = value - center;
+    center += delta / count;
+    ssTot += delta * (value - center);
   }
   if (ssTot == 0) {
     return const Metric<CircadianNp>.absent(

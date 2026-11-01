@@ -200,3 +200,9 @@ Malik et al.
 | Batch change | Method and limits |
 |---|---|
 | Count repeated zone intervals before summing | Karvonen 1957 supports reserve zones only; interval credit is an internal ESTIMATE rule; Group equal duration credits by zone. Cadence validation, median capping and tail credit are retained. Grouped multiplication changes the last digits of zone seconds. |
+
+<!-- Split #99: circadian -->
+
+| Batch change | Method and limits |
+|---|---|
+| Compute circadian variance with centered moments | Witting 1990; van Someren 1999; Welford 1962 centered variance; IS and IV may move in their last digits. Batch circular profile sums and first-winner tie selection are unchanged on the rebased head. Chunked merges can reorder profile sums and move near-tie L5/M10 start epochs; that stream-specific behavior belongs with the aggregators. |
