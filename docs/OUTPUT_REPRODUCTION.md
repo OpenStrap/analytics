@@ -3,7 +3,9 @@
 This branch replaces the batch-output portion of #99. The aggregator branch stacks
 on this branch. Edge must bump `kAlgoVersion` when adopting these changed outputs.
 
-Run `dart pub get --offline`, then `dart run tool/reproduce_outputs.dart`.
+Run `dart pub get` with network access on a fresh clone, then
+`dart run tool/reproduce_outputs.dart`. Once dependencies are cached,
+`dart pub get --offline` also works.
 `--json` prints unrounded machine-readable results. The script calls batch APIs
 only. Its input recipes are in `test/fixtures/output_changes.json`, a small
 synthetic fixture. It contains no personal measurements. Formula parameters
