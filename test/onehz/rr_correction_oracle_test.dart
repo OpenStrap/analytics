@@ -25,7 +25,9 @@ void _check(List<double> rr, List<double>? ts, String why,
       windowBeats: win,
       minThresholdMs: floor,
       reanchorGapMs: reanchor);
+  // The frozen reference predates the cap; compare its explicit uncapped API.
   final got = correctRr(rr,
+      maxArtifactRun: null,
       rrTsMs: ts,
       alpha: alpha,
       windowBeats: win,

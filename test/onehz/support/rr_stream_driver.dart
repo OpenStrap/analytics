@@ -1,4 +1,5 @@
-// Driver + oracle comparison for the streaming RrCorrector tests.
+// Driver for the uncapped RrCorrector against the frozen pre-cap oracle.
+// rr_artifact_cap_test.dart and review_stream_gap_test.dart cover the default cap.
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
@@ -18,7 +19,7 @@ class RrStreamRun {
   int folded = 0;
   int restarts = 0;
 
-  RrStreamRun([RrCorrector? corrector]) : c = corrector ?? RrCorrector();
+  RrStreamRun([RrCorrector? corrector]) : c = corrector ?? RrCorrector(maxArtifactRun: null);
 
   RrStreamRun.params(
       {double alpha = 5.2,
@@ -26,6 +27,7 @@ class RrStreamRun {
       double floor = 100,
       double reanchor = 1000})
       : c = RrCorrector(
+            maxArtifactRun: null,
             alpha: alpha,
             windowBeats: win,
             minThresholdMs: floor,
