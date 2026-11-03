@@ -317,7 +317,7 @@ class RrCapWindow {
       }
       if (cutA >= 0) {
         for (var i = cutA; i < cutB; i++) {
-          out.classes[i] = BeatClass.longShort;
+          out.classes[i] = BeatClass.gap;
           out.gaps[i] = true;
           out.hardGaps[i] = hardCut || (inGap && hardLeading && cutA == start);
         }

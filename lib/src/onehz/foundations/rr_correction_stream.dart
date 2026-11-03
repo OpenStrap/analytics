@@ -241,9 +241,10 @@ class RrCorrector {
         c._c2 <= c._c1 &&
         c._c1 <= c._n &&
         c._fcls.length == c._c2 - c._ce &&
-        c._fcls.every((k) => k >= 0 && k < BeatClass.values.length) &&
+        // Uncapped state never emits the cap-only gap label.
+        c._fcls.every((k) => k >= 0 && k <= BeatClass.extra.index) &&
         c._lastFinal >= 0 &&
-        c._lastFinal < BeatClass.values.length &&
+        c._lastFinal <= BeatClass.extra.index &&
         c._lastNormals.length <= 2 &&
         c._off <= math.max(0, c._c2 - 2 * c._h - 1);
     if (!ok) throw const FormatException('inconsistent RrCorrector checkpoint');
