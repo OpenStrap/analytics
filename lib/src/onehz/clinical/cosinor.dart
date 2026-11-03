@@ -79,6 +79,13 @@ Metric<CosinorFit> cosinor(
   double periodHours = 24,
   int minPoints = cosinorMinPoints,
 }) {
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
   if (tHours.length != y.length) {
     return const Metric<CosinorFit>.absent(tier: Tier.high,
       inputs_used: ['signal_timeseries'], note: 'too few points for cosinor');

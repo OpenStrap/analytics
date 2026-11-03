@@ -31,7 +31,12 @@ import 'rr_correction_kernel.dart';
 const int kMaxArtifactRun = 32;
 
 /// Artifact label for a single beat.
-enum BeatClass { normal, ectopic, longShort, missed, extra }
+enum BeatClass {
+  normal, ectopic, longShort, missed, extra,
+  /// An over-cap artifact run, without a claim about its individual types.
+  /// Appended to preserve the indices of existing checkpoint labels.
+  gap,
+}
 
 class RrCorrectionResult {
   /// Cleaned NN intervals (ms). Isolated artifacts spline-corrected; multi-beat
@@ -56,6 +61,8 @@ class RrCorrectionResult {
   final List<int> nnSourceIndex;
 
   /// Per-input-beat classification (same length as the input rr).
+  /// Over-cap runs use [BeatClass.gap]; other artifact labels retain their
+  /// inferred classification. A gap makes no physiological type claim.
   final List<BeatClass> classes;
 
   /// Fraction of input beats classified normal (0..1).

@@ -836,7 +836,8 @@ const int ctlAtlMinDays = 14;
 
 /// CTL/ATL/TSB from a time-ordered daily-TRIMP series (oldest→newest).
 /// EWMA with time constants 42 d (CTL) and 7 d (ATL): λ = 1 − e^(−1/τ).
-/// A missing day contributes a 0-load impulse (rest day) — the EWMA decays.
+/// An observed rest day is 0 load and decays the EWMA. Unknown/non-finite
+/// daily load abstains; it is never substituted with a rest day.
 ///
 /// SEEDING (Banister 1975 impulse-response; the load before the record started
 /// is UNKNOWN): both accumulators used to be seeded at `dailyTrimp.first`,
@@ -853,6 +854,13 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     int minDays = ctlAtlMinDays,
     int primeDays = 7}) {
   const inputs = ['daily_trimp'];
+  if (dailyTrimp.any((value) => !value.isFinite)) {
+    return const Metric<LoadState>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'non-finite daily TRIMP',
+    );
+  }
   if (dailyTrimp.length < minDays) {
     return Metric<LoadState>.absent(
       tier: Tier.estimate,
@@ -866,7 +874,6 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
   // Neumaier (1974) compensation for the bounded-prefix mean.
   var sum = 0.0, correction = 0.0;
   for (final value in dailyTrimp.take(prime)) {
-    if (value.isNaN) continue;
     final next = sum + value;
     if (next.isFinite) {
       correction += sum.abs() >= value.abs()
@@ -882,7 +889,6 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     final keep = 1 - lambda;
     for (var i = prime; i < dailyTrimp.length; i++) {
       final value = dailyTrimp[i];
-      if (value.isNaN) continue;
       scale *= keep;
       offset = keep * offset + lambda * value;
     }
