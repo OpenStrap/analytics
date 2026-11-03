@@ -45,6 +45,30 @@ void main() {
       expect(metric.note, 'invalid cosinor period');
     });
   }
+  test('a capped reset keeps source time but invalidates regressing HRV time', () {
+    // The RR clock exceeds elapsed sensor time before the cap. Re-anchoring
+    // the next independent segment must retain its actual sensor timestamp.
+    final rr = [...List<double>.filled(100, 1500),
+      ...List<double>.filled(33, 3000), ...List<double>.filled(100, 1500)];
+    final ts = [for (var i = 0; i < rr.length; i++) 1.7e12 + i * 1000];
+    final result = correctRr(rr, rrTsMs: ts);
+    expect(result.nnTimesMs[99], 150000);
+    expect(result.nnTimesMs[100], 134500);
+    for (final metric in [
+      hrvTime(result.nn, nnTimesMs: result.nnTimesMs),
+      nocturnalRmssd(result.nn, result.nnTimesMs),
+      sleepSessionRmssdDetail(result.nn, result.nnTimesMs,
+          startSec: 1, endSec: 400),
+    ]) {
+      expect(metric.present, isFalse);
+      expect(metric.note, 'regressing beat time');
+    }
+  });
+
+  test('an entirely unknown load history abstains', () {
+    expect(ctlAtlTsb(List<double>.filled(42, double.nan)).present, isFalse);
+  });
+
   test('over-cap artifacts have an explicit gap label', () {
     final rr = [
       ...List<double>.filled(100, 900),

@@ -12,7 +12,10 @@ its design. CTL/ATL abstains on unknown/non-finite daily load; explicit observed
 zero-load rest days still decay. These are input-validity policies, not new
 physiological models. Capped RR runs now report `BeatClass.gap`, appended after
 existing enum values, rather than claiming every omitted beat is long/short.
-Finite-input formulas, corrected NN and cap accounting are unchanged.
+HRV also abstains when retained beat times regress, including when RR
+accumulation disagrees with the recorded time at a capped-gap reset. Recorded
+segment anchors are preserved; timestamps are never shifted to hide the conflict.
+Other finite-input formulas, corrected NN and cap accounting are unchanged.
 
 
 ### Leave long RR artifact runs as gaps
