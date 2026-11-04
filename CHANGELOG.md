@@ -15,6 +15,10 @@ existing enum values, rather than claiming every omitted beat is long/short.
 HRV also abstains when retained beat times regress, including when RR
 accumulation disagrees with the recorded time at a capped-gap reset. Recorded
 segment anchors are preserved; timestamps are never shifted to hide the conflict.
+Frequency HRV, RSA and CVHR use the same regressing-clock refusal. Time HRV
+also refuses supplied clock vectors whose length does not match the NN vector;
+NN-only calls remain supported. Cosinor refuses non-finite design/response
+moments, including overflow from a positive subnormal period or finite responses.
 Other finite-input formulas, corrected NN and cap accounting are unchanged.
 
 
