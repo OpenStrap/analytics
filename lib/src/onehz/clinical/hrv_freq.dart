@@ -91,6 +91,13 @@ Metric<HrvFreq> hrvFreq(
       note: 'non-finite beat time',
     );
   }
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<HrvFreq>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<HrvFreq>.absent(

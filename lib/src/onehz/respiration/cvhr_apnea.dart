@@ -134,6 +134,13 @@ Metric<CvhrResult> cvhrApneaScreen(
       note: 'non-finite beat time',
     );
   }
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<CvhrResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
   if (tSec.last - tSec.first <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
