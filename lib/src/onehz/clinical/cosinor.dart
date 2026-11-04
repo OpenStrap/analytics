@@ -149,6 +149,16 @@ Metric<CosinorFit> _finishCosinor(
       note: 'too few points for cosinor',
     );
   }
+  // A finite period or response can still overflow the design arithmetic.
+  // Reject invalid moments before NaN can bypass the identifiability gate.
+  if (![state.meanC, state.meanS, state.meanY, state.mCC, state.mSS,
+        state.mYY, state.mCS, state.mCY, state.mSY].every((v) => v.isFinite)) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite cosinor design',
+    );
+  }
   final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
   // The determinant is relative to the diagonal co-moments.  A design needs
   // at least 1e-12 of that scale after removing its means to identify both

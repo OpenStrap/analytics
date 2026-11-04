@@ -59,10 +59,69 @@ void main() {
       nocturnalRmssd(result.nn, result.nnTimesMs),
       sleepSessionRmssdDetail(result.nn, result.nnTimesMs,
           startSec: 1, endSec: 400),
+      sleepSessionRmssdDetail(result.nn, result.nnTimesMs,
+          startSec: 1, endSec: 100),
     ]) {
       expect(metric.present, isFalse);
       expect(metric.note, 'regressing beat time');
     }
+  });
+
+  for (final entry in <String, Metric<dynamic> Function(List<double>, List<double>)>{
+    'frequency HRV': (nn, ts) => hrvFreq(nn, ts, artifactFraction: 0),
+    'RSA': (nn, ts) => rsaRespRate(nn, ts, artifactFraction: 0),
+    'CVHR': (nn, ts) => cvhrApneaScreen(nn, ts, artifactFraction: 0),
+  }.entries) {
+    test('${entry.key} refuses a regressing spectral clock', () {
+      final nn = List<double>.filled(1500, 900);
+      final ts = [for (var i = 0; i < nn.length; i++) i * 900.0];
+      ts[700] = ts[699] - 500;
+      final metric = entry.value(nn, ts);
+      expect(metric.present, isFalse);
+      expect(metric.note, 'regressing beat time');
+    });
+  }
+
+  for (final times in <List<double>>[[], [800], [800, 1700, 2500]]) {
+    test('time HRV refuses a supplied ${times.length}-beat clock for two NN', () {
+      final metric = hrvTime([800, 900], nnTimesMs: times);
+      expect(metric.present, isFalse);
+      expect(metric.note, 'beat time length mismatch');
+      // NN-only remains supported, as does a matching two-beat clock.
+      // One 100 ms difference has RMSSD exactly 100 ms.
+      expect(hrvTime([800, 900]).value!.rmssd, 100);
+      expect(hrvTime([800, 900], nnTimesMs: [800, 1700]).value!.rmssd, 100);
+    });
+  }
+
+  test('cosinor refuses overflow from a subnormal positive period', () {
+    final metric = cosinor(
+      List<double>.generate(48, (i) => i.toDouble()),
+      List<double>.generate(48, (i) => 60.0 + i % 3),
+      periodHours: 1e-320,
+    );
+    expect(metric.present, isFalse);
+    expect(metric.note, 'non-finite cosinor design');
+  });
+  for (final bad in [double.nan, double.infinity, double.negativeInfinity]) {
+    for (final axis in ['time', 'response']) {
+      test('cosinor refuses non-finite $axis moment $bad', () {
+        final ts = List<double>.generate(48, (i) => i.toDouble());
+        final values = List<double>.generate(48, (i) => 60.0 + i % 3);
+        (axis == 'time' ? ts : values)[12] = bad;
+        final metric = cosinor(ts, values);
+        expect(metric.present, isFalse);
+        expect(metric.note, 'non-finite cosinor design');
+      });
+    }
+  }
+  test('cosinor refuses non-finite moments from finite overflow', () {
+    final metric = cosinor(
+      List<double>.generate(48, (i) => i.toDouble()),
+      List<double>.generate(48, (i) => i.isEven ? 1e308 : -1e308),
+    );
+    expect(metric.present, isFalse);
+    expect(metric.note, 'non-finite cosinor design');
   });
 
   test('an entirely unknown load history abstains', () {
