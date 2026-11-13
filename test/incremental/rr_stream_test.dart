@@ -287,4 +287,43 @@ void main() {
       }
     }
   }, timeout: const Timeout(Duration(minutes: 5)));
+
+  // why: a chunk with one bad beat must not leave the beats before it applied.
+  // # catches: fold([800, nan]) keeps beat 1, so retrying the fixed chunk
+  // counts it twice.
+  test('a rejected chunk changes nothing and can be retried', () {
+    final ts = [for (var i = 1; i <= 6; i++) i * 800.0];
+    final rr = List<double>.filled(6, 800.0);
+    final clean = RrCorrector()..fold(rr, tsMs: ts);
+    final c = RrCorrector();
+    expect(() => c.fold([800, double.nan], tsMs: [800, 1600]),
+        throwsArgumentError);
+    expect(() => c.fold([800, 800], tsMs: [800, double.nan]),
+        throwsArgumentError);
+    expect(c.bufferedBeats, 0);
+    expect(c.classifiedBeats, 0);
+    c.fold(rr, tsMs: ts);
+    expect(c.bufferedBeats, clean.bufferedBeats);
+    expect(c.classifiedBeats, clean.classifiedBeats);
+    expect(c.snapshot().tailNn, clean.snapshot().tailNn);
+  });
+
+  // why: the first fold decides whether the stream is timestamped; a rejected
+  // first chunk must not decide it.
+  test('a rejected first chunk does not fix the timestamp mode', () {
+    final c = RrCorrector();
+    expect(() => c.fold([800, double.nan]), throwsArgumentError);
+    c.fold([800, 800, 800], tsMs: [800, 1600, 2400]);
+    expect(c.bufferedBeats, 3);
+  });
+
+  // why: a non-positive step never advances the cut position.
+  // # catches: sec = 0 or a negative sec loops forever in timeCuts.
+  test('timeCuts rejects a non-positive or non-finite step', () {
+    final ts = [1000.0, 2000.0, 3000.0];
+    for (final bad in [0.0, -1.0, double.nan, double.infinity]) {
+      expect(() => timeCuts(ts, bad), throwsArgumentError, reason: '$bad');
+    }
+    expect(timeCuts(ts, 1), [1, 2, 3]);
+  });
 }
