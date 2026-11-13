@@ -93,8 +93,11 @@ Aggregator<dynamic, DoubleColumn, Metric<LoadState>> ctlAtlTsbAggregator({
   const inputs = ['daily_trimp'];
   final lc = 1 - math.exp(-1 / ctlDays);
   final la = 1 - math.exp(-1 / atlDays);
+  // CLAIM(review-input-refusals): Sum/Ewma skip NaN by design. Keep a
+  // separate finite-row count so unknown load survives every streaming path.
   final core = both(
-    const Count<DoubleColumn>(),
+    both(const Count<DoubleColumn>(),
+        CountWhere<DoubleColumn>((batch) => batch.values, (v) => v.isFinite)),
     Prefix(
       math.max(primeDays, 1),
       both(
@@ -112,17 +115,30 @@ Aggregator<dynamic, DoubleColumn, Metric<LoadState>> ctlAtlTsbAggregator({
   return validateCheckpoint(core, (json) {
     final state = decodeList(json);
     if (state.length != 2) throw const FormatException('Expected two states');
-    final days = decodeCount(state[0]);
+    final counts = decodeList(state[0]);
+    if (counts.length != 2) throw const FormatException('Expected two counts');
+    final days = decodeCount(counts[0]);
+    if (decodeCount(counts[1]) > days) {
+      throw const FormatException('Finite TRIMP count exceeds day count');
+    }
     final rows = field(decodeMap(state[1]), 'rows');
     if (days == 0) {
       if (rows != null) throw const FormatException('Prefix rows without days');
       return;
     }
-    if (rows == null || decodeList(rows).length != (days < prime ? days : prime)) {
+    if (rows == null ||
+        decodeList(rows).length != (days < prime ? days : prime)) {
       throw const FormatException('Prefix rows disagree with days');
     }
   }).map((result) {
-    final days = result.$1;
+    final (days, finiteDays) = result.$1;
+    if (finiteDays != days) {
+      return const Metric<LoadState>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: 'non-finite daily TRIMP',
+      );
+    }
     if (days < minDays) {
       return Metric<LoadState>.absent(
         tier: Tier.estimate,

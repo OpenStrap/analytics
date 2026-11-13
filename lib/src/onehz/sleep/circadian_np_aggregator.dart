@@ -144,11 +144,11 @@ class _CircadianStatsAggregator
       final value = values[i];
       state.sum += value;
       state.count++;
+      // Match the batch centered-variance pass: NaN is absorbing. Counts and
+      // the raw sum still need every row for the other circadian indices.
+      if (state.m2.isNaN) continue;
       if (!value.isFinite) {
-        // The reference later evaluates (value - grand) squared for this row.
-        // Whatever grand is, this makes ssTot non-finite (and usually NaN).
         state.m2 = double.nan;
-        state.mean = state.sum / state.count;
         continue;
       }
       final delta = value - state.mean;

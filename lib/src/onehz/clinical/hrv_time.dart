@@ -416,6 +416,32 @@ Metric<HrvTime> hrvTime(
   RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  if (nnTimesMs != null && nnTimesMs.length != nnMs.length) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'beat time length mismatch',
+    );
+  }
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (nnTimesMs != null && nnTimesMs.length == nnMs.length &&
+      hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (nnMs.any((value) => !value.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (nnMs.length < 2) {
     return const Metric<HrvTime>.absent(
       tier: Tier.high,
@@ -541,6 +567,24 @@ Metric<double> nocturnalRmssd(
   RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (nnMs.any((value) => !value.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (coverage != null && coverage.overCounted) {
     return Metric<double>.absent(
       tier: Tier.high,
@@ -774,6 +818,24 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
   int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
 }) {
   const inputs = ['rr_sleep_window'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (hasRegressingBeatTimes(rrTsMs)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (rrMs.any((value) => !value.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (startSec <= 0 ||
       endSec <= startSec ||
       rrMs.isEmpty ||

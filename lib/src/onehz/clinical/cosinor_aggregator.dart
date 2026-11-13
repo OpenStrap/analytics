@@ -24,8 +24,7 @@ class TimedValues extends Batch<TimedValues> {
   final Float64List y;
 
   @override
-  Object? toJson() =>
-      {'tHours': encodeDoubles(tHours), 'y': encodeDoubles(y)};
+  Object? toJson() => {'tHours': encodeDoubles(tHours), 'y': encodeDoubles(y)};
 
   @override
   int get length => y.length;
@@ -127,6 +126,7 @@ class _CosinorStats
   @override
   _CosinorState addSlice(
       _CosinorState state, TimedValues batch, int start, int end) {
+    if (!periodHours.isFinite || periodHours <= 0) return state;
     final w = 2 * math.pi / periodHours;
     for (var i = start; i < end; i++) {
       final c = math.cos(w * batch.tHours[i]);
@@ -200,12 +200,39 @@ Metric<CosinorFit> _finishCosinor(
   required int minPoints,
 }) {
   const inputs = ['signal_timeseries'];
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'invalid cosinor period',
+    );
+  }
   final n = state.n;
-  if (n < math.max(4, minPoints) || periodHours <= 0) {
+  if (n < math.max(4, minPoints)) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few points for cosinor',
+    );
+  }
+  // A finite period or response can still overflow the design arithmetic.
+  // Reject invalid moments before NaN can bypass the identifiability gate.
+  // CLAIM(review-input-refusals): applies to slices, merges and restores too.
+  if (![
+    state.meanC,
+    state.meanS,
+    state.meanY,
+    state.mCC,
+    state.mSS,
+    state.mYY,
+    state.mCS,
+    state.mCY,
+    state.mSY
+  ].every((v) => v.isFinite)) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite cosinor design',
     );
   }
   final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
@@ -219,10 +246,8 @@ Metric<CosinorFit> _finishCosinor(
       note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
-  final beta =
-      (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
-  final gamma =
-      (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
+  final beta = (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
+  final gamma = (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
   final mesor = state.meanY - beta * state.meanC - gamma * state.meanS;
   final amplitude = math.sqrt(beta * beta + gamma * gamma);
   final acro = math.atan2(-gamma, beta);
@@ -276,7 +301,6 @@ Metric<CosinorFit> _finishCosinor(
             '(zero-amplitude test not rejected), acrophase undefined',
   );
 }
-
 
 /// Upper tail of F(2, d): P(F > f) = (1 + 2f/d)^(−d/2), exact for 2 numerator
 /// degrees of freedom.

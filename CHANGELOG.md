@@ -4,6 +4,24 @@
 
 Edge must bump `kAlgoVersion` when adopting these changed batch outputs.
 
+### Review input and gap validity
+
+HRV time, nocturnal and session RMSSD abstain on non-finite NN intervals before
+segmentation. Cosinor rejects non-finite or non-positive periods before computing
+its design. CTL/ATL abstains on unknown/non-finite daily load; explicit observed
+zero-load rest days still decay. These are input-validity policies, not new
+physiological models. Capped RR runs now report `BeatClass.gap`, appended after
+existing enum values, rather than claiming every omitted beat is long/short.
+HRV also abstains when retained beat times regress, including when RR
+accumulation disagrees with the recorded time at a capped-gap reset. Recorded
+segment anchors are preserved; timestamps are never shifted to hide the conflict.
+Frequency HRV, RSA and CVHR use the same regressing-clock refusal. Time HRV
+also refuses supplied clock vectors whose length does not match the NN vector;
+NN-only calls remain supported. Cosinor refuses non-finite design/response
+moments, including overflow from a positive subnormal period or finite responses.
+Other finite-input formulas, corrected NN and cap accounting are unchanged.
+
+
 ### Leave long RR artifact runs as gaps
 
 The 32-beat cap is an internal ESTIMATE rule with low confidence, not a published threshold. Longer runs split the series; each side is corrected independently. The synthetic 33-beat case keeps 200 NN beats and drops 33.
