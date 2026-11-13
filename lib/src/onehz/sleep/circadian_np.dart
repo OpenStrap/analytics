@@ -80,9 +80,10 @@ Metric<CircadianNp> circadianNonparametric(
   for (final value in x) {
     count++;
     if (!value.isFinite) {
+      // NaN is absorbing: every later update keeps ssTot NaN, so the running
+      // centre is not needed again and the rest of the series is not walked.
       ssTot = double.nan;
-      center = x.take(count).fold<double>(0, (a, b) => a + b) / count;
-      continue;
+      break;
     }
     final delta = value - center;
     center += delta / count;
