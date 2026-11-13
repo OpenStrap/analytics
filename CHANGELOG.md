@@ -142,6 +142,8 @@ Use origin-shifted moments for NN levels and five-minute bins, and centered lag 
 
 Method: Task Force 1996; Welford 1962 centered sums and products. Reproduce with `dart run tool/reproduce_outputs.dart`.
 ### Changed
+- `IncrementalHrvTime` applies the batch refusal for regressing or mismatched
+  supplied clocks before updating its retained summary.
 - CTL/ATL aggregator checkpoints retain total and finite day counts. Older
   checkpoints without validity evidence are refused so unknown load cannot be
   silently restored as observed history.

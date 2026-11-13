@@ -104,6 +104,13 @@ class IncrementalHrvTime {
       {List<double>? nnTimesMs,
       double artifactFraction = 0,
       bool force = false}) {
+    // CLAIM(incremental-hrv-clock-refusal): a supplied invalid clock must
+    // never become NN-only input or update the retained valid summary.
+    if (nnTimesMs != null &&
+        (nnTimesMs.length != nnMs.length || hasRegressingBeatTimes(nnTimesMs))) {
+      return hrvTime(nnMs,
+          nnTimesMs: nnTimesMs, artifactFraction: artifactFraction);
+    }
     final timed = nnTimesMs != null && nnTimesMs.length == nnMs.length;
     final oldTimed = _times != null && _times!.length == _nn.length;
     final finite = nnMs.every((v) => v.isFinite) &&

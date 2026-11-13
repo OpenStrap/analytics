@@ -69,7 +69,12 @@ void main() {
     state.sync(nn, nnTimesMs: times);
     nn[119] += 60;
     hrvClose(state.sync(nn, nnTimesMs: times), hrvTime(nn, nnTimesMs: times));
-    times[113] += 18000;
+    // Move the suffix so this replacement remains a valid clock with a gap.
+    // A single moved timestamp regresses at the following beat; that refusal
+    // is covered separately below.
+    for (var i = 113; i < times.length; i++) {
+      times[i] += 18000;
+    }
     hrvClose(state.sync(nn, nnTimesMs: times), hrvTime(nn, nnTimesMs: times));
     nn = nn.sublist(27, 700);
     times = times.sublist(27, 700);
@@ -81,6 +86,46 @@ void main() {
     hrvClose(state.sync(nn), hrvTime(nn));
     hrvClose(state.sync(nn, nnTimesMs: [1]), hrvTime(nn, nnTimesMs: [1]));
   });
+  // why: review 9eea67c/d059e6e made invalid clocks absent in the batch;
+  // incremental reuse must apply that refusal before updating its cache.
+  // proves: CLAIM(incremental-hrv-clock-refusal)
+  // catches: accepting a regressing clock or treating a supplied short clock
+  // as an NN-only request.
+  test('HRV regressing clocks refuse without changing retained state', () {
+    final f = incrementalFixture();
+    var state = IncrementalHrvTime();
+    state.sync(f.nn, nnTimesMs: f.times);
+    final before = checkpoint(state.toJson());
+    final regressing = [...f.times]..[113] += 18000;
+    for (final force in [false, true]) {
+      final result = state.sync(f.nn, nnTimesMs: regressing, force: force);
+      expect(result.value, isNull);
+      expect(result.note, 'regressing beat time');
+      expect(state.toJson(), before);
+    }
+    state = IncrementalHrvTime.fromJson(before);
+    hrvClose(state.sync(f.nn, nnTimesMs: f.times),
+        hrvTime(f.nn, nnTimesMs: f.times));
+  });
+
+  test('HRV supplied clock length mismatch never becomes NN-only input', () {
+    final f = incrementalFixture();
+    final state = IncrementalHrvTime();
+    state.sync(f.nn, nnTimesMs: f.times);
+    final before = checkpoint(state.toJson());
+    for (final times in [
+      <double>[],
+      [1.0],
+      [...f.times, f.times.last + 900]
+    ]) {
+      final result = state.sync(f.nn, nnTimesMs: times);
+      expect(result.value, isNull);
+      expect(result.note, 'beat time length mismatch');
+      expect(state.toJson(), before);
+    }
+    hrvClose(state.sync(f.nn), hrvTime(f.nn));
+  });
+
   test('HRV constant series, singleton, empty and all separated seams', () {
     final state = IncrementalHrvTime();
     for (final n in [0, 1, 2, 29, 30, 31, 32, 80]) {
@@ -120,14 +165,22 @@ void main() {
     (
       'a respiratory line exempts the night',
       breathing(
-          hours: 1, baseMs: 1350, driftMs: 80, breathMs: 40, breathHz: .3,
+          hours: 1,
+          baseMs: 1350,
+          driftMs: 80,
+          breathMs: 40,
+          breathHz: .3,
           jitterMs: 3),
       'PRV not ECG-HRV; RMSSD/pNN50',
     ),
     (
       'a refused night publishes from a breathing line steady in Hz',
       breathing(
-          hours: 2.5, baseMs: 900, driftMs: 400, breathMs: 10, breathHz: .25,
+          hours: 2.5,
+          baseMs: 900,
+          driftMs: 400,
+          breathMs: 10,
+          breathHz: .25,
           jitterMs: 40),
       'breathing line steady in Hz',
     ),

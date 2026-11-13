@@ -3,6 +3,7 @@ library;
 
 import 'dart:math' as math;
 import 'types.dart';
+import 'util.dart' show hasRegressingBeatTimes;
 import 'clinical/hrv_time.dart';
 import 'clinical/load_trimp.dart';
 import 'motion/enmo.dart';
