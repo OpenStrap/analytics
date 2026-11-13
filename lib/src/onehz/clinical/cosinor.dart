@@ -60,14 +60,6 @@ class CosinorFit {
 /// reported.
 const double cosinorAcrophaseAlpha = 0.05;
 
-/// Upper tail of F(2, d): P(F > f) = (1 + 2f/d)^(−d/2), exact for 2 numerator
-/// degrees of freedom.
-double _f2Survival(double f, int d) {
-  if (f.isNaN) return 1.0;
-  if (f.isInfinite) return 0.0;
-  if (f <= 0) return 1.0;
-  return math.pow(1 + 2 * f / d, -d / 2).toDouble();
-}
 
 /// Minimum samples for a cosinor fit. The model has 3 free parameters
 /// (M, β, γ); with n = 4 there is a single residual degree of freedom, so R²
@@ -87,73 +79,118 @@ Metric<CosinorFit> cosinor(
   double periodHours = 24,
   int minPoints = cosinorMinPoints,
 }) {
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
+  if (tHours.length != y.length) {
+    return const Metric<CosinorFit>.absent(tier: Tier.high,
+      inputs_used: ['signal_timeseries'], note: 'too few points for cosinor');
+  }
+  final state = _CosinorState();
+  final w = 2 * math.pi / periodHours;
+  for (var i = 0; i < y.length; i++) {
+    state.addCentered(math.cos(w * tHours[i]), math.sin(w * tHours[i]), y[i]);
+  }
+  return _finishCosinor(state, periodHours: periodHours, minPoints: minPoints);
+}
+
+// Nelson et al. (1979), Methods for cosinor-rhythmometry.
+// Centered least squares changes rounding. Relative 1e-12 gate is a
+// numerical identifiability policy, not a physiological cutoff.
+class _CosinorState {
+  var n = 0;
+  var meanC = 0.0;
+  var meanS = 0.0;
+  var meanY = 0.0;
+  var mCC = 0.0;
+  var mSS = 0.0;
+  var mYY = 0.0;
+  var mCS = 0.0;
+  var mCY = 0.0;
+  var mSY = 0.0;
+
+  void addCentered(double c, double s, double y) {
+    final nextN = n + 1;
+    final dc = c - meanC;
+    final ds = s - meanS;
+    final dy = y - meanY;
+    final nextMeanC = meanC + dc / nextN;
+    final nextMeanS = meanS + ds / nextN;
+    final nextMeanY = meanY + dy / nextN;
+    mCC += dc * (c - nextMeanC);
+    mSS += ds * (s - nextMeanS);
+    mYY += dy * (y - nextMeanY);
+    mCS += dc * (s - nextMeanS);
+    mCY += dc * (y - nextMeanY);
+    mSY += ds * (y - nextMeanY);
+    meanC = nextMeanC;
+    meanS = nextMeanS;
+    meanY = nextMeanY;
+    n = nextN;
+  }
+
+}
+
+Metric<CosinorFit> _finishCosinor(
+  _CosinorState state, {
+  required double periodHours,
+  required int minPoints,
+}) {
   const inputs = ['signal_timeseries'];
-  final n = y.length;
-  if (n < math.max(4, minPoints) || tHours.length != n || periodHours <= 0) {
+  final n = state.n;
+  if (n < math.max(4, minPoints) || periodHours <= 0) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few points for cosinor',
     );
   }
-  final w = 2 * math.pi / periodHours;
-  final c = [for (final t in tHours) math.cos(w * t)];
-  final s = [for (final t in tHours) math.sin(w * t)];
-
-  // Normal equations for [M, β, γ] of y = M + β·c + γ·s.
-  // Build 3×3 symmetric system.
-  var sC = 0.0, sS = 0.0, sCC = 0.0, sSS = 0.0, sCS = 0.0;
-  var sY = 0.0, sYC = 0.0, sYS = 0.0;
-  for (var i = 0; i < n; i++) {
-    sC += c[i];
-    sS += s[i];
-    sCC += c[i] * c[i];
-    sSS += s[i] * s[i];
-    sCS += c[i] * s[i];
-    sY += y[i];
-    sYC += y[i] * c[i];
-    sYS += y[i] * s[i];
+  // A finite period or response can still overflow the design arithmetic.
+  // Reject invalid moments before NaN can bypass the identifiability gate.
+  if (![state.meanC, state.meanS, state.meanY, state.mCC, state.mSS,
+        state.mYY, state.mCS, state.mCY, state.mSY].every((v) => v.isFinite)) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite cosinor design',
+    );
   }
-  // Matrix A = [[n, sC, sS],[sC, sCC, sCS],[sS, sCS, sSS]], b=[sY,sYC,sYS].
-  final a = [
-    [n.toDouble(), sC, sS],
-    [sC, sCC, sCS],
-    [sS, sCS, sSS],
-  ];
-  final b = [sY, sYC, sYS];
-  final sol = _solve3(a, b);
-  if (sol == null) {
+  final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
+  // The determinant is relative to the diagonal co-moments.  A design needs
+  // at least 1e-12 of that scale after removing its means to identify both
+  // cosine coefficients; below that, numerical noise decides the fit.
+  if (determinant <= 1e-12 * state.mCC * state.mSS) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
-  final mesor = sol[0];
-  final beta = sol[1];
-  final gamma = sol[2];
+  final beta =
+      (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
+  final gamma =
+      (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
+  final mesor = state.meanY - beta * state.meanC - gamma * state.meanS;
   final amplitude = math.sqrt(beta * beta + gamma * gamma);
-  final acro = math.atan2(-gamma, beta); // peak phase
-  // Convert acrophase to clock-hours within the period (0..period).
-  var phaseHours = -acro / w; // time of peak relative to origin
+  final acro = math.atan2(-gamma, beta);
+  final w = 2 * math.pi / periodHours;
+  var phaseHours = -acro / w;
   phaseHours = phaseHours % periodHours;
   if (phaseHours < 0) phaseHours += periodHours;
 
-  // R².
-  final yMean = sY / n;
-  var ssTot = 0.0, ssRes = 0.0;
-  for (var i = 0; i < n; i++) {
-    final fit = mesor + beta * c[i] + gamma * s[i];
-    ssTot += (y[i] - yMean) * (y[i] - yMean);
-    ssRes += (y[i] - fit) * (y[i] - fit);
-  }
+  final ssTot = state.mYY;
+  final ssRes = state.mYY -
+      2 * beta * state.mCY -
+      2 * gamma * state.mSY +
+      beta * beta * state.mCC +
+      gamma * gamma * state.mSS +
+      2 * beta * gamma * state.mCS;
   final double r2 = ssTot == 0 ? 0.0 : (1 - ssRes / ssTot).clamp(0, 1);
-  // Adjusted for the 3 fitted parameters (M, β, γ). Confidence MUST come from
-  // the adjusted value: the raw R² of a 3-parameter fit is upward-biased
-  // (E[R²] = 2/(n−1) under the null), so a handful of noise points used to
-  // score confidence 0.95 at tier HIGH.
   final double r2Adj = (1 - (1 - r2) * (n - 1) / (n - 3)).clamp(0, 1);
-
   // Zero-amplitude F-test (Nelson 1979): the acrophase is only defined once
   // the test rejects. A flat or rhythm-free series still yields some
   // atan2(−γ, β) from residual noise or float rounding.
@@ -169,7 +206,6 @@ Metric<CosinorFit> cosinor(
   }
   final phaseDefined = ampP < cosinorAcrophaseAlpha;
 
-  final conf = r2Adj.clamp(0.1, 0.95);
   return Metric<CosinorFit>(
     value: CosinorFit(
       mesor: mesor,
@@ -181,7 +217,7 @@ Metric<CosinorFit> cosinor(
       r2Adj: r2Adj,
       amplitudeP: ampP,
     ),
-    confidence: conf,
+    confidence: r2Adj.clamp(0.1, 0.95),
     tier: Tier.high,
     inputs_used: inputs,
     note: phaseDefined
@@ -192,34 +228,12 @@ Metric<CosinorFit> cosinor(
   );
 }
 
-/// Solve a 3×3 linear system by Gaussian elimination with partial pivoting.
-/// Returns null if singular.
-List<double>? _solve3(List<List<double>> a, List<double> b) {
-  final m = [
-    [a[0][0], a[0][1], a[0][2], b[0]],
-    [a[1][0], a[1][1], a[1][2], b[1]],
-    [a[2][0], a[2][1], a[2][2], b[2]],
-  ];
-  for (var col = 0; col < 3; col++) {
-    var piv = col;
-    for (var r = col + 1; r < 3; r++) {
-      if (m[r][col].abs() > m[piv][col].abs()) piv = r;
-    }
-    if (m[piv][col].abs() < 1e-12) return null;
-    final tmp = m[col];
-    m[col] = m[piv];
-    m[piv] = tmp;
-    final d = m[col][col];
-    for (var j = col; j < 4; j++) {
-      m[col][j] /= d;
-    }
-    for (var r = 0; r < 3; r++) {
-      if (r == col) continue;
-      final f = m[r][col];
-      for (var j = col; j < 4; j++) {
-        m[r][j] -= f * m[col][j];
-      }
-    }
-  }
-  return [m[0][3], m[1][3], m[2][3]];
+
+/// Upper tail of F(2, d): P(F > f) = (1 + 2f/d)^(−d/2), exact for 2 numerator
+/// degrees of freedom.
+double _f2Survival(double f, int d) {
+  if (f.isNaN) return 1.0;
+  if (f.isInfinite) return 0.0;
+  if (f <= 0) return 1.0;
+  return math.pow(1 + 2 * f / d, -d / 2).toDouble();
 }

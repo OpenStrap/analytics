@@ -63,7 +63,8 @@ Metric<double> banisterTrimp(
     );
   }
   final reserve = maxHr - restingHr;
-  var trimp = 0.0;
+  // Neumaier (1974), Rundungsfehleranalyse einiger Verfahren zur Summation.
+  var trimp = 0.0, correction = 0.0;
   for (final hr in hrPerMin) {
     if (!hr.isFinite || hr <= 0) continue; // off-skin + non-finite guard
     var hrr = (hr - restingHr) / reserve;
@@ -71,10 +72,16 @@ Metric<double> banisterTrimp(
     if (hrr > 1) hrr = 1;
     // ONE Banister implementation for the whole package: the sex-specific
     // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
-    trimp += 1.0 * hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
+    final value = hrr * StrainScorer.banisterY(hrr, female: sex == Sex.female);
+    final next = trimp + value;
+    if (next.isFinite) {
+      correction += trimp.abs() >= value.abs()
+          ? (trimp - next) + value : (value - next) + trimp;
+    }
+    trimp = next;
   }
   return Metric<double>(
-    value: trimp,
+    value: trimp + correction,
     confidence: 0.6,
     tier: Tier.estimate,
     inputs_used: inputs,
@@ -829,7 +836,8 @@ const int ctlAtlMinDays = 14;
 
 /// CTL/ATL/TSB from a time-ordered daily-TRIMP series (oldest→newest).
 /// EWMA with time constants 42 d (CTL) and 7 d (ATL): λ = 1 − e^(−1/τ).
-/// A missing day contributes a 0-load impulse (rest day) — the EWMA decays.
+/// An observed rest day is 0 load and decays the EWMA. Unknown/non-finite
+/// daily load abstains; it is never substituted with a rest day.
 ///
 /// SEEDING (Banister 1975 impulse-response; the load before the record started
 /// is UNKNOWN): both accumulators used to be seeded at `dailyTrimp.first`,
@@ -846,6 +854,13 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
     int minDays = ctlAtlMinDays,
     int primeDays = 7}) {
   const inputs = ['daily_trimp'];
+  if (dailyTrimp.any((value) => !value.isFinite)) {
+    return const Metric<LoadState>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'non-finite daily TRIMP',
+    );
+  }
   if (dailyTrimp.length < minDays) {
     return Metric<LoadState>.absent(
       tier: Tier.estimate,
@@ -856,13 +871,31 @@ Metric<LoadState> ctlAtlTsb(List<double> dailyTrimp,
   final lc = 1 - math.exp(-1 / ctlDays);
   final la = 1 - math.exp(-1 / atlDays);
   final prime = math.min(math.max(primeDays, 1), dailyTrimp.length);
-  final seed = mean(dailyTrimp.sublist(0, prime))!;
-  var ctl = seed;
-  var atl = seed;
-  for (var i = prime; i < dailyTrimp.length; i++) {
-    ctl = ctl + lc * (dailyTrimp[i] - ctl);
-    atl = atl + la * (dailyTrimp[i] - atl);
+  // Neumaier (1974) compensation for the bounded-prefix mean.
+  var sum = 0.0, correction = 0.0;
+  for (final value in dailyTrimp.take(prime)) {
+    final next = sum + value;
+    if (next.isFinite) {
+      correction += sum.abs() >= value.abs()
+          ? (sum - next) + value : (value - next) + sum;
+    }
+    sum = next;
   }
+  final seed = (sum + correction) / prime;
+  // Banister et al. (1975) recurrence evaluated as an affine map.
+  // f(x) = scale*x + offset, with keep = 1-lambda.
+  double evaluate(double lambda) {
+    var scale = 1.0, offset = 0.0;
+    final keep = 1 - lambda;
+    for (var i = prime; i < dailyTrimp.length; i++) {
+      final value = dailyTrimp[i];
+      scale *= keep;
+      offset = keep * offset + lambda * value;
+    }
+    return scale * seed + offset;
+  }
+  final ctl = evaluate(lc);
+  final atl = evaluate(la);
   final conf = (dailyTrimp.length / 42.0).clamp(0.3, 0.85);
   return Metric<LoadState>(
     value: LoadState(ctl, atl, ctl - atl),
