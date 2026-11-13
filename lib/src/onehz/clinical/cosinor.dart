@@ -79,6 +79,13 @@ Metric<CosinorFit> cosinor(
   double periodHours = 24,
   int minPoints = cosinorMinPoints,
 }) {
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
   if (tHours.length != y.length) {
     return const Metric<CosinorFit>.absent(tier: Tier.high,
       inputs_used: ['signal_timeseries'], note: 'too few points for cosinor');
@@ -140,6 +147,16 @@ Metric<CosinorFit> _finishCosinor(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few points for cosinor',
+    );
+  }
+  // A finite period or response can still overflow the design arithmetic.
+  // Reject invalid moments before NaN can bypass the identifiability gate.
+  if (![state.meanC, state.meanS, state.meanY, state.mCC, state.mSS,
+        state.mYY, state.mCS, state.mCY, state.mSY].every((v) => v.isFinite)) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite cosinor design',
     );
   }
   final determinant = state.mCC * state.mSS - state.mCS * state.mCS;

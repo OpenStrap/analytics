@@ -317,7 +317,7 @@ class RrCapWindow {
       }
       if (cutA >= 0) {
         for (var i = cutA; i < cutB; i++) {
-          out.classes[i] = BeatClass.longShort;
+          out.classes[i] = BeatClass.gap;
           out.gaps[i] = true;
           out.hardGaps[i] = hardCut || (inGap && hardLeading && cutA == start);
         }
@@ -360,6 +360,9 @@ class RrCapWindow {
       final dropout =
           wall && i > 0 && ts[i] - ts[i - 1] - rr[i] > reanchorGapMs;
       final anchored = wall ? ts[i] - base : 0.0;
+      // Independent segments restart on recorded time, even if invalid RR
+      // accumulated ahead of it. A monotonic clamp would invent timestamps.
+      // HRV consumers refuse any regression in the retained beat clock.
       cur = wall && reset
           ? anchored
           : dropout && anchored > cur
