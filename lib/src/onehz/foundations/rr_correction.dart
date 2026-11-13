@@ -25,9 +25,9 @@ import 'rr_correction_kernel.dart';
 
 /// Longest artifact run (beats) the corrector will carry. A longer run is not a
 /// correction problem but an absence: it breaks the series into independent
-/// segments and its beats are left out (a gap). 32 beats leaves no run on the
-/// owner's 18 days of data over the cap (longest seen: 16) and bounds the
-/// streaming state; see combined-bump/brief.md.
+/// segments and its beats are left out (a gap). 32 beats is an internal
+/// ESTIMATE: comfortably above the longest artifact run seen in real
+/// recordings (16 beats) while bounding the streaming state.
 const int kMaxArtifactRun = 32;
 
 /// Artifact label for a single beat.
