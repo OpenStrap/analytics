@@ -279,18 +279,18 @@ class RrCorrector {
         'prevTs': _prevTs,
         'prevRr': _prevRr,
         'off': _off,
-        'rr': _rr,
-        't': _t,
-        'd': _d,
+        'rr': List.of(_rr),
+        't': List.of(_t),
+        'd': List.of(_d),
         'c1': _c1,
         'c2': _c2,
         'ce': _ce,
-        'fcls': _fcls,
+        'fcls': List.of(_fcls),
         'lastFinal': _lastFinal,
         'normalFinal': _normalFinal,
         'dropped': _dropped,
         'corrected': _corrected,
-        'lastNormals': _lastNormals,
+        'lastNormals': List.of(_lastNormals),
       };
   }
 
@@ -777,9 +777,9 @@ class _CappedState {
         'origin': origin,
         'clock': clock,
         'previous': previous.index,
-        'rr': rr,
-        'ts': ts,
-        'normals': normals,
+        'rr': List.of(rr),
+        'ts': List.of(ts),
+        'normals': List.of(normals),
       };
 
   void restore(Map<String, dynamic> j, int half) {
