@@ -606,8 +606,13 @@ bool _deepEqual(Object? a, Object? b) {
   }
   if (a is Set && b is Set) {
     if (a.length != b.length) return false;
+    // CLAIM(cache-set-equality): snapshots own nested collections; compare
+    // contents without reusing a match [calculation_cache_test.dart].
+    final unmatched = b.toList();
     for (final item in a) {
-      if (!b.contains(item)) return false;
+      final index = unmatched.indexWhere((other) => _deepEqual(item, other));
+      if (index < 0) return false;
+      unmatched.removeAt(index);
     }
     return true;
   }
@@ -644,14 +649,16 @@ Object? _copyValue(Object? value) {
     if (value is Map<String, bool?>) return _copyMap(value);
     if (value is Map<String, String?>) return _copyMap(value);
     if (value is Map<String, List<bool>>) return _copyMap(value);
-    if (value is Map<String, List<num>>) return _copyMap(value);
     if (value is Map<String, List<bool?>>) return _copyMap(value);
-    if (value is Map<String, List<num?>>) return _copyMap(value);
+    // CLAIM(cache-numeric-map-types): narrower lists must precede num lists
+    // under covariance [calculation_cache_test.dart].
     if (value is Map<String, List<double>>) return _copyMap(value);
     if (value is Map<String, List<int>>) return _copyMap(value);
+    if (value is Map<String, List<num>>) return _copyMap(value);
     if (value is Map<String, List<String>>) return _copyMap(value);
     if (value is Map<String, List<double?>>) return _copyMap(value);
     if (value is Map<String, List<int?>>) return _copyMap(value);
+    if (value is Map<String, List<num?>>) return _copyMap(value);
     if (value is Map<String, List<String?>>) return _copyMap(value);
     if (value is Map<String, Map<String, double>>) return _copyMap(value);
     if (value is Map<String, Map<String, int>>) return _copyMap(value);

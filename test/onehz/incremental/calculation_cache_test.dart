@@ -35,6 +35,53 @@ void main() {
       expect(cache.evaluate<int>('k', deps, () => 2), 2);
     });
 
+    // why: snapshots copy nested collections, so set membership must compare
+    // their contents and consume each match once (CLAIM(cache-set-equality)).
+    test('nested set dependencies match by contents without reusing a match',
+        () {
+      final cache = CalculationCache();
+      final list = [1, 2];
+      final deps = <Object>{
+        list,
+        {
+          'tags': <int>{3, 4}
+        }
+      };
+      expect(cache.evaluate<int>('nested', deps, () => 10), 10);
+      expect(
+          cache.evaluate<int>(
+              'nested',
+              <Object>{
+                {
+                  'tags': <int>{4, 3}
+                },
+                [1, 2]
+              },
+              () => 99),
+          10);
+      expect(cache.computations, 1);
+      expect(cache.hits, 1);
+      list.add(5);
+      expect(cache.evaluate<int>('nested', deps, () => 20), 20);
+      expect(cache.computations, 2);
+
+      final duplicates = <List<int>>{
+        [1],
+        [1]
+      };
+      expect(cache.evaluate<int>('duplicates', duplicates, () => 30), 30);
+      expect(
+          cache.evaluate<int>(
+              'duplicates',
+              <List<int>>{
+                [1],
+                [2]
+              },
+              () => 40),
+          40);
+      expect(cache.computations, 4);
+    });
+
     test('a lazy iterable is refused instead of being stored by reference', () {
       final cache = CalculationCache();
       expect(
@@ -63,6 +110,32 @@ void main() {
           'n', null, () => {'x': <num>[1, 2.5]});
       expect(value['x'], [1, 2.5]);
     });
+
+    // why: Dart covariance lets a wider num-list branch swallow int/double
+    // maps and throw on copy (CLAIM(cache-numeric-map-types)).
+    void numericMap<T extends num?>(String name, List<T> items) {
+      test('a $name list map survives misses and hits without aliasing', () {
+        final cache = CalculationCache();
+        final source = {'x': items.toList()};
+        final result =
+            cache.evaluate<Map<String, List<T>>>('k', null, () => source);
+        expect(result, {'x': items});
+        result['x']!.clear();
+        expect(source, {'x': items});
+        source['x']!.clear();
+        final hit = cache.evaluate<Map<String, List<T>>>(
+            'k', null, () => throw StateError('must hit'));
+        expect(hit, {'x': items});
+        expect(cache.computations, 1);
+        expect(cache.hits, 1);
+      });
+    }
+
+    numericMap<int>('int', [1, 2]);
+    numericMap<double>('double', [1.5, 2.5]);
+    numericMap<int?>('nullable int', [1, null]);
+    numericMap<double?>('nullable double', [1.5, null]);
+    numericMap<num?>('nullable num', [1, 2.5, null]);
 
     test('a type the default copier cannot rebuild says so', () {
       final cache = CalculationCache();

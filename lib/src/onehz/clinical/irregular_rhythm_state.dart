@@ -34,6 +34,7 @@
 
 import 'dart:math' as math;
 
+import '../../aggregate/json_support.dart' show decodeDouble, encodeDouble;
 import '../types.dart';
 import 'irregular_diagnostics.dart';
 import 'irregular_rhythm.dart';
@@ -103,7 +104,7 @@ class IrregularScreenState {
       throw FormatException(
           'unsupported IrregularScreenState version ${j['version']}');
     }
-    double d(String k) => (j[k] as num).toDouble();
+    double d(String k) => decodeDouble(j[k]);
     final s = IrregularScreenState(
       sd1sd2Flag: d('sd1sd2Flag'),
       pnnThresholdMs: d('pnnThresholdMs'),
@@ -127,6 +128,9 @@ class IrregularScreenState {
     s._lMean = d('lMean');
     s._lM2 = d('lM2');
     s._winStart = (j['winStart'] as num?)?.toDouble();
+    if (s._winStart != null && !s._winStart!.isFinite) {
+      throw const FormatException('invalid winStart');
+    }
     s._bk = [for (final x in j['bk'] as List) (x as num).toDouble()];
     final bkAdj = j['bkAdj'] as List;
     if (bkAdj.any((x) => x is! int || (x != 0 && x != 1))) {
@@ -167,12 +171,12 @@ class IrregularScreenState {
   Map<String, dynamic> toJson() => {
         'version': 3,
         'type': 'IrregularScreenState',
-        'sd1sd2Flag': sd1sd2Flag,
-        'pnnThresholdMs': pnnThresholdMs,
-        'pnnFlagPct': pnnFlagPct,
-        'windowMinutes': windowMinutes,
+        'sd1sd2Flag': encodeDouble(sd1sd2Flag),
+        'pnnThresholdMs': encodeDouble(pnnThresholdMs),
+        'pnnFlagPct': encodeDouble(pnnFlagPct),
+        'windowMinutes': encodeDouble(windowMinutes),
         'minWindowBeats': minWindowBeats,
-        'sustainedFraction': sustainedFraction,
+        'sustainedFraction': encodeDouble(sustainedFraction),
         'prevKept': _prevKept,
         'prevV': _prevV,
         'prevT': _prevT.isFinite ? _prevT : null,
@@ -186,7 +190,9 @@ class IrregularScreenState {
         'lMean': _lMean,
         'lM2': _lM2,
         'winStart': _winStart,
-        'bk': _bk,
+        // CLAIM(screen-checkpoint): a saved map cannot change with a later
+        // fold or mutate the state [irregular_checkpoint_test.dart].
+        'bk': List<double>.of(_bk),
         'bkAdj': [for (final a in _bkAdj) a ? 1 : 0],
         'total': _total,
         'valid': _valid,
@@ -243,7 +249,8 @@ class IrregularScreenState {
       // Adjacent = the previous INPUT beat was kept too and no time hole lies
       // between them: no difference is ever taken across a skipped beat or a
       // dropout (the batch's `successive`).
-      final adjacent = _prevKept && tm - _prevT <= v + 0.5;
+      final adjacent =
+          _prevKept && tm.isFinite && _prevT.isFinite && tm - _prevT <= v + 0.5;
       if (adjacent) {
         final d = v - _prevV;
         _dN++;
@@ -257,7 +264,9 @@ class IrregularScreenState {
       _lMean += dl / _lN;
       _lM2 += dl * (v - _lMean);
       _nKept++;
-      if (_windowsOk) {
+      // CLAIM(screen-finite-window-time): untimed beats remain in aggregate
+      // counts but cannot anchor or join windows [irregular_checkpoint_test.dart].
+      if (_windowsOk && tm.isFinite) {
         final start = _winStart ??= tm;
         if (tm - start >= windowMinutes * 60000) {
           _closeWindow();

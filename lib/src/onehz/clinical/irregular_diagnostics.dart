@@ -18,6 +18,7 @@
 // batch call and the streaming `IrregularScreenState` must produce the same
 // diagnostics for the same beats, however chunked or restored.
 
+import '../../aggregate/json_support.dart' show decodeDouble, encodeDouble;
 import '../types.dart';
 import 'irregular_rhythm.dart';
 
@@ -152,7 +153,9 @@ class IrregularDiagnostics {
   };
 
   /// Wire shape (version 1); see test/onehz/irregular_diagnostics_test.dart.
-  /// Doubles are written as they are held, so a JSON text round trip is exact.
+  /// Finite doubles stay numbers; non-finite ones use the shared tagged strings.
+  /// CLAIM(screen-json-nonfinite): fail-closed configs remain JSON-encodable
+  /// and restore without changing their gates [irregular_checkpoint_test.dart].
   Map<String, dynamic> toJson() => {
         'version': 1,
         'abstain': abstain == null ? null : _abstainWire[abstain],
@@ -162,7 +165,8 @@ class IrregularDiagnostics {
           'nn_kept': nnKept,
           'corrected': corrected,
           'dropped': dropped,
-          'artifact_fraction': artifactFraction,
+          'artifact_fraction':
+              artifactFraction == null ? null : encodeDouble(artifactFraction!),
         },
         'windows': windows == null
             ? null
@@ -176,13 +180,13 @@ class IrregularDiagnostics {
               },
         'thresholds': {
           'min_beats': thresholds.minBeats,
-          'max_artifact': thresholds.maxArtifact,
-          'sd1sd2_flag': thresholds.sd1sd2Flag,
-          'pnn_threshold_ms': thresholds.pnnThresholdMs,
-          'pnn_flag_pct': thresholds.pnnFlagPct,
-          'window_minutes': thresholds.windowMinutes,
+          'max_artifact': encodeDouble(thresholds.maxArtifact),
+          'sd1sd2_flag': encodeDouble(thresholds.sd1sd2Flag),
+          'pnn_threshold_ms': encodeDouble(thresholds.pnnThresholdMs),
+          'pnn_flag_pct': encodeDouble(thresholds.pnnFlagPct),
+          'window_minutes': encodeDouble(thresholds.windowMinutes),
           'min_window_beats': thresholds.minWindowBeats,
-          'sustained_fraction': thresholds.sustainedFraction,
+          'sustained_fraction': encodeDouble(thresholds.sustainedFraction),
         },
       };
 
@@ -210,7 +214,7 @@ class IrregularDiagnostics {
       if (hit.isEmpty) throw FormatException('unknown abstain reason $a');
       abstain = hit.first.key;
     }
-    double d(Map m, String k) => (m[k] as num).toDouble();
+    double d(Map m, String k) => decodeDouble(m[k]);
     return IrregularDiagnostics(
       abstain: abstain,
       rrRaw: b['rr_raw'] as int?,
