@@ -523,11 +523,19 @@ class CalculationCache {
   int get computations => _computations;
   int get hits => _hits;
 
+  /// Returns the cached result while [dependencies] are unchanged, otherwise
+  /// runs [calculate]. Results are copied in and out so callers cannot mutate
+  /// the cache.
+  ///
+  /// The default copier keeps the usual JSON-shaped lists and maps and their
+  /// element types. A result type it cannot rebuild exactly (for example a map
+  /// of sets) must pass [copy]; without it the first evaluation throws an
+  /// [ArgumentError] rather than handing back a differently typed value.
   T evaluate<T>(String key, Object? dependencies, T Function() calculate,
-      {bool full = false}) {
+      {bool full = false, T Function(T value)? copy}) {
     final old = _entries[key];
     if (!full && old != null && _deepEqual(old.dependencies, dependencies)) {
-      final result = _copyValue(old.value) as T;
+      final result = _copyResult<T>(old.value, copy, key);
       _entries.remove(key);
       _entries[key] = old;
       _hits++;
@@ -536,8 +544,8 @@ class CalculationCache {
     // Snapshot before calling user code, which may itself mutate dependencies.
     // Prepare both copies before committing, so exceptions preserve the old entry.
     final snapshot = _snapshotDependency(dependencies);
-    final value = _copyValue(calculate());
-    final result = _copyValue(value) as T;
+    final value = _copyResult<T>(calculate(), copy, key);
+    final result = _copyResult<T>(value, copy, key);
     _entries.remove(key);
     _entries[key] = _CalculationEntry(snapshot, value);
     while (_entries.length > maxEntries) {
@@ -550,14 +558,38 @@ class CalculationCache {
   void clear() => _entries.clear();
 }
 
+T _copyResult<T>(Object? value, T Function(T value)? copy, String key) {
+  if (copy != null) return copy(value as T);
+  final copied = _copyValue(value);
+  if (copied is! T) {
+    throw ArgumentError(
+        'CalculationCache "$key": cannot copy a ${value.runtimeType} as $T; '
+        'pass copy: to evaluate for this result type');
+  }
+  return copied;
+}
+
+/// Owned copy of a dependency. Lists, sets and maps are copied so an in-place
+/// change by the caller is seen as a change. Any other collection is refused:
+/// it would be stored by reference and a later mutation would compare equal to
+/// itself.
 Object? _snapshotDependency(Object? value) {
   if (value is List)
     return [for (final item in value) _snapshotDependency(item)];
+  if (value is Set)
+    return {for (final item in value) _snapshotDependency(item)};
   if (value is Map) {
     return {
       for (final entry in value.entries)
         entry.key: _snapshotDependency(entry.value)
     };
+  }
+  if (value is Iterable) {
+    throw ArgumentError.value(
+        value,
+        'dependencies',
+        'use a List, Set or Map; a ${value.runtimeType} cannot be '
+            'snapshotted');
   }
   return value;
 }
@@ -569,6 +601,13 @@ bool _deepEqual(Object? a, Object? b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (!_deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (a is Set && b is Set) {
+    if (a.length != b.length) return false;
+    for (final item in a) {
+      if (!b.contains(item)) return false;
     }
     return true;
   }
@@ -604,6 +643,10 @@ Object? _copyValue(Object? value) {
     if (value is Map<String, num?>) return _copyMap(value);
     if (value is Map<String, bool?>) return _copyMap(value);
     if (value is Map<String, String?>) return _copyMap(value);
+    if (value is Map<String, List<bool>>) return _copyMap(value);
+    if (value is Map<String, List<num>>) return _copyMap(value);
+    if (value is Map<String, List<bool?>>) return _copyMap(value);
+    if (value is Map<String, List<num?>>) return _copyMap(value);
     if (value is Map<String, List<double>>) return _copyMap(value);
     if (value is Map<String, List<int>>) return _copyMap(value);
     if (value is Map<String, List<String>>) return _copyMap(value);

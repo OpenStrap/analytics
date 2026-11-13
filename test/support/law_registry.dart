@@ -75,7 +75,14 @@ class LawSet {
                 milliseconds: int.tryParse(
                         Platform.environment['PROPERTY_BUDGET_MS'] ?? '') ??
                     60000)),
-        body: (v) => reach.observe(v, (k) => got[k] = (got[k] ?? 0) + 1),
+        // One count per situation per generated case: a body that reports the
+        // same situation many times for one input still reached it once.
+        body: (v) {
+          final seen = <String>{};
+          reach.observe(v, (k) {
+            if (seen.add(k)) got[k] = (got[k] ?? 0) + 1;
+          });
+        },
         genVersion: genVersion,
       );
       if (!r.passed) fail(r.failure!.report);
