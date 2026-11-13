@@ -11,8 +11,8 @@
 //  * Otherwise ctl / atl / tsb within relTol 1e-9 (absTol 1e-9); confidence,
 //    tier, inputs_used and note (which interpolates the prime count
 //    min(max(primeDays, 1), rows)) are exactly equal.
-//  * Rows are all real days (a rest day is 0, not NaN); NaN input is out of
-//    scope. minDays < 1 is out of scope too (the reference throws on an empty
+//  * Unknown/non-finite daily loads abstain; an observed rest day is zero.
+//    minDays < 1 is out of scope (the reference throws on an empty
 //    series with minDays 0).
 //  * primeDays 0 behaves as 1 (reference clamps), primeDays > rows as rows.
 //  * Constructing the aggregator never throws for the parameters below.
@@ -250,9 +250,9 @@ void main() {
 
   group('checkpoint relationships (day count against the primed prefix)', () {
     final agg = ctlAtlTsbAggregator(); // primeDays 7
-    // State: [days, {rows: <prefix rows>, tail: [..]}]; rows hold min(days, 7).
+    // State: [[days, finiteDays], {rows: <prefix rows>, tail: [..]}].
     Object? set(Object? s, int days) {
-      (s as List)[0] = days;
+      (s as List)[0] = [days, days];
       return s;
     }
 

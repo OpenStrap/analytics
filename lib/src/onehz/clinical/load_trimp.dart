@@ -802,7 +802,8 @@ const int ctlAtlMinDays = 14;
 
 /// CTL/ATL/TSB from a time-ordered daily-TRIMP series (oldest→newest).
 /// EWMA with time constants 42 d (CTL) and 7 d (ATL): λ = 1 − e^(−1/τ).
-/// A missing day contributes a 0-load impulse (rest day) — the EWMA decays.
+/// An observed rest day is 0 load and decays the EWMA. Unknown/non-finite
+/// daily load abstains; it is never substituted with a rest day.
 ///
 /// SEEDING (Banister 1975 impulse-response; the load before the record started
 /// is UNKNOWN): both accumulators used to be seeded at `dailyTrimp.first`,

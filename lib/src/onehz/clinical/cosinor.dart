@@ -80,6 +80,13 @@ Metric<CosinorFit> cosinor(
   double periodHours = 24,
   int minPoints = cosinorMinPoints,
 }) {
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
   // Runs [cosinorAggregator] over the whole series in one slice. Mismatched
   // lengths cannot be a [TimedValues] batch; they are the same "too few
   // points" refusal as before.

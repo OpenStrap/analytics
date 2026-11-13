@@ -5,13 +5,14 @@
 //  * TimedValues(tHours, y): equal-length Float64Lists (assert). Row r is the
 //    sample (tHours[r], y[r]). copyRange returns copies; join concatenates.
 //    TimedValues and cosinorAggregator are exported from
-//    package:openstrap_analytics/aggregate.dart. No NaN handling is promised
-//    or tested (cosinor() has none); a tHours/y length mismatch cannot occur.
+//    package:openstrap_analytics/aggregate.dart. Non-finite moments abstain;
+//    a tHours/y length mismatch cannot occur.
 //  * cosinorAggregator({periodHours = 24, minPoints = cosinorMinPoints}) is an
 //    Aggregator<_, TimedValues, Metric<CosinorFit>>. Constructing it never
 //    throws, also for periodHours <= 0 (then every run is absent).
 //  * Absent exactly when cosinor() is absent: n < max(4, minPoints),
-//    periodHours <= 0 ('too few points for cosinor'), or a singular design
+//    invalid/non-finite period ('invalid cosinor period'), non-finite moments,
+//    or a singular design
 //    (relative centered determinant <= 1e-12 of the diagonal product;
 //    'singular cosinor design (insufficient phase coverage)').
 //    Absent metrics carry the same tier, inputs_used and note.
@@ -136,8 +137,19 @@ void _same(Metric<CosinorFit> got, Metric<CosinorFit> want, String tag) {
   expect(_diff(got, want), isNull, reason: tag);
 }
 
-Metric<CosinorFit> _want(TimedValues d, double period, int minPoints) =>
-    upstreamCosinor(d.tHours, d.y, periodHours: period, minPoints: minPoints);
+Metric<CosinorFit> _want(TimedValues d, double period, int minPoints) {
+  // Review 3c21387 changed the invalid-period note and its precedence. Keep
+  // the frozen independent solver for finite-input numerical comparisons.
+  if (!period.isFinite || period <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
+  return upstreamCosinor(d.tHours, d.y,
+      periodHours: period, minPoints: minPoints);
+}
 
 void _allPaths(_Agg a, TimedValues d, List<int> b, Metric<CosinorFit> want,
     String tag) {

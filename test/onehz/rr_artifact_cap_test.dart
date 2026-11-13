@@ -66,7 +66,7 @@ void _expectSplit(RrCorrectionResult got, RunSeries s, List<(int, int)> runs, St
   }
   for (final (a, b) in runs) {
     // the run's own beats sit between the pieces: artifacts, absent from nn
-    expect(got.classes.sublist(a, b).every((c) => c != BeatClass.normal), isTrue,
+    expect(got.classes.sublist(a, b), everyElement(BeatClass.gap),
         reason: '$why: run [$a, $b) is all artifact');
   }
   expect(got.classes.length, n, reason: '$why: one class per input beat');
