@@ -68,7 +68,6 @@ void main() {
   });
 
   for (final entry in <String, Metric<dynamic> Function(List<double>, List<double>)>{
-    'frequency HRV': (nn, ts) => hrvFreq(nn, ts, artifactFraction: 0),
     'RSA': (nn, ts) => rsaRespRate(nn, ts, artifactFraction: 0),
     'CVHR': (nn, ts) => cvhrApneaScreen(nn, ts, artifactFraction: 0),
   }.entries) {
@@ -81,6 +80,41 @@ void main() {
       expect(metric.note, 'regressing beat time');
     });
   }
+
+  group('frequency HRV and a clock that steps backward', () {
+    test('a capped reset leaves out the beats behind the re-anchored clock', () {
+      // 1,500 ms intervals for 400 beats, a 33-beat artifact run that forces
+      // the cap, then 400 more: the second segment is re-anchored at its source
+      // time, which sits behind the first segment's cumulative RR clock.
+      double wob(int i) => 1500.0 + (i % 7) * 12 - (i % 3) * 9;
+      final rr = [for (var i = 0; i < 400; i++) wob(i),
+        ...List<double>.filled(33, 3000), for (var i = 0; i < 400; i++) wob(i)];
+      final ts = [for (var i = 0; i < rr.length; i++) 1.7e12 + i * 1400];
+      final result = correctRr(rr, rrTsMs: ts);
+      expect(hasRegressingBeatTimes(result.nnTimesMs), isTrue);
+      final metric = hrvFreq(result.nn, result.nnTimesMs, artifactFraction: 0);
+      expect(metric.present, isTrue);
+      expect(metric.note, contains('left out'));
+    });
+
+    test('one stray beat is left out, the rest keep their own times', () {
+      final nn = [for (var i = 0; i < 1500; i++) 900.0 + (i % 7) * 20 + (i % 3) * 15];
+      final ts = [for (var i = 0; i < nn.length; i++) i * 900.0];
+      ts[700] = ts[699] - 500;
+      final metric = hrvFreq(nn, ts, artifactFraction: 0);
+      expect(metric.present, isTrue);
+      expect(metric.note, contains('1 beats'));
+    });
+
+    test('a clock that stays behind for a tenth of the record still refuses', () {
+      final nn = [for (var i = 0; i < 1500; i++) 900.0 + (i % 7) * 20 + (i % 3) * 15];
+      final ts = [for (var i = 0; i < nn.length; i++) i * 900.0];
+      for (var i = 700; i < 900; i++) { ts[i] = ts[699] - 5000 + (i - 700); }
+      final metric = hrvFreq(nn, ts, artifactFraction: 0);
+      expect(metric.present, isFalse);
+      expect(metric.note, 'regressing beat time');
+    });
+  });
 
   for (final times in <List<double>>[[], [800], [800, 1700, 2500]]) {
     test('time HRV refuses a supplied ${times.length}-beat clock for two NN', () {
