@@ -187,6 +187,20 @@ Metric<RespEstimate> rsaRespRate(
     );
   }
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<RespEstimate>.absent(

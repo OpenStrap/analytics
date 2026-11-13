@@ -182,33 +182,29 @@ class HeartRateZones {
     HeartRateZoneSet zoneSet,
   ) {
     final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
-    final zoneSeconds = List<double>.filled(5, 0);
-    var below = 0.0;
-
-    final tailSeconds =
-        sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
-    if (tailSeconds == null) return null;
-    for (var i = 0; i < sorted.length; i++) {
-      final sample = sorted[i];
-      if (!sample.valid) continue;
-      final durSeconds = i < sorted.length - 1
-          ? _boundedGapSeconds(sorted[i + 1].tsMs - sample.tsMs, tailSeconds)
-          : tailSeconds;
-      final zone = zoneSet.zoneNumber(sample.hr);
-      if (zone >= 1) {
-        zoneSeconds[zone - 1] += durSeconds;
-      } else {
-        below += durSeconds;
+    // Karvonen (1957) supports reserve zones only. Duration credit is an
+    // internal ESTIMATE rule. Count equal gaps before summing their credit.
+    final cadence = sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
+    if (cadence == null) return null;
+    final credits = List.generate(6, (_) => <double, int>{});
+    for (var i = 1; i < sorted.length; i++) {
+      final previous = sorted[i - 1];
+      if (!previous.valid) continue;
+      final gap = (sorted[i].tsMs - previous.tsMs) / 1000.0;
+      final histogram = credits[zoneSet.zoneNumber(previous.hr)];
+      histogram[gap] = (histogram[gap] ?? 0) + 1;
+    }
+    final seconds = List<double>.filled(6, 0);
+    for (var zone = 0; zone < credits.length; zone++) {
+      for (final entry in credits[zone].entries) {
+        final gap = entry.key;
+        seconds[zone] += entry.value * (gap > 0 ? math.min(gap, cadence) : cadence);
       }
     }
-    return TimeInHeartRateZone(seconds: zoneSeconds, belowZone1: below);
-  }
-
-  static double _boundedGapSeconds(double gapMs, double fallbackSeconds) {
-    final gapSeconds = gapMs / 1000.0;
-    return gapSeconds > 0
-        ? math.min(gapSeconds, fallbackSeconds)
-        : fallbackSeconds;
+    if (sorted.isNotEmpty && sorted.last.valid) {
+      seconds[zoneSet.zoneNumber(sorted.last.hr)] += cadence;
+    }
+    return TimeInHeartRateZone(seconds: seconds.sublist(1), belowZone1: seconds[0]);
   }
 
 }

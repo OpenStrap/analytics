@@ -158,3 +158,57 @@ al. 2017 · Pimentel et al. · Brage et al. 2004 · Keytel et al. 2005 · Tudor-
 2019 · Hopkins 2004 ·
 Mahalanobis 1936 · Killick et al. 2012 · Wittmann & Roenneberg 2006 · Pietilä et al. 2018 ·
 Malik et al.
+
+<!-- Split #99: rr -->
+
+| Batch change | Method and limits |
+|---|---|
+| Leave long RR artifact runs as gaps | Lipponen & Tarvainen 2019; Peltola 2012; The 32-beat cap is an internal ESTIMATE rule with low confidence, not a published threshold. Longer runs split the series; each side is corrected independently. The synthetic 33-beat case keeps 200 NN beats and drops 33. |
+
+<!-- Split #99: spectral -->
+
+| Batch change | Method and limits |
+|---|---|
+| Reduce spectral error on epoch timestamps | Lomb 1976; Scargle 1982; Press & Rybicki 1989; Evaluate trigonometric arguments relative to the first sample. The mathematical spectrum is time-shift invariant; floating-point band powers and threshold decisions can change for all Lomb-Scargle callers. |
+
+<!-- Split #99: nonfinite -->
+
+| Batch change | Method and limits |
+|---|---|
+| Abstain when a beat has no finite time | Task Force 1996 HRV; Welch 1967 spectra; input-validity guard is an implementation rule; HRV frequency/time, nocturnal and session RMSSD, RSA and CVHR return absent metrics for non-finite beat times. This prevents endless segment walks and invalid integer conversions. Finite-input formulas are unchanged. |
+
+<!-- Split #99: ['cosinor', 'near_singular'] -->
+
+| Batch change | Method and limits |
+|---|---|
+| Refuse unidentifiable cosinor fits | Nelson et al. 1979, Methods for cosinor-rhythmometry; Welford 1962 centered co-moments; Use centered least squares and a relative determinant gate of 1e-12 of the diagonal product. This is a numerical policy. Nearly collinear phase columns abstain, and ordinary fit parameters can move in their last digits. Upstream zero-amplitude significance gating is retained. |
+
+<!-- Split #99: trimp -->
+
+| Batch change | Method and limits |
+|---|---|
+| Retain small TRIMP contributions in the total | Morton, Fitz-Clarke & Banister 1990; Neumaier 1974 compensated summation; Compensate the per-minute sum. The reserve and sex-specific weighting are unchanged; the synthetic total moves in its last digits. |
+
+<!-- Split #99: ctl -->
+
+| Batch change | Method and limits |
+|---|---|
+| Evaluate training-load decay with affine arithmetic | Banister et al. 1975; Morton et al. 1990; Neumaier 1974 prefix summation; Evaluate the same EWMA recurrence as scale times seed plus offset. This matches the arithmetic used by the later incremental implementation. Last digits change; 42/7-day defaults and bounded-prefix priming remain implementation choices. |
+
+<!-- Split #99: zones -->
+
+| Batch change | Method and limits |
+|---|---|
+| Count repeated zone intervals before summing | Karvonen 1957 supports reserve zones only; interval credit is an internal ESTIMATE rule; Group equal duration credits by zone. Cadence validation, median capping and tail credit are retained. Grouped multiplication changes the last digits of zone seconds. |
+
+<!-- Split #99: circadian -->
+
+| Batch change | Method and limits |
+|---|---|
+| Compute circadian variance with centered moments | Witting 1990; van Someren 1999; Welford 1962 centered variance; IS and IV may move in their last digits. Batch circular profile sums and first-winner tie selection are unchanged on the rebased head. Chunked merges can reorder profile sums and move near-tie L5/M10 start epochs; that stream-specific behavior belongs with the aggregators. |
+
+<!-- Split #99: hrv -->
+
+| Batch change | Method and limits |
+|---|---|
+| Compute HRV moments without subtracting a large mean | Task Force 1996; Welford 1962 centered sums and products; Use origin-shifted moments for NN levels and five-minute bins, and centered lag co-moments for ACF. Last digits and decisions within rounding of jitter gates can change. Existing respiratory-line exemptions, coverage gates and absent-value rules remain. |

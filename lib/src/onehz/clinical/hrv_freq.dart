@@ -61,6 +61,10 @@ class HrvFreq {
       };
 }
 
+/// Largest share of beats [hrvFreq] will leave out for sitting behind the
+/// record's latest time before it refuses the clock instead.
+const double kMaxRegressingBeatFraction = 0.05;
+
 /// Frequency-domain HRV from cleaned NN.
 ///
 /// [nnMs] cleaned NN intervals (ms). [nnTimesMs] their cumulative beat times
@@ -83,7 +87,46 @@ Metric<HrvFreq> hrvFreq(
   }
 
   // Times in seconds for Hz output; tachogram value = NN (ms).
-  final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  var tSec = [for (final t in nnTimesMs) t / 1000.0];
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<HrvFreq>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+  // A capped artifact reset re-anchors the next segment at its source time,
+  // which can sit behind the cumulative RR clock of the segment before it (the
+  // clock ran ahead while the run was being absorbed). Refusing the whole
+  // record for that blanked a night over one 30 s dropout. The beats that fall
+  // behind the latest time already seen are the ones whose position is not
+  // known to be after their predecessors, so they are left out; the rest keep
+  // their own times and the periodogram is irregular-sampling by construction,
+  // so nothing is interpolated or invented. A clock that goes backward for more
+  // than a few percent of the record is not a seam, and still refuses.
+  var nn = nnMs;
+  var droppedBeats = 0;
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    final keep = <int>[];
+    var latest = double.negativeInfinity;
+    for (var i = 0; i < tSec.length; i++) {
+      if (tSec[i] >= latest) {
+        keep.add(i);
+        latest = tSec[i];
+      }
+    }
+    droppedBeats = tSec.length - keep.length;
+    if (droppedBeats > tSec.length * kMaxRegressingBeatFraction ||
+        keep.length < 16) {
+      return const Metric<HrvFreq>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
+    nn = [for (final i in keep) nnMs[i]];
+    tSec = [for (final i in keep) tSec[i]];
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<HrvFreq>.absent(
@@ -98,10 +141,10 @@ Metric<HrvFreq> hrvFreq(
   // null — absent, not a leakage-filled 0.0 (ULF used to be emitted as exactly
   // 0.0 for any session over 333 s, which is not a 24-h record by any reading).
   final ulf =
-      _welchBandPower(tSec, nnMs, 0.0003, 0.003, oversample: oversample);
-  final vlf = _welchBandPower(tSec, nnMs, 0.003, 0.04, oversample: oversample);
-  final lf = _welchBandPower(tSec, nnMs, 0.04, 0.15, oversample: oversample);
-  final hfRaw = _welchBandPower(tSec, nnMs, 0.15, 0.40, oversample: oversample);
+      _welchBandPower(tSec, nn, 0.0003, 0.003, oversample: oversample);
+  final vlf = _welchBandPower(tSec, nn, 0.003, 0.04, oversample: oversample);
+  final lf = _welchBandPower(tSec, nn, 0.04, 0.15, oversample: oversample);
+  final hfRaw = _welchBandPower(tSec, nn, 0.15, 0.40, oversample: oversample);
   if (lf == null && hfRaw == null) {
     return const Metric<HrvFreq>.absent(
       tier: Tier.high,
@@ -170,7 +213,10 @@ Metric<HrvFreq> hrvFreq(
     note: hfGated
         ? 'HF suppressed: artifact fraction ${round6(artifactFraction)} '
             '> gate — LF/VLF reported, HF/LF-HF/nu/total withheld'
-        : 'PRV spectrum; HF band quantization-limited at 1 Hz',
+        : droppedBeats > 0
+            ? 'PRV spectrum; $droppedBeats beats behind a re-anchored clock '
+                'left out; HF band quantization-limited at 1 Hz'
+            : 'PRV spectrum; HF band quantization-limited at 1 Hz',
   );
 }
 

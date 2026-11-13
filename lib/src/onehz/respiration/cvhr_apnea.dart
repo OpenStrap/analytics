@@ -127,6 +127,20 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<CvhrResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<CvhrResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
   if (tSec.last - tSec.first <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
