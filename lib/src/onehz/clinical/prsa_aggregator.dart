@@ -65,10 +65,15 @@ class _PrsaWindows extends Aggregator<_PrsaState, DoubleColumn, _PrsaState> {
   bool get persistable => true;
   @override
   Object? encodeState(_PrsaState state) =>
-      {'profile': encodeDoubles(state.profile), 'anchors': state.anchors};
+      {'profile': encodeDoubles(state.profile), 'anchors': state.anchors,
+       'deceleration': deceleration, 'anchorRatioCap': encodeDouble(cap)};
   @override
   _PrsaState decodeState(Object? json) {
     final map = decodeMap(json);
+    if (field(map, 'deceleration') != deceleration ||
+        decodeDouble(field(map, 'anchorRatioCap')).compareTo(cap) != 0) {
+      throw const FormatException('PRSA checkpoint policy mismatch');
+    }
     final profile = decodeDoubles(field(map, 'profile'));
     final anchors = decodeCount(field(map, 'anchors'));
     if (profile.length != 2 * l) {

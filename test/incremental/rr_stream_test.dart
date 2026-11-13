@@ -34,7 +34,8 @@ class _Run {
 void _expectSame(_Run run, List<double> rr, List<double>? ts, int n,
     {double alpha = 5.2, int win = 91, String? why}) {
   final oracle = correctRr(rr.sublist(0, n),
-      rrTsMs: ts?.sublist(0, n), alpha: alpha, windowBeats: win);
+      rrTsMs: ts?.sublist(0, n), alpha: alpha, windowBeats: win,
+      maxArtifactRun: null);
   final snap = run.c.snapshot(withClasses: true);
   expect(snap.n, n, reason: why);
   final nn = [...run.settledNn, ...snap.tailNn];
@@ -56,6 +57,13 @@ void _expectSame(_Run run, List<double> rr, List<double>? ts, int n,
 }
 
 void main() {
+  // why: the research corrector is uncapped; its oracle must use that same mode.
+  // # catches: default capped correction introduces gap labels for the hard run.
+  test('prototype oracle uses uncapped artifact policy', () {
+    final rr = [...List.filled(200, 800.0), ...List.filled(40, 3000.0), ...List.filled(200, 800.0)];
+    final run = _Run(RrCorrector())..fold(rr, null);
+    _expectSame(run, rr, null, rr.length);
+  });
   test('every prefix, 1 beat at a time (n = 0..260), with artefacts', () {
     for (final seed in [3, 4]) {
       final s = synthRr(SynthConfig(

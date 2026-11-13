@@ -9,6 +9,8 @@
 // that list with the batch's own arithmetic => bit-identical.
 import 'dart:math' as math;
 
+import 'package:openstrap_analytics/src/aggregate/json_support.dart';
+
 import 'package:openstrap_analytics/onehz.dart'
     hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
@@ -225,7 +227,8 @@ class RsaWelchState {
       // makes every window length depend on the total. Buffer holds all
       // beats here (no folding yet, and a non-finite time never starts it),
       // so just call the oracle.
-      return rsaRespRate(allNn, allTMs, artifactFraction: artifactFraction);
+      return rsaRespRate(allNn, allTMs, artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm, minConsensus: minConsensus, maxArtifact: maxArtifact);
     }
     if (artifactFraction > maxArtifact) {
       return Metric<RespEstimate>.absent(
@@ -365,18 +368,18 @@ class RsaWelchState {
   }
 
   Map<String, dynamic> toJson() => {
-        'tMs': _tMs,
-        'nn': _nn,
-        'sorted': _sorted,
+        'tMs': [for (final x in _tMs) encodeDouble(x)],
+        'nn': [for (final x in _nn) encodeDouble(x)],
+        'sorted': [for (final x in _sorted) encodeDouble(x)],
         'nonFinite': _nonFinite,
         'first': _first,
         'count': _count,
         'lastT': _lastT,
         'folding': _folding,
         'next': _next,
-        'peaks': _sc.peaks,
-        'peakHz': _sc.peakHz,
-        'peakPwr': _sc.peakPwr,
+        'peaks': List<double>.of(_sc.peaks),
+        'peakHz': List<double>.of(_sc.peakHz),
+        'peakPwr': List<double>.of(_sc.peakPwr),
         'atCeiling': _sc.atCeiling,
         'atFloor': _sc.atFloor,
         'belowBand': _sc.belowBand,
@@ -387,7 +390,7 @@ class RsaWelchState {
       };
 
   factory RsaWelchState.fromJson(Map<String, dynamic> j) {
-    List<double> dl(Object? o) => [for (final x in o as List) (x as num).toDouble()];
+    List<double> dl(Object? o) => [for (final x in o as List) decodeDouble(x)];
     final s = RsaWelchState();
     s._tMs = dl(j['tMs']);
     s._ts = [for (final t in s._tMs) t / 1000.0];
@@ -526,7 +529,7 @@ class HrvFreqState {
   final List<_Band> _bands;
   List<double> _ts = [], _y = [];
   double? _first;
-  int _count = 0;
+  int _count = 0, _dropped = 0;
   double _lastT = 0;
 
   HrvFreqState({this.oversample = 4.0, this.includeUlf = true})
@@ -561,13 +564,21 @@ class HrvFreqState {
   }
 
   void fold(List<double> nn, List<double> tMs) {
+    if (nn.length != tMs.length) throw ArgumentError('beat columns differ');
+    if (tMs.any((t) => !(t / 1000.0).isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
+    _count += nn.length;
     for (var i = 0; i < nn.length; i++) {
-      _y.add(nn[i]);
       final s = tMs[i] / 1000.0;
+      if (_first != null && s < _lastT) {
+        _dropped++;
+        continue;
+      }
+      _y.add(nn[i]);
       _ts.add(s);
       _first ??= s;
       _lastT = s;
-      _count++;
     }
     if (_count == 0) return;
     for (final b in _bands) {
@@ -627,8 +638,29 @@ class HrvFreqState {
         note: 'too few beats for a spectral estimate',
       );
     }
-    final ts = [..._ts, for (final t in tailTMs) t / 1000.0];
-    final y = [..._y, ...tailNn];
+    if (tailNn.length != tailTMs.length) throw ArgumentError('beat columns differ');
+    if (tailTMs.any((t) => !(t / 1000.0).isFinite)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'non-finite beat time');
+    }
+    final ts = [..._ts], y = [..._y];
+    var latest = _first == null ? double.negativeInfinity : _lastT;
+    var dropped = _dropped;
+    for (var i = 0; i < tailNn.length; i++) {
+      final t = tailTMs[i] / 1000.0;
+      if (t < latest) {
+        dropped++;
+      } else {
+        ts.add(t);
+        y.add(tailNn[i]);
+        latest = t;
+      }
+    }
+    if (dropped > 0 &&
+        (dropped > n * kMaxRegressingBeatFraction || n - dropped < 16)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'regressing beat time');
+    }
     final first = _first ?? ts.first;
     final last = ts.last;
     final spanSec = last - first;
@@ -690,15 +722,19 @@ class HrvFreqState {
       note: hfGated
           ? 'HF suppressed: artifact fraction ${round6(artifactFraction)} '
               '> gate — LF/VLF reported, HF/LF-HF/nu/total withheld'
-          : 'PRV spectrum; HF band quantization-limited at 1 Hz',
+          : dropped > 0
+              ? 'PRV spectrum; $dropped beats behind a re-anchored clock '
+                  'left out; HF band quantization-limited at 1 Hz'
+              : 'PRV spectrum; HF band quantization-limited at 1 Hz',
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'ts': _ts,
-        'y': _y,
+        'ts': List<double>.of(_ts),
+        'y': List<double>.of(_y),
         'first': _first,
         'count': _count,
+        'dropped': _dropped,
         'lastT': _lastT,
         'bands': [
           for (final b in _bands)
@@ -713,6 +749,7 @@ class HrvFreqState {
     s._y = [for (final x in j['y'] as List) (x as num).toDouble()];
     s._first = (j['first'] as num?)?.toDouble();
     s._count = j['count'] as int;
+    s._dropped = j['dropped'] as int;
     s._lastT = (j['lastT'] as num).toDouble();
     final bs = j['bands'] as List;
     for (var i = 0; i < s._bands.length; i++) {

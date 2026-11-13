@@ -1,6 +1,6 @@
 // LAWS of the append-only beat streams behind the night's spectral and CVHR
 // estimators: `RsaRespStream` (respiration/resp_rate.dart, checkpoint v3),
-// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v1) and `CvhrStream`
+// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v2) and `CvhrStream`
 // (respiration/cvhr_apnea.dart, v1). Each folds settled NN with their beat
 // times and answers `snapshot` with a provisional tail; the batch functions
 // (`rsaRespRate`, `hrvFreq`, `cvhrApneaScreen`) are the reference.
@@ -804,7 +804,7 @@ class _HrvOps extends _Ops<HrvFreqStream> {
   HrvFreqStream fromJson(Json j) => HrvFreqStream.fromJson(j);
 
   @override
-  List<Object?> get badVersions => const [0, 2, -1, '1', null, true, 1.5, 1 << 40];
+  List<Object?> get badVersions => const [0, 1, 3, -1, '2', null, true, 2.5, 1 << 40];
 
   @override
   List<void Function(Json)> get refuseMutations => [

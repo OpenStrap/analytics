@@ -434,6 +434,12 @@ void main() {
       final beats = ramp(1e-8);
       final want = hrvTime(beats.nnMs.toList()).value!;
       final got = hrvTimeAggregator(gapAware: false).run(beats);
+      // why: the batch wrapper shares the aggregator core; use the independent
+      // two-pass run calculation to expose a shared centred-moment error.
+      final diffs = [for (var i = 1; i < beats.length; i++) beats.nnMs[i] - beats.nnMs[i - 1]];
+      final independent = nnDiffAcf1([diffs]);
+      expect(independent, isNotNull);
+      expect(got.diffAcf1, closeTo(independent!, 1e-6));
       expect(want.diffAcf1, isNotNull);
       expect(got.diffAcf1, isNotNull, reason: 'aggregator acf1 is null');
       expect((got.diffAcf1! - want.diffAcf1!).abs(), lessThan(1e-6),
@@ -460,16 +466,16 @@ void main() {
   group('checkpoint relationships (beat counts across the children)', () {
     final beats = hrvSeries(Rng(0x4A7), 60, 1, gapP: .08);
     final agg = hrvTimeAggregator(originMs: hrvOrigin(beats));
-    // State (version 2): [core, evidence]; core is [[diffs, lags], [levels,
+    // Inner state: [core, evidence]; core is [[diffs, lags], [levels,
     // bins]]; diffs and lags are Lookback states ({length, first, last,
     // inner}); levels is a Moments map and bins is {fiveMinuteBin: Moments};
     // evidence is the jitter-gate evidence map.
-    List core(Object? s) => (s as List)[0] as List;
+    List core(Object? s) => ((s as Map)['inner'] as List)[0] as List;
     Map diffs(Object? s) => (core(s)[0] as List)[0] as Map;
     Map lags(Object? s) => (core(s)[0] as List)[1] as Map;
     Map levels(Object? s) => (core(s)[1] as List)[0] as Map;
     Map bins(Object? s) => (core(s)[1] as List)[1] as Map;
-    Map evidence(Object? s) => (s as List)[1] as Map;
+    Map evidence(Object? s) => ((s as Map)['inner'] as List)[1] as Map;
 
     test('both lookbacks must have seen the same number of beats', () {
       expectDamagedCheckpointRefused(agg, beats, (s) {

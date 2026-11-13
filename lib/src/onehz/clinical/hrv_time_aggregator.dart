@@ -75,7 +75,7 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
   final combined = validateCheckpoint(both(core, evidence),
       (json) => _validateVersioned(json, gapAware));
-  final checked = gapAware ? _FiniteTimes(combined) : combined;
+  final checked = _CheckedBeats(combined, gapAware: gapAware);
   return checked.map((result) => _finish(
       result.$1.$1, result.$1.$2, result.$1.$3, result.$1.$4,
       () => result.$2, gapAware: gapAware));
@@ -88,7 +88,7 @@ HrvTime hrvTimeOneSlice(Beats beats, {
   bool gapAware = true,
 }) {
   final core = _numericCore(originMs: originMs, gapAware: gapAware);
-  final result = (gapAware ? _FiniteTimes(core) : core).run(beats);
+  final result = _CheckedBeats(core, gapAware: gapAware).run(beats);
   JitterEvidence? cached;
   JitterEvidence evidence() => cached ??= JitterEvidenceAggregator(
       originMs: originMs, gapAware: gapAware).run(beats);
@@ -133,40 +133,84 @@ Aggregator<dynamic, Beats, _CoreSummary> _numericCore({
       result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2));
 }
 
-/// Refuses a slice holding a non-finite beat time before any state changes
-/// (a fold cannot be undone), as the other night streams do. Gap-aware only:
-/// without gap awareness times are never read.
-class _FiniteTimes<S, R> extends Aggregator<S, Beats, R> {
-  const _FiniteTimes(this.inner);
+// Owns the boundary clock for atomic validation before composed children mutate.
+class _CheckedBeatState<S> {
+  _CheckedBeatState(this.inner, {this.first, this.last});
+  S inner;
+  double? first, last;
+}
+
+/// Refuses non-finite NN in both modes, and non-finite or regressing times in
+/// gap-aware mode, before updating any child. Times are ignored otherwise.
+class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
+  const _CheckedBeats(this.inner, {required this.gapAware});
   final Aggregator<S, Beats, R> inner;
+  final bool gapAware;
 
   @override
-  S empty() => inner.empty();
+  _CheckedBeatState<S> empty() => _CheckedBeatState(inner.empty());
 
   @override
-  S addSlice(S state, Beats batch, int start, int end) {
+  _CheckedBeatState<S> addSlice(
+      _CheckedBeatState<S> state, Beats batch, int start, int end) {
+    var previous = state.last;
     for (var i = start; i < end; i++) {
-      if (!batch.timeMs[i].isFinite) {
-        throw ArgumentError('beat times must be finite');
+      if (!batch.nnMs[i].isFinite) {
+        throw ArgumentError('NN intervals must be finite');
       }
+      if (!gapAware) continue;
+      final time = batch.timeMs[i];
+      if (!time.isFinite) throw ArgumentError('beat times must be finite');
+      if (previous != null && time < previous) {
+        throw StateError('beat times must be non-decreasing');
+      }
+      previous = time;
     }
-    return inner.addSlice(state, batch, start, end);
+    state.inner = inner.addSlice(state.inner, batch, start, end);
+    if (gapAware && start < end) {
+      state.first ??= batch.timeMs[start];
+      state.last = previous;
+    }
+    return state;
   }
 
   @override
-  S combine(S left, S right) => inner.combine(left, right);
+  _CheckedBeatState<S> combine(_CheckedBeatState<S> left, _CheckedBeatState<S> right) {
+    if (gapAware && left.last != null && right.first != null &&
+        right.first! < left.last!) {
+      throw StateError('beat times must be non-decreasing');
+    }
+    left.inner = inner.combine(left.inner, right.inner);
+    left.first ??= right.first;
+    left.last = right.last ?? left.last;
+    return left;
+  }
 
   @override
-  R finish(S state) => inner.finish(state);
-
+  R finish(_CheckedBeatState<S> state) => inner.finish(state.inner);
   @override
   bool get persistable => inner.persistable;
-
   @override
-  Object? encodeState(S state) => inner.encodeState(state);
-
+  Object? encodeState(_CheckedBeatState<S> state) => {
+    'inner': inner.encodeState(state.inner),
+    'first': state.first,
+    'last': state.last,
+    'gapAware': gapAware,
+  };
   @override
-  S decodeState(Object? json) => inner.decodeState(json);
+  _CheckedBeatState<S> decodeState(Object? json) {
+    final map = decodeMap(json);
+    final first = decodeDoubleOrNull(field(map, 'first'));
+    final last = decodeDoubleOrNull(field(map, 'last'));
+    if (field(map, 'gapAware') != gapAware ||
+        (first == null) != (last == null) ||
+        (first != null && (!first.isFinite || !last!.isFinite || last < first)) ||
+        (!gapAware && first != null)) {
+      throw const FormatException('invalid HRV boundary clock');
+    }
+    return _CheckedBeatState(inner.decodeState(field(map, 'inner')),
+        first: first, last: last);
+  }
 }
 
 /// Version 2: `[core, evidence]`, the evidence counting what the core counts.

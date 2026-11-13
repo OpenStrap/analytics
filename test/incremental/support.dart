@@ -11,6 +11,8 @@ class Err {
       expect(a, b);
       return;
     }
+    expect(a.isFinite, isTrue, reason: 'non-finite actual: $a');
+    expect(b.isFinite, isTrue, reason: 'non-finite expected: $b');
     n++;
     final d = (a - b).abs();
     if (d > maxAbs) maxAbs = d;

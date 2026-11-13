@@ -790,7 +790,7 @@ class NocturnalRmssdState {
     final meanRr = <double>[];
     for (final r in all) {
       if (stageMaskPerSec != null) {
-        final midSec = ((r.idx + 0.5) * windowMs / 1000.0).floor();
+        final midSec = ((c._t0! + (r.idx + 0.5) * windowMs) / 1000.0).floor();
         final keep = midSec >= 0 &&
             midSec < stageMaskPerSec.length &&
             stageMaskPerSec[midSec];
@@ -1178,6 +1178,8 @@ class SessionRmssdState {
   int _idx = -1;
   List<double> _rr = [], _ts = [];
   final List<_WinRec> recs = [];
+  double? _previousTime;
+  bool _regressing = false;
   int _seen = 0; // beats folded, in the session or not
   // Session-wide coverage (rrCoverage over the in-session beats), from
   // running figures: the earliest beat (first of equals) and its interval,
@@ -1217,6 +1219,8 @@ class SessionRmssdState {
   }
 
   void _step(double rr, double ts, List<_WinRec> sink) {
+    if (_previousTime != null && ts < _previousTime!) _regressing = true;
+    _previousTime = ts;
     _seen++;
     final tsSec = (ts / 1000.0).round();
     if (tsSec < startSec || tsSec >= endSec) return;
@@ -1270,6 +1274,10 @@ class SessionRmssdState {
   /// The open bucket is closed on a copy; the state is not changed.
   Metric<double> evaluate() {
     const inputs = ['rr_sleep_window'];
+    if (_regressing) {
+      return const Metric<double>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'regressing beat time');
+    }
     if (startSec <= 0 || endSec <= startSec || _seen == 0) {
       return const Metric<double>.absent(
         tier: Tier.high,
@@ -1557,6 +1565,12 @@ class IrregularScreenState {
   }
 
   Map<String, dynamic> toJson() => {
+        'sd1sd2Flag': sd1sd2Flag,
+        'pnnThresholdMs': pnnThresholdMs,
+        'pnnFlagPct': pnnFlagPct,
+        'windowMinutes': windowMs / 60000,
+        'minWindowBeats': minWindowBeats,
+        'sustainedFraction': sustainedFraction,
         'prevKept': _prevKept,
         'prevV': _prevV,
         'prevT': _prevT.isFinite ? _prevT : null,
@@ -1569,14 +1583,21 @@ class IrregularScreenState {
         'lMean': _lMean,
         'lM2': _lM2,
         'winStart': _winStart,
-        'bk': _bk,
+        'bk': List<double>.of(_bk),
         'bkAdj': [for (final a in _bkAdj) a ? 1 : 0],
         'valid': _valid,
         'flagged': _flagged,
       };
 
   factory IrregularScreenState.fromJson(Map<String, dynamic> j) {
-    final s = IrregularScreenState();
+    final s = IrregularScreenState(
+      sd1sd2Flag: (j['sd1sd2Flag'] as num).toDouble(),
+      pnnThresholdMs: (j['pnnThresholdMs'] as num).toDouble(),
+      pnnFlagPct: (j['pnnFlagPct'] as num).toDouble(),
+      windowMinutes: (j['windowMinutes'] as num).toDouble(),
+      minWindowBeats: j['minWindowBeats'] as int,
+      sustainedFraction: (j['sustainedFraction'] as num).toDouble(),
+    );
     s._prevKept = j['prevKept'] as bool;
     s._prevV = (j['prevV'] as num).toDouble();
     s._prevT = (j['prevT'] as num?)?.toDouble() ?? double.nan;

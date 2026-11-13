@@ -81,6 +81,10 @@ class RrSandwichState<S> {
 }
 
 /// Raw RR -> capped, corrected NN -> [inner]. Parameters are `correctRr`'s.
+/// [windowBeats] must be at least 3. A one-beat threshold window lets recovery
+/// phase propagate indefinitely (cr105_regressions_test.dart), beyond [reach].
+/// [inner] must be persistable so finishing can copy its consumed middle state.
+/// Unsupported configurations throw when creating or restoring a state.
 ///
 /// Each NN reaches [inner] with the ABSOLUTE timestamp (`rrTsMs`) of the input
 /// beat it came from (`RrCorrectionResult.nnSourceIndex`), so a seam needs no
@@ -148,8 +152,19 @@ class RrSandwich<S, R> extends Aggregator<RrSandwichState<S>, RawRr, R> {
   S _state(Beats b) => inner.addSlice(inner.empty(), b, 0, b.length);
 
   @override
-  RrSandwichState<S> empty() =>
-      RrSandwichState<S>(0, _none, _none, inner.empty());
+  RrSandwichState<S> empty() {
+    _checkSupported();
+    return RrSandwichState<S>(0, _none, _none, inner.empty());
+  }
+
+  void _checkSupported() {
+    if (windowBeats < 3) {
+      throw ArgumentError.value(windowBeats, 'windowBeats', 'must be at least 3');
+    }
+    if (!inner.persistable) {
+      throw UnsupportedError('RrSandwich needs a persistable inner to copy state');
+    }
+  }
 
   @override
   RrSandwichState<S> addSlice(
@@ -219,9 +234,8 @@ class RrSandwich<S, R> extends Aggregator<RrSandwichState<S>, RawRr, R> {
     if (m <= w) return inner.finish(_state(_nn(state.head, 0, m)));
     // The settled middle is combined into fresh states; combine may consume
     // its inputs, so work on a copy of the stored one.
-    final mid = inner.persistable
-        ? inner.decodeState(inner.encodeState(state.mid))
-        : state.mid;
+    _checkSupported();
+    final mid = inner.decodeState(inner.encodeState(state.mid));
     var out = _state(_nn(state.head, 0, rc));
     out = inner.combine(out, mid);
     out = inner.combine(out, _state(_nn(state.tail, rc, w)));
@@ -241,6 +255,7 @@ class RrSandwich<S, R> extends Aggregator<RrSandwichState<S>, RawRr, R> {
 
   @override
   RrSandwichState<S> decodeState(Object? json) {
+    _checkSupported();
     final map = decodeMap(json);
     final m = field(map, 'm');
     if (m is! int || m < 0) throw const FormatException('bad RrSandwich m');

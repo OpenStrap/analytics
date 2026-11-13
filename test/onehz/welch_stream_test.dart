@@ -420,17 +420,20 @@ void main() {
           (j) => HrvFreqStream.fromJson(j));
     });
 
-    test('non-monotone fold is a StateError', () {
+    test('non-monotone folds omit backward beats as batch does', () {
       final s = HrvFreqStream()
         ..fold([800, 810, 820], [1000, 1810, 2630]);
-      // Earlier than the previous fold's last beat.
-      expect(() => s.fold([800], [2000]), throwsStateError);
-      // Decreasing inside one call.
-      expect(() => HrvFreqStream().fold([800, 800], [5000, 4000]),
-          throwsStateError);
-      // Equal times are allowed (non-decreasing) and do not throw.
+      s.fold([800], [2000]);
+      expect(s.toJson()['n'], 4);
+      expect(s.toJson()['dropped'], 1);
+      expect(s.toJson()['times'], [1.0, 1.81, 2.63]);
+      final within = HrvFreqStream()..fold([800, 800], [5000, 4000]);
+      expect(within.toJson()['dropped'], 1);
+      // Equal times are retained by the batch policy.
       final eq = HrvFreqStream()..fold([800], [1000]);
-      expect(() => eq.fold([800], [1000]), returnsNormally);
+      eq.fold([800], [1000]);
+      expect(eq.toJson()['dropped'], 0);
+      expect(eq.toJson()['times'], [1.0, 1.0]);
     });
   });
 

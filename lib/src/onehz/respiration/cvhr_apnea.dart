@@ -415,10 +415,6 @@ class CvhrStream {
       throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
     }
     final tailTimes = [for (final t in tailNnTimesMs) t / 1000.0];
-    if (!_cvhrNondecreasing(tailTimes) ||
-        (tailTimes.isNotEmpty && _last != null && tailTimes.first < _last!)) {
-      throw StateError('beat times must be non-decreasing');
-    }
     const inputs = ['rr_cleaned', 'beat_times'];
     final n = _n + tailNnMs.length;
     if (n < 60) {
@@ -444,6 +440,10 @@ class CvhrStream {
         inputs_used: inputs,
         note: 'non-finite beat time',
       );
+    }
+    if (!_cvhrNondecreasing(tailTimes) ||
+        (tailTimes.isNotEmpty && _last != null && tailTimes.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
     }
     // Nothing folded yet: the tail's first beat is the origin, as in the batch.
     final first = _first ?? (tailTimes.isEmpty ? null : tailTimes.first);
