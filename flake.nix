@@ -42,7 +42,7 @@
               # Let the packaged Flutter wrapper select its complete SDK,
               # including prebuilt engine/test artifacts.
               unset FLUTTER_ROOT
-              if [[ -z "$IN_ANALYTICS_FHS" && $- == *i* ]]; then
+              if [[ -z "''${IN_ANALYTICS_FHS:-}" && $- == *i* ]]; then
                 exec analytics-fhs
               fi
             '';
