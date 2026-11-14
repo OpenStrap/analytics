@@ -611,10 +611,6 @@ class RsaRespStream {
       throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
     }
     final tail = [for (final t in tailNnTimesMs) t / 1000.0];
-    if (!_nondecreasing(tail) ||
-        (tail.isNotEmpty && _last != null && tail.first < _last!)) {
-      throw StateError('beat times must be non-decreasing');
-    }
     final n = _n + tailNnMs.length;
     // A non-finite tail time: the batch's own answer (it abstains).
     if (n < 20 || _first == null || tail.any((t) => !t.isFinite)) {
@@ -624,6 +620,10 @@ class RsaRespStream {
           tolBrpm: tolBrpm,
           minConsensus: minConsensus,
           maxArtifact: maxArtifact);
+    }
+    if (!_nondecreasing(tail) ||
+        (tail.isNotEmpty && _last != null && tail.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
     }
     if (artifactFraction > maxArtifact) {
       return Metric<RespEstimate>.absent(

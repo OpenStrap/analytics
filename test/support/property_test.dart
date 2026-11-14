@@ -6,6 +6,7 @@
 // failure report (seed, case, input, generator version, replay command) and
 // the per-property wall budget.
 
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:test/test.dart';
@@ -506,6 +507,25 @@ void main() {
     });
   });
 
+  group('shrinking domains', () {
+    test('a double never shrinks away from a nonzero origin', () {
+      final g = G.doubleIn(0, 100, origin: 60);
+      for (final v in [59.5, 59.25, 61.5, 10.0, 99.0]) {
+        for (final c in g.shrink(v)) {
+          expect((c - 60).abs() < (v - 60).abs(), isTrue,
+              reason: '$v shrank to $c, not nearer 60');
+        }
+      }
+    });
+
+    test('a nullable that cannot generate null does not shrink to null', () {
+      final g = G.nullable(G.intIn(0, 9), nullProbability: 0);
+      expect(g.shrink(5), isNot(contains(null)));
+      final h = G.nullable(G.intIn(0, 9), nullProbability: .25);
+      expect(h.shrink(5).first, isNull);
+    });
+  });
+
   group('shrinking lists, tuples, nullables', () {
     test('a list shrinks to the shortest failing length of zeros', () {
       final f = _fails(G.listOf(G.intIn(0, 9), maxLen: 20), (l) => l.length < 3);
@@ -740,6 +760,20 @@ void main() {
       expect(r.failure?.kind, FailureKind.budget);
     });
 
+    test('a budget failure replays with the limits it ran under', () {
+      final r = runProperty<int>(
+        name: 'slow',
+        gen: G.intIn(0, 9),
+        body: (_) {},
+        config: const PropertyConfig(
+            seed: 1, cases: 7, budget: Duration(milliseconds: 123)),
+        elapsed: () => const Duration(hours: 1),
+      );
+      expect(r.failure!.kind, FailureKind.budget);
+      expect(r.failure!.report, contains('PROPERTY_ITERATIONS=7'));
+      expect(r.failure!.report, contains('PROPERTY_BUDGET_MS=123'));
+    });
+
     test('a single-case replay is not held to the budget', () {
       final r = runProperty<int>(
         name: 'replay',
@@ -761,7 +795,12 @@ void main() {
     }, examples: const [0, 100], cases: 25);
 
     test('forAll ran its forced examples plus its cases', () {
-      expect(ran, anyOf(0, 27),
+      // The case count is whatever the environment makes it (PROPERTY_ITERATIONS
+      // replaces 25; PROPERTY_CASE replays one), so ask the same config.
+      final cfg = PropertyConfig.fromEnvironment(Platform.environment,
+          defaultCases: 25);
+      final expected = cfg.caseOnly != null ? null : 2 + cfg.cases;
+      expect(ran, expected == null ? lessThanOrEqualTo(1) : anyOf(0, expected),
           reason: '0 when this test alone is selected by name');
     });
 

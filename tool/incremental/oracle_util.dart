@@ -24,6 +24,9 @@ List<int> randomCuts(math.Random r, int n,
 /// Cuts that fall every [sec] seconds of the beat clock: what a 15-minute
 /// derive pass sees. [tsMs] sorted-ish epoch ms.
 List<int> timeCuts(List<double> tsMs, double sec) {
+  if (!(sec > 0) || !sec.isFinite) {
+    throw ArgumentError.value(sec, 'sec', 'must be a positive finite number');
+  }
   final cuts = <int>[];
   if (tsMs.isEmpty) return cuts;
   var next = tsMs.first + sec * 1000;

@@ -226,8 +226,16 @@ class _DoubleGen extends Gen<double> {
       yield v - d / 8;
     }
 
+    // Only candidates strictly nearer the origin: truncating or halving a
+    // value below a nonzero origin can otherwise step away from it and the
+    // next round steps back, cycling until the shrink limit.
     for (final c in cand()) {
-      if (c >= min && c <= max && seen.add(c)) yield c;
+      if (c >= min &&
+          c <= max &&
+          (c - origin).abs() < d.abs() &&
+          seen.add(c)) {
+        yield c;
+      }
     }
   }
 }
@@ -305,7 +313,8 @@ class _NullableGen<T> extends Gen<T?> {
   @override
   Iterable<T?> shrink(T? v) sync* {
     if (v == null) return;
-    yield null;
+    // Null is outside the domain when it can never be generated.
+    if (nullProbability > 0) yield null;
     yield* inner.shrink(v);
   }
 
@@ -555,8 +564,12 @@ PropertyResult runProperty<T>({
     }
   }
 
-  String replayFor(String? caseId) =>
+  // A budget failure depends on how many cases ran and how long they were
+  // given, so its replay pins both; the defaults would not reproduce an
+  // extended or tightened run.
+  String replayFor(String? caseId, {bool pinLimits = false}) =>
       'PROPERTY_SEED=$seed ${caseId == null ? '' : 'PROPERTY_CASE=$caseId '}'
+      "${pinLimits ? 'PROPERTY_ITERATIONS=${config.cases} PROPERTY_BUDGET_MS=${config.budget.inMilliseconds} ' : ''}"
       'dart test '
       "${config.testFile ?? '<test file>'} "
       "--plain-name '${name.replaceAll("'", r"'\''")}'";
@@ -567,7 +580,8 @@ PropertyResult runProperty<T>({
       int accepted = 0,
       String? original,
       bool overBudget = false}) {
-    final replay = replayFor(kind == FailureKind.budget ? null : caseId);
+    final replay = replayFor(kind == FailureKind.budget ? null : caseId,
+        pinLimits: kind == FailureKind.budget);
     final b = StringBuffer()
       ..writeln('Property "$name" FAILED (${kind.name})')
       ..writeln('  seed: $seed   case: $caseId   generator: $genVersion'

@@ -104,7 +104,7 @@ class SizeGen extends Gen<int> {
     }
     if (p < .40) return r.intIn(math.min(500, maxN), maxN);
     final cap = math.max(120, maxN * size ~/ 100);
-    if (p < .62) return r.intIn(0, math.min(cap, 400));
+    if (p < .62) return r.intIn(0, math.min(math.min(cap, 400), maxN));
     return r.intIn(0, math.min(cap, maxN));
   }
 

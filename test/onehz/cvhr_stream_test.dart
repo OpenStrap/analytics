@@ -28,8 +28,10 @@ class Night {
 /// A seeded night of [hours]: ~1000 ms NN with breathing and noise. With
 /// [apnea], 30-60 s cyclic bradycardia (+80 ms half-sine bumps, 20 s wide,
 /// every 45 s; the period wobbles per stretch) over alternating stretches of
-/// the night. [jumps] are (atSec, lengthSec) holes in the recording clock.
-/// [fast] = (fromSec, toSec) runs 500 ms NN there (>= 60 beats in < 60 s).
+/// the night. [jumps] are (atSec, lengthSec) holes, with atSec counted in
+/// RECORDED seconds (hole time excluded), so two holes 45 s apart leave a
+/// 45 s island of beats between them. [fast] = (fromSec, toSec), also in
+/// recorded seconds, runs 500 ms NN there (>= 60 beats in < 60 s).
 Night synth(int seed, double hours,
     {bool apnea = true,
     List<(double, double)> jumps = const [],
@@ -38,12 +40,13 @@ Night synth(int seed, double hours,
   final n = Night();
   final endS = hours * 3600;
   var s = 0.0; // recording clock, seconds
+  var rec = 0.0; // recorded seconds: s without the holes
   var t = 1.7e12; // beat clock, ms
   final phase = rnd.nextDouble() * 6.28;
   final jl = [...jumps]..sort((a, b) => a.$1.compareTo(b.$1));
   var ji = 0;
   while (s < endS) {
-    while (ji < jl.length && s >= jl[ji].$1) {
+    while (ji < jl.length && rec >= jl[ji].$1) {
       t += jl[ji].$2 * 1000;
       s += jl[ji].$2;
       ji++;
@@ -61,10 +64,11 @@ Night synth(int seed, double hours,
         if (u < 20) v += 80 * math.sin(math.pi * u / 20);
       }
     }
-    if (fast != null && s >= fast.$1 && s < fast.$2) v = 500;
+    if (fast != null && rec >= fast.$1 && rec < fast.$2) v = 500;
     v = v.roundToDouble();
     t += v;
     s += v / 1000;
+    rec += v / 1000;
     n.nn.add(v);
     n.times.add(t);
   }
@@ -269,6 +273,20 @@ const _gappy = <(double, double)>[
   (7000, 31),
 ];
 
+/// Beat count and span (s) of every island of beats between holes longer than
+/// [holeSec] seconds.
+List<(int, double)> islandsOf(Night n, {double holeSec = 30}) {
+  final out = <(int, double)>[];
+  var from = 0;
+  for (var i = 1; i <= n.times.length; i++) {
+    if (i == n.times.length || n.times[i] - n.times[i - 1] > holeSec * 1000) {
+      out.add((i - from, (n.times[i - 1] - n.times[from]) / 1000));
+      from = i;
+    }
+  }
+  return out;
+}
+
 void main() {
   group('guards: the generator really produces CVHR cycles', () {
     test('batch finds cycles on the apnea night and few on the plain one', () {
@@ -279,6 +297,20 @@ void main() {
       final p = synth(1, 3, apnea: false);
       final q = batch(p.nn, p.times, p.nn.length, 0.02).value!;
       expect(q.cycleCount, lessThan(r.cycleCount ~/ 4));
+    });
+
+    // why: the island tests are only meaningful if the short islands exist.
+    test('the gappy night really contains the short islands', () {
+      final g = synth(2, 3, jumps: _gappy, fast: (5000, 5040));
+      final islands = islandsOf(g);
+      // 45 s island between the holes at 3000 and 3045, 40 s between 5000 and
+      // 5040 (the fast run: 500 ms NN, so >= 60 beats in under 60 s).
+      expect(islands.any((i) => i.$2 > 43 && i.$2 < 47), isTrue,
+          reason: 'a 45 s island: $islands');
+      final fastIsland = islands.where((i) => i.$2 > 38 && i.$2 < 42);
+      expect(fastIsland, isNotEmpty, reason: 'a 40 s island: $islands');
+      expect(fastIsland.first.$1, greaterThanOrEqualTo(60),
+          reason: 'at least 60 beats in under 60 s');
     });
 
     test('gappy night: several segments, cycles found, short islands skipped',
@@ -586,6 +618,47 @@ void main() {
       // A fresh stream's checkpoint is rejected the same way.
       final fresh = wire(CvhrStream().toJson()) as Map<String, dynamic>;
       expectMalformedRejected(fresh, (j) => CvhrStream.fromJson(j));
+    });
+
+    // why: an infinite endpoint is never reached by the grid step loop, which
+    // then allocates forever.
+    // # catches: rawTimes ending in 'Infinity' passes the monotonicity check.
+    test('a checkpoint with a non-finite time is refused', () {
+      final nn = List<double>.filled(70, 1000);
+      final t = [for (var i = 0; i < 70; i++) 1.7e12 + i * 1000.0];
+      final good = wire((CvhrStream()..fold(nn, t)).toJson())
+          as Map<String, dynamic>;
+      expect(() => CvhrStream.fromJson(good), returnsNormally);
+      final bad = wire(good) as Map<String, dynamic>;
+      (bad['rawTimes'] as List)[(bad['rawTimes'] as List).length - 1] =
+          'Infinity';
+      expect(() => CvhrStream.fromJson(bad), throwsFormatException,
+          reason: 'rawTimes');
+      for (final key in ['first', 'last', 'openStart']) {
+        final bad = wire(good) as Map<String, dynamic>;
+        bad[key] = 'Infinity';
+        expect(() => CvhrStream.fromJson(bad), throwsFormatException,
+            reason: key);
+      }
+    });
+
+    // why: the provisional grid used to be resampled once per point, scanning
+    // the tail again each time; a long tail must stay exact and fast.
+    test('a long provisional tail matches the batch', () {
+      final head = synth(21, 0.05);
+      final tail = synth(22, 3, apnea: true);
+      final lastT = head.times.last;
+      final tailT = [for (final x in tail.times) x - tail.times.first + lastT + 1000];
+      final s = CvhrStream()..fold(head.nn, head.times);
+      final sw = Stopwatch()..start();
+      final got = s.snapshot(
+          tailNnMs: tail.nn, tailNnTimesMs: tailT, artifactFraction: 0.02);
+      final took = sw.elapsedMilliseconds;
+      final want = cvhrApneaScreen(
+          [...head.nn, ...tail.nn], [...head.times, ...tailT],
+          artifactFraction: 0.02);
+      expectSame(got, want, 'long tail');
+      expect(took, lessThan(20000), reason: '${tail.nn.length}-beat tail');
     });
 
     test('non-monotone fold is a StateError', () {

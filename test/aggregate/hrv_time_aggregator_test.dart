@@ -12,6 +12,8 @@
 //  * originMs is needed as soon as a beat is binned; without it that is a
 //    StateError. Empty input with a null origin is fine.
 
+import 'dart:convert';
+
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
@@ -434,6 +436,12 @@ void main() {
       final beats = ramp(1e-8);
       final want = hrvTime(beats.nnMs.toList()).value!;
       final got = hrvTimeAggregator(gapAware: false).run(beats);
+      // why: the batch wrapper shares the aggregator core; use the independent
+      // two-pass run calculation to expose a shared centred-moment error.
+      final diffs = [for (var i = 1; i < beats.length; i++) beats.nnMs[i] - beats.nnMs[i - 1]];
+      final independent = nnDiffAcf1([diffs]);
+      expect(independent, isNotNull);
+      expect(got.diffAcf1, closeTo(independent!, 1e-6));
       expect(want.diffAcf1, isNotNull);
       expect(got.diffAcf1, isNotNull, reason: 'aggregator acf1 is null');
       expect((got.diffAcf1! - want.diffAcf1!).abs(), lessThan(1e-6),
@@ -460,16 +468,16 @@ void main() {
   group('checkpoint relationships (beat counts across the children)', () {
     final beats = hrvSeries(Rng(0x4A7), 60, 1, gapP: .08);
     final agg = hrvTimeAggregator(originMs: hrvOrigin(beats));
-    // State (version 2): [core, evidence]; core is [[diffs, lags], [levels,
+    // Inner state: [core, evidence]; core is [[diffs, lags], [levels,
     // bins]]; diffs and lags are Lookback states ({length, first, last,
     // inner}); levels is a Moments map and bins is {fiveMinuteBin: Moments};
     // evidence is the jitter-gate evidence map.
-    List core(Object? s) => (s as List)[0] as List;
+    List core(Object? s) => ((s as Map)['inner'] as List)[0] as List;
     Map diffs(Object? s) => (core(s)[0] as List)[0] as Map;
     Map lags(Object? s) => (core(s)[0] as List)[1] as Map;
     Map levels(Object? s) => (core(s)[1] as List)[0] as Map;
     Map bins(Object? s) => (core(s)[1] as List)[1] as Map;
-    Map evidence(Object? s) => (s as List)[1] as Map;
+    Map evidence(Object? s) => ((s as Map)['inner'] as List)[1] as Map;
 
     test('both lookbacks must have seen the same number of beats', () {
       expectDamagedCheckpointRefused(agg, beats, (s) {
@@ -549,5 +557,69 @@ void main() {
               kind: 'test', version: 1),
           isNotNull);
     });
+  });
+
+  // why: the five-minute grid is anchored at originMs, so a checkpoint resumed
+  // on another origin would bin the retained beats and the appended ones on
+  // different grids.
+  // # catches: a restore under origin -300000 publishes SDANN and SDNN index
+  // where a fresh fold on one grid returns null for both.
+  test('a checkpoint is refused under a different originMs', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 0.0),
+      (nnMs: 810.0, timeMs: 810.0),
+      (nnMs: 820.0, timeMs: 1630.0),
+      (nnMs: 830.0, timeMs: 2460.0),
+    ]);
+    final saved = hrvTimeAggregator(originMs: 0.0);
+    final json = saved.encodeState(saved.addSlice(saved.empty(), beats, 0, 2));
+    final other = hrvTimeAggregator(originMs: -300000.0);
+    expect(() => other.decodeState(json), throwsFormatException);
+    final same = hrvTimeAggregator(originMs: 0.0);
+    final back = same.decodeState(json);
+    expect(same.finish(same.addSlice(back, beats, 2, 4)).nBeats, 4);
+  });
+
+  // why: the stored boundary clock must name beats the checkpoint really holds,
+  // or the gap test at the next seam runs against a time no beat has.
+  // # catches: [800, 900] at [1000, 1900] restores with last changed to 1000.
+  test('a boundary clock that disagrees with the retained beats is refused', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 1000.0),
+      (nnMs: 900.0, timeMs: 1900.0),
+    ]);
+    final a = hrvTimeAggregator(originMs: 1000.0);
+    final json = jsonDecode(jsonEncode(a.encodeState(a.fold(beats))))
+        as Map<String, dynamic>;
+    expect(json['first'], 1000.0);
+    expect(json['last'], 1900.0);
+    expect(() => a.decodeState(json), returnsNormally);
+    for (final (key, value) in [('last', 1000.0), ('first', 1900.0)]) {
+      final bad = Map<String, dynamic>.of(json)..[key] = value;
+      if (key == 'first') bad['last'] = 1900.0;
+      expect(() => a.decodeState(bad), throwsFormatException, reason: key);
+    }
+    // An empty outer clock over retained beats is refused as well.
+    final noClock = Map<String, dynamic>.of(json)
+      ..['first'] = null
+      ..['last'] = null;
+    expect(() => a.decodeState(noClock), throwsFormatException);
+  });
+
+  // why: every malformed checkpoint must be the same FormatException.
+  // # catches: 'inner': [] reaches the retained-edge read and throws RangeError.
+  test('a malformed inner state is a FormatException, not a RangeError', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 1000.0),
+      (nnMs: 900.0, timeMs: 1900.0),
+    ]);
+    final a = hrvTimeAggregator(originMs: 1000.0);
+    final json = jsonDecode(jsonEncode(a.encodeState(a.fold(beats))))
+        as Map<String, dynamic>;
+    for (final inner in <Object?>[[], [[]], [[], {}], {}, 'x', null]) {
+      final bad = Map<String, dynamic>.of(json)..['inner'] = inner;
+      expect(() => a.decodeState(bad), throwsFormatException,
+          reason: '$inner');
+    }
   });
 }

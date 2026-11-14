@@ -296,7 +296,7 @@ class _Piece {
         'front': [for (final v in front) encodeDouble(v)],
         'back': [for (final v in back) encodeDouble(v)],
         's2': encodeDoubles(s2),
-        'cnt': cnt,
+        'cnt': List<int>.of(cnt),
         'xs': [for (final v in xs) encodeDouble(v)],
         'x': encodeDouble(x),
         'phases': [for (final p in phases) p.toJson()],

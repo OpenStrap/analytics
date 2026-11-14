@@ -141,4 +141,23 @@ void main() {
           isNotNull);
     });
   });
+
+  // why: DoubleColumn uses NaN for a missing row, and one NaN added to the
+  // profile sums can never be repaired by later finite input.
+  // # catches: [800, NaN, 810, ...] with deceleration:true publishes a present
+  // result whose capacity is NaN.
+  test('a non-finite interval is refused before any state changes', () {
+    final bad = DoubleColumn(Float64List.fromList(
+        [800, double.nan, 810, 820, 830, 840, 850, 860]));
+    for (final deceleration in [true, false]) {
+      final a = prsaAggregator(deceleration: deceleration);
+      final state = a.empty();
+      final before = a.encodeState(state).toString();
+      expect(() => a.addSlice(state, bad, 0, bad.length), throwsArgumentError,
+          reason: 'deceleration=$deceleration');
+      expect(a.encodeState(state).toString(), before,
+          reason: 'state untouched');
+      expect(() => a.run(bad), throwsArgumentError);
+    }
+  });
 }

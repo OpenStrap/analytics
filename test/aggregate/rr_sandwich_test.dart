@@ -506,4 +506,28 @@ void main() {
       expect(prsa.persistable, isTrue);
     });
   });
+
+  // why: the stored settled middle keeps the artifact decisions of the policy
+  // it was built under; a restore under another policy splices two policies.
+  // # catches: minThresholdMs 100 restoring into a sandwich with 10000 gives a
+  // result that matches neither.
+  test('a checkpoint is refused under a different correction policy', () {
+    final rr = [for (var i = 0; i < 900; i++) 800.0 + (i % 7) * 5];
+    var t = 0.0;
+    final ts = [for (final r in rr) t += r];
+    final raw = RawRr.of(rr, ts);
+    final saved = RrSandwich<_Acc, Beats>(_Collect(), minThresholdMs: 100);
+    final json = saved.encodeState(saved.fold(raw));
+    for (final other in [
+      RrSandwich<_Acc, Beats>(_Collect(), minThresholdMs: 10000),
+      RrSandwich<_Acc, Beats>(_Collect(), alpha: 4.0),
+      RrSandwich<_Acc, Beats>(_Collect(), windowBeats: 61),
+      RrSandwich<_Acc, Beats>(_Collect(), reanchorGapMs: 500),
+      RrSandwich<_Acc, Beats>(_Collect(), maxArtifactRun: 5),
+    ]) {
+      expect(() => other.decodeState(json), throwsFormatException);
+    }
+    final same = RrSandwich<_Acc, Beats>(_Collect(), minThresholdMs: 100);
+    expect(same.decodeState(json).m, 900);
+  });
 }
