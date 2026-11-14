@@ -285,6 +285,18 @@ void main() {
   });
 
   group('hourlyRollup', () {
+    // why: truncation toward zero moves negative adjusted minutes into hour 0.
+    test('negative adjusted minutes use floor at hour boundaries', () {
+      final series = Calories.minuteEnergy([70, 70, 70, 70],
+          profile: energyProfiles['male']!, hrmax: _hrmax, restingHr: _rhr,
+          epochMinutes: [0, 59, 60, 119])!;
+      final hours = Calories.hourlyRollup(series.minutes, minuteOffset: -60);
+      expect(hours.map((h) => h.hour), [-1, 0]);
+      expect(hours.map((h) => h.coveredMinutes), [2, 2]);
+      expect(hours.map((h) => h.coverage), [2 / 60, 2 / 60]);
+      expect(hours[0].total, series.minutes[0].total! + series.minutes[1].total!);
+      expect(hours[1].total, series.minutes[2].total! + series.minutes[3].total!);
+    });
     final s = Calories.minuteEnergy(day.hr,
         profile: energyProfiles['male']!,
         hrmax: _hrmax,

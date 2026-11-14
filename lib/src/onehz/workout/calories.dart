@@ -614,7 +614,10 @@ class Calories {
   }) {
     final byHour = <int, List<MinuteEnergy>>{};
     for (final m in minutes) {
-      (byHour[(m.minute + minuteOffset) ~/ 60] ??= []).add(m);
+      final adjusted = m.minute + minuteOffset;
+      // Integer modulo keeps floor semantics for negative local-hour offsets.
+      final hour = (adjusted - adjusted % 60) ~/ 60;
+      (byHour[hour] ??= []).add(m);
     }
     final hours = byHour.keys.toList()..sort();
     return [
