@@ -605,4 +605,21 @@ void main() {
       ..['last'] = null;
     expect(() => a.decodeState(noClock), throwsFormatException);
   });
+
+  // why: every malformed checkpoint must be the same FormatException.
+  // # catches: 'inner': [] reaches the retained-edge read and throws RangeError.
+  test('a malformed inner state is a FormatException, not a RangeError', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 1000.0),
+      (nnMs: 900.0, timeMs: 1900.0),
+    ]);
+    final a = hrvTimeAggregator(originMs: 1000.0);
+    final json = jsonDecode(jsonEncode(a.encodeState(a.fold(beats))))
+        as Map<String, dynamic>;
+    for (final inner in <Object?>[[], [[]], [[], {}], {}, 'x', null]) {
+      final bad = Map<String, dynamic>.of(json)..['inner'] = inner;
+      expect(() => a.decodeState(bad), throwsFormatException,
+          reason: '$inner');
+    }
+  });
 }

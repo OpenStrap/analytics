@@ -45,6 +45,9 @@ class HrvTimeAcc {
   // them, fed beat by beat (origin = the first beat).
   JitterState ev = JitterState();
   JitterEvidenceAggregator? _evAgg;
+  // A beat time moved backward at some fold: hrvTime refuses the whole input
+  // on it, and the summaries kept here cannot show it afterwards.
+  bool regressing = false;
 
   HrvTimeAcc();
 
@@ -53,6 +56,7 @@ class HrvTimeAcc {
       ..n = n
       ..prevNn = prevNn
       ..prevT = prevT
+      ..regressing = regressing
       ..t0 = t0
       ..wMean = wMean
       ..wM2 = wM2
@@ -75,6 +79,7 @@ class HrvTimeAcc {
   }
 
   void add(double v, double t) {
+    if (n > 0 && t.isFinite && prevT.isFinite && t < prevT) regressing = true;
     _evAgg ??= JitterEvidenceAggregator(originMs: t, gapAware: true);
     ev = _evAgg!.addSlice(
         ev, Beats(Float64List.fromList([v]), Float64List.fromList([t])), 0, 1);
@@ -129,6 +134,13 @@ class HrvTimeAcc {
 
   Metric<HrvTime> _finish(double artifactFraction) {
     const inputs = ['rr_cleaned'];
+    if (regressing) {
+      return const Metric<HrvTime>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (n < 2) {
       return const Metric<HrvTime>.absent(
         tier: Tier.high,
@@ -196,6 +208,7 @@ class HrvTimeAcc {
         'n': n,
         'prevNn': prevNn,
         'prevT': prevT,
+        'regressing': regressing,
         't0': t0,
         'wMean': wMean,
         'wM2': wM2,
@@ -221,6 +234,7 @@ class HrvTimeAcc {
       ..n = j['n'] as int
       ..prevNn = (j['prevNn'] as num).toDouble()
       ..prevT = (j['prevT'] as num).toDouble()
+      ..regressing = j['regressing'] as bool? ?? false
       ..t0 = (j['t0'] as num).toDouble()
       ..wMean = (j['wMean'] as num).toDouble()
       ..wM2 = (j['wM2'] as num).toDouble()
@@ -716,6 +730,10 @@ class NocturnalRmssdState {
   int _idx = 0;
   List<double> _nn = [], _t = [];
   final List<_WinRec> recs = [];
+  // The last folded beat time and whether any time moved backward: the batch
+  // refuses the whole night on it.
+  double? _prevT;
+  bool _regressing = false;
 
   NocturnalRmssdState({this.windowMs = 300000.0, this.minBeatsPerWindow = 5});
 
@@ -740,6 +758,10 @@ class NocturnalRmssdState {
   }
 
   void _step(double v, double tm, List<_WinRec> sink) {
+    if (_prevT != null && tm.isFinite && _prevT!.isFinite && tm < _prevT!) {
+      _regressing = true;
+    }
+    _prevT = tm;
     _t0 ??= tm;
     final idx = ((tm - _t0!) / windowMs).floor();
     if (idx != _idx && _nn.isNotEmpty) {
@@ -764,6 +786,15 @@ class NocturnalRmssdState {
   Metric<double> evaluate(List<double> tailNn, List<double> tailT,
       {List<bool>? stageMaskPerSec, RrCoverage? coverage}) {
     const inputs = ['rr_cleaned', 'beat_times'];
+    // First, as in the batch: folded beats, the seam to the tail, the tail.
+    if (_regressing ||
+        hasRegressingBeatTimes([if (_prevT != null) _prevT!, ...tailT])) {
+      return const Metric<double>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (coverage != null && coverage.overCounted) {
       return Metric<double>.absent(
         tier: Tier.high,

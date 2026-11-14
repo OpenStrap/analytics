@@ -320,4 +320,58 @@ void main() {
     // A forward-only stream is unchanged.
     expect(forward.evaluate(const [], const []), all);
   });
+
+  // why: hrvTime and nocturnalRmssd refuse a backward beat time; the summaries
+  // kept by their states cannot show it later, so the fact is kept.
+  // # catches: 40 constant 800 ms beats with the last time set to 100 publish
+  // RMSSD 0 from both states.
+  group('time-domain states keep the batch regressing-time refusal', () {
+    final nn = List<double>.filled(40, 800);
+    final ts = List<double>.generate(40, (i) => i * 800.0)..[39] = 100;
+
+    test('HrvTimeAcc: one fold, two folds, a tail, a checkpoint', () {
+      final want = hrvTime(nn, nnTimesMs: ts);
+      expect(want.note, 'regressing beat time');
+      Map<String, Object?> j(Metric<HrvTime> m) => m.toJson((v) => v.toJson());
+      expect(j((HrvTimeAcc()..fold(nn, ts)).evaluate([], [])), j(want),
+          reason: 'one fold');
+      final two = HrvTimeAcc()
+        ..fold(nn.sublist(0, 39), ts.sublist(0, 39))
+        ..fold(nn.sublist(39), ts.sublist(39));
+      expect(j(two.evaluate([], [])), j(want), reason: 'across folds');
+      final tail = HrvTimeAcc()..fold(nn.sublist(0, 39), ts.sublist(0, 39));
+      expect(j(tail.evaluate(nn.sublist(39), ts.sublist(39))), j(want),
+          reason: 'in the tail');
+      final back = HrvTimeAcc.fromJson(
+          jsonDecode(jsonEncode(two.toJson())) as Map<String, dynamic>);
+      expect(j(back.evaluate([], [])), j(want), reason: 'after a checkpoint');
+      // Ordered input is still estimated.
+      final okTs = List<double>.generate(40, (i) => i * 800.0);
+      expect(
+          j((HrvTimeAcc()..fold(nn, okTs)).evaluate([], [])),
+          j(hrvTime(nn, nnTimesMs: okTs)));
+    });
+
+    test('NocturnalRmssdState: one fold, across folds, a tail, the seam', () {
+      final want = nocturnalRmssd(nn, ts);
+      expect(want.note, 'regressing beat time');
+      expect((NocturnalRmssdState()..fold(nn, ts)).evaluate([], []).toJson(),
+          want.toJson(),
+          reason: 'one fold');
+      final two = NocturnalRmssdState()
+        ..fold(nn.sublist(0, 39), ts.sublist(0, 39))
+        ..fold(nn.sublist(39), ts.sublist(39));
+      expect(two.evaluate([], []).toJson(), want.toJson(),
+          reason: 'across folds');
+      final tail = NocturnalRmssdState()
+        ..fold(nn.sublist(0, 39), ts.sublist(0, 39));
+      expect(tail.evaluate(nn.sublist(39), ts.sublist(39)).toJson(),
+          want.toJson(),
+          reason: 'seam to the tail');
+      final okTs = List<double>.generate(40, (i) => i * 800.0);
+      expect(
+          (NocturnalRmssdState()..fold(nn, okTs)).evaluate([], []).toJson(),
+          nocturnalRmssd(nn, okTs).toJson());
+    });
+  });
 }

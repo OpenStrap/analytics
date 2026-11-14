@@ -240,6 +240,9 @@ class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
 /// First and last retained beat time of a version-2 `[core, evidence]` state,
 /// from the difference lookback's edge rows; (null, null) when it holds none.
 (double?, double?) _retainedEdges(Object? innerJson) {
+  // The shape is checked first: an empty or short inner list must be the
+  // same FormatException the versioned decoder gives, not a RangeError here.
+  _validateVersioned(innerJson, true);
   final core = decodeList(decodeList(innerJson)[0]);
   final diffs = decodeMap(decodeList(core[0])[0]);
   if (decodeCount(field(diffs, 'length')) == 0) return (null, null);
