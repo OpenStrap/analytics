@@ -20,9 +20,11 @@ class Row {
   final double oracleFullMs;
   final List<double> passMs; // fold+evaluate per pass
   final int stateBytes;
-  Row(this.name, this.oracleFullMs, this.passMs, this.stateBytes);
+  final bool estimated;
+  Row(this.name, this.oracleFullMs, this.passMs, this.stateBytes,
+      {this.estimated = false});
   String line() =>
-      '| $name | ${oracleFullMs.toStringAsFixed(0)} | ${mean(passMs).toStringAsFixed(1)} | ${mx(passMs).toStringAsFixed(1)} | ${sum(passMs).toStringAsFixed(0)} | $stateBytes |';
+      '| $name | ${oracleFullMs.toStringAsFixed(0)} | ${mean(passMs).toStringAsFixed(1)} | ${mx(passMs).toStringAsFixed(1)} | ${sum(passMs).toStringAsFixed(0)} | $stateBytes (${estimated ? "estimate" : "JSON"}) |';
 }
 
 T timed<T>(Stopwatch sw, T Function() f, List<double> sink) {
@@ -44,7 +46,7 @@ void main() {
   final sw = Stopwatch();
   final rows = <Row>[];
 
-  Row bench(String name, double Function() oracle, void Function(FoldStep, List<double>) pass, int Function() bytes) {
+  Row bench(String name, double Function() oracle, void Function(FoldStep, List<double>) pass, int Function() bytes, {bool estimated = false}) {
     oracle(); // warm
     sw..reset()..start();
     oracle();
@@ -53,7 +55,7 @@ void main() {
     for (final f in steps) {
       pass(f, ps);
     }
-    final r = Row(name, fullMs, ps, bytes());
+    final r = Row(name, fullMs, ps, bytes(), estimated: estimated);
     rows.add(r);
     return r;
   }
@@ -84,7 +86,7 @@ void main() {
         st.fold(f.settled.nn, f.settled.nnTimes);
         st.evaluate(f.snap.tailNn, f.snap.tailNnTimes);
       }, ps);
-    }, () => st.recs.length * 60);
+    }, () => st.recs.length * 60, estimated: true);
   }
   // session rmssd (raw)
   {
@@ -104,7 +106,7 @@ void main() {
         k++;
         st.evaluate();
       }, ps);
-    }, () => st.recs.length * 60);
+    }, () => st.recs.length * 60, estimated: true);
   }
   // night shape
   {
@@ -118,7 +120,7 @@ void main() {
         st.fold(f.settled.nn, f.settled.nnTimes);
         st.evaluate(f.snap.tailNn, f.snap.tailNnTimes);
       }, ps);
-    }, () => st.closed.length * 40);
+    }, () => st.closed.length * 40, estimated: true);
   }
   // hrv timeline
   {
@@ -133,7 +135,7 @@ void main() {
         st.fold(f.settled.nn, f.settled.nnTimes);
         st.curve(f.snap.tailNn, f.snap.tailNnTimes);
       }, ps);
-    }, () => st.out.length * 20 + 900 * 16);
+    }, () => st.out.length * 20 + 900 * 16, estimated: true);
   }
   // rsa
   {
@@ -161,7 +163,7 @@ void main() {
         st.fold(f.settled.nn, f.settled.nnTimes);
         st.evaluate(f.snap.tailNn, f.snap.tailNnTimes);
       }, ps);
-    }, () => st.closed.length * 8 + 12000);
+    }, () => st.closed.length * 8 + 12000, estimated: true);
   }
   // hrvFreq
   {
@@ -178,7 +180,7 @@ void main() {
     }, () => jsonEncode(st.toJson()).length);
   }
   print('\nNIGHT estimators (8.9 h, 32k beats, 15-min passes)');
-  print('| estimator | oracle whole-night ms | incr mean ms/pass | max | sum over passes | state bytes (json) |');
+  print('| estimator | oracle whole-night ms | incr mean ms/pass | max | sum over passes | state size (JSON bytes or estimate) |');
   print('|---|---|---|---|---|---|');
   rows.forEach((r) => print(r.line()));
 
@@ -277,7 +279,7 @@ void main() {
     drows.add(Row('dayRespCurve', full, ps, jsonEncode(st.toJson()).length));
   }
   print('\nDAY estimators (23 h, 97k beats, 15-min passes)');
-  print('| estimator | oracle whole-day ms | incr mean ms/pass | max | sum over passes | state bytes (json) |');
+  print('| estimator | oracle whole-day ms | incr mean ms/pass | max | sum over passes | state size (JSON bytes or estimate) |');
   print('|---|---|---|---|---|---|');
   drows.forEach((r) => print(r.line()));
 }
