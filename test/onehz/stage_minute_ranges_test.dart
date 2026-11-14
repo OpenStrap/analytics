@@ -137,10 +137,12 @@ void main() {
       for (var i = 0; i < 10; i++) _l(),
       // labelled REM, but only 0.05 above the cutoff (margin 0.2)
       for (var i = 0; i < 10; i++)
-        const StageEpochEvidence(stage: SleepStage.rem, remScore: cut + 0.05),
+        const StageEpochEvidence(
+            stage: SleepStage.rem, remScore: cut + 0.05, deepScore: -1.5),
       // labelled light, 0.05 below the cutoff
       for (var i = 0; i < 10; i++)
-        const StageEpochEvidence(stage: SleepStage.nrem, remScore: cut - 0.05),
+        const StageEpochEvidence(
+            stage: SleepStage.nrem, remScore: cut - 0.05, deepScore: -1.5),
     ];
     final r = stageMinuteRanges(ev, margin: 0.2)!;
     _expectRange(r.rem, 0, 10, 'rem');
@@ -167,11 +169,62 @@ void main() {
     _expectRange(r.nrem, 10, 10, 'nrem');
   });
 
+  // A score that is missing decided nothing, so the decision it would have made
+  // stays open: it is never read as "clear of the cutoff".
+  group('a missing score is undecided', () {
+    const m = {'null': null, 'NaN': double.nan};
+    for (final e in m.entries) {
+      final missing = e.value;
+      test('${e.key} on both scores of an asleep epoch', () {
+        final r = stageMinuteRanges([
+          StageEpochEvidence(
+              stage: SleepStage.nrem, remScore: missing, deepScore: missing)
+        ])!;
+        _expectRange(r.rem, 0, 0.5, 'rem');
+        _expectRange(r.light, 0, 0.5, 'light');
+        _expectRange(r.deep, 0, 0.5, 'deep');
+        _expectRange(r.wake, 0, 0, 'wake');
+        _expectRange(r.nrem, 0, 0.5, 'nrem');
+      });
+      test('${e.key} on the REM score only: REM stays open, substage is known',
+          () {
+        final r = stageMinuteRanges([
+          StageEpochEvidence(
+              stage: SleepStage.nrem, remScore: missing, deepScore: -1.5)
+        ])!;
+        _expectRange(r.rem, 0, 0.5, 'rem');
+        _expectRange(r.light, 0, 0.5, 'light');
+        _expectRange(r.deep, 0, 0, 'deep');
+      });
+      test('${e.key} on the deep score only: light/deep stays open, REM is out',
+          () {
+        final r = stageMinuteRanges([
+          StageEpochEvidence(
+              stage: SleepStage.nrem, remScore: -1.5, deepScore: missing)
+        ])!;
+        _expectRange(r.rem, 0, 0, 'rem');
+        _expectRange(r.light, 0, 0.5, 'light');
+        _expectRange(r.deep, 0, 0.5, 'deep');
+        _expectRange(r.nrem, 0.5, 0.5, 'nrem');
+      });
+      test('${e.key} on a REM epoch\'s scores', () {
+        final r = stageMinuteRanges([
+          StageEpochEvidence(
+              stage: SleepStage.rem, remScore: missing, deepScore: missing)
+        ])!;
+        _expectRange(r.rem, 0, 0.5, 'rem');
+        _expectRange(r.light, 0, 0.5, 'light');
+        _expectRange(r.deep, 0, 0.5, 'deep');
+      });
+    }
+  });
+
   test('scores exactly at the margin are clear', () {
     const cut = kDefaultRemScoreCut;
     final ev = [
       for (var i = 0; i < 10; i++)
-        const StageEpochEvidence(stage: SleepStage.rem, remScore: cut + 0.25),
+        const StageEpochEvidence(
+            stage: SleepStage.rem, remScore: cut + 0.25, deepScore: -1.5),
     ];
     final r = stageMinuteRanges(ev, margin: 0.25)!;
     _expectRange(r.rem, 5, 5, 'rem');

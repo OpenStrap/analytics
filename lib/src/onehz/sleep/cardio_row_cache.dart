@@ -50,7 +50,9 @@ class CardioEpochRow {
 class CardioRowCache {
   // 2: window RMSSD and R(k) skip seam pairs (upstream merge); older rows
   // hold values computed across seams.
-  static const int _version = 2;
+  // 3: fingerprints are hashed byte by byte; older keys came from a word-wise
+  // mix in which two sign-bit changes cancelled.
+  static const int _version = 3;
   final Map<CardioRowKey, CardioEpochRow> _rows = {};
 
   CardioRowCache();
