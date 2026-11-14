@@ -77,7 +77,12 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
     counter: 2,
     members: ['median'],
     api: ['needBaselineNote'],
-    files: ['lib/src/onehz/types.dart', 'lib/src/onehz/util.dart'],
+    files: [
+      'lib/src/aggregate/checkpoint.dart',
+      'lib/src/aggregate/laws.dart',
+      'lib/src/onehz/types.dart',
+      'lib/src/onehz/util.dart',
+    ],
   ),
   GroupDecl(
     id: 'found.rr_correction',
@@ -113,7 +118,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'found.energy',
     kind: GroupKind.foundation,
-    counter: 1,
+    counter: 2,
     members: ['Calories.dailyEnergy'],
     api: ['Calories.minuteEnergy', 'Calories.estimateBoutCalories'],
     files: ['lib/src/onehz/workout/calories.dart'],
@@ -317,6 +322,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'lib/src/onehz/clinical/load_trimp_aggregator.dart',
       'lib/src/onehz/clinical/nocturnal.dart',
       'lib/src/onehz/clinical/readiness_lnrmssd.dart',
+      'lib/src/onehz/clinical/readiness_lnrmssd_aggregator.dart',
       'lib/src/onehz/clinical/stress_si.dart',
       'lib/src/onehz/device.dart',
       'lib/src/onehz/human/overreaching_conjunction.dart',

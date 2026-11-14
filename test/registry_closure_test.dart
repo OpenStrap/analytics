@@ -13,9 +13,9 @@
 //
 // HOW (b) KNOWS THE PUBLIC API. The package has no runtime or analyzer
 // dependency (pure Dart, zero deps, by design), so the test does not link the
-// analyzer. It follows `export` directives from lib/onehz.dart (honouring
+// analyzer. It follows `export` directives from both public libraries (honouring
 // `show`/`hide`, which this package uses) and reads top-level declarations at
-// column 0 after stripping comments. That reads the same files the compiler
+// column 0, including wrapped return types, after stripping comments. That reads the same files the compiler
 // does, needs no hand-maintained map to rot, and a rename or a removed export
 // fails here. Its one weakness is an unusual top-level layout the regex does
 // not see; the sanity test below pins known names so a scanner regression is
@@ -104,12 +104,16 @@ final _typeDecl = RegExp(
     r'^(?:(?:abstract|final|base|sealed|interface|mixin)\s+)*(?:class|mixin|enum|typedef|extension type)\s+(\w+)',
     multiLine: true);
 final _fnDecl = RegExp(
-    r'^(?!(?:import|export|part|library|class|enum|typedef|const|final|var|late|abstract|mixin|extension|static|return|if|for|while|switch|else|sealed|base|interface)\b)[A-Za-z_][\w<>,?\[\]. ]*?\s(\w+)\s*(?:<[^>(]*>)?\(',
+    r'^(?!(?:import|export|part|library|class|enum|typedef|const|final|var|late|abstract|mixin|extension|static|return|if|for|while|switch|else|sealed|base|interface)\b)[A-Za-z_][\w<>,?\[\]. \t\r\n]*?\s(\w+)\s*(?:<[^>(]*>)?\(',
     multiLine: true);
 
 /// Public top-level names declared in [file] itself, split by kind.
 ({Set<String> fns, Set<String> types}) _declared(String file) {
-  final src = _stripComments(_read(file));
+  return _declaredSource(_read(file));
+}
+
+({Set<String> fns, Set<String> types}) _declaredSource(String source) {
+  final src = _stripComments(source);
   final types = {for (final m in _typeDecl.allMatches(src)) m.group(1)!};
   final fns = {for (final m in _fnDecl.allMatches(src)) m.group(1)!}
     ..removeWhere((n) => n.startsWith('_') || types.contains(n));
@@ -117,10 +121,10 @@ final _fnDecl = RegExp(
   return (fns: fns, types: types);
 }
 
-/// name -> declaring file, for everything lib/onehz.dart exports (public API).
+/// name -> declaring file, for everything the public libraries export.
 /// [fnsOnly] keeps top-level functions only (constructors/types excluded).
 Map<String, String> _publicApi(
-    {bool fnsOnly = false, List<String> libs = const ['lib/onehz.dart']}) {
+    {bool fnsOnly = false, List<String> libs = _publicLibs}) {
   final api = <String, String>{};
   final seen = <String>{};
   // Returns the names [file] exposes to an importer.
@@ -247,6 +251,30 @@ void main() {
     test('hide filters are honoured', () {
       expect(_publicApi().containsKey('readinessLnRmssdFromSuffix'), isFalse);
     });
+  });
+
+  // why: aggregate-only multiline factories must participate in ownership
+  // checks just like functions exported through onehz.dart.
+  test('declaration scanner handles wrapped returns without scanning methods', () {
+    const source = """
+Aggregator<dynamic,
+    DoubleColumn, Metric<ReadinessLnRmssd>>
+    factoryWithWrappedType({int window = 7}) => build();
+double oneLine() => 1;
+class Example {
+  double method() => 1;
+}
+""";
+    expect(_declaredSource(source).fns, {'factoryWithWrappedType', 'oneLine'});
+    expect(_declaredSource(source).types, {'Example'});
+  });
+  test('public API scan includes the multiline aggregate-only readiness factory', () {
+    expect(_publicApi(libs: _publicLibs)['readinessLnRmssdAggregator'],
+        'lib/src/onehz/clinical/readiness_lnrmssd_aggregator.dart');
+  });
+  test('orphan scan includes aggregate-only functions by default', () {
+    expect(_publicApi(fnsOnly: true)['readinessLnRmssdAggregator'],
+        'lib/src/onehz/clinical/readiness_lnrmssd_aggregator.dart');
   });
 
   group('directive parser (guards the guard)', () {
