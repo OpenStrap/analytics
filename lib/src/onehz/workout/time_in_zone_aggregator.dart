@@ -128,15 +128,40 @@ class _TimeInZoneAggregator
 
   @override
   Object? encodeState(_TimeInZoneState state) => {
+        'zoneSet': _zoneIdentity(),
         'windows': _windows.encodeState(state.windows),
         'hasTail': state.hasTail,
         'tailTimestampMs': encodeDouble(state.tailTimestampMs),
         'tailHr': encodeDouble(state.tailHr),
       };
 
+  // Ordered definition, including custom bounds: maxHr/source alone do not
+  // identify the zone indices already assigned to histogram credits.
+  List<Object> _zoneIdentity() => [
+        zoneSet.source,
+        encodeDouble(zoneSet.maxHr),
+        for (final zone in zoneSet.zones) ...[
+          zone.number,
+          encodeDouble(zone.lower),
+          encodeDouble(zone.upper),
+          encodeDouble(zone.lowerPct),
+          encodeDouble(zone.upperPct),
+        ],
+      ];
+
   @override
   _TimeInZoneState decodeState(Object? json) {
     final map = decodeMap(json);
+    final storedZones = decodeList(field(map, 'zoneSet'));
+    final currentZones = _zoneIdentity();
+    if (storedZones.length != currentZones.length) {
+      throw const FormatException('Different heart-rate zone set');
+    }
+    for (var i = 0; i < currentZones.length; i++) {
+      if (storedZones[i] != currentZones[i]) {
+        throw const FormatException('Different heart-rate zone set');
+      }
+    }
     final windows = decodeMap(field(map, 'windows'));
     final length = decodeCount(field(windows, 'length'));
     final hasTail = field(map, 'hasTail');
@@ -165,6 +190,16 @@ class _TimeInZoneAggregator
     }
     if (hasTail && !result.tailTimestampMs.isFinite) {
       throw const FormatException('Non-finite tail timestamp');
+    }
+    if (hasTail) {
+      final last = HrStream.fromJson(field(windows, 'last'));
+      // The lookback decoder has checked that this edge holds exactly one row.
+      // Encoded comparison preserves accepted NaN HR, which is invalid input
+      // for crediting but must still survive a checkpoint round trip.
+      if (result.tailTimestampMs != last.tsMs.single ||
+          encodeDouble(result.tailHr) != encodeDouble(last.hr.single)) {
+        throw const FormatException('Tail disagrees with retained last row');
+      }
     }
     _validateHistogramCounts(result.histograms(), length);
     return result;

@@ -197,6 +197,11 @@ class _GroupedPairWindows
 
 /// Mergeable Phillips SRI over [Epochs].
 ///
+/// The complete record must start at [Epochs.firstIndex] zero. Nonzero indices
+/// are for contiguous chunks of that record; combine them in order with the
+/// zero-origin prefix before finishing. To evaluate a separate record, reindex
+/// it from zero rather than finishing a nonzero-origin chunk on its own.
+///
 /// The Lookback window has one row from each of two adjacent clock days. Its
 /// last row determines the later-day key used by GroupBy.
 // Phillips et al. 2017 SRI, as in phillipsSri(). Lookback pairs epochs exactly
