@@ -26,12 +26,13 @@ Implemented APIs:
   `CardioRowCache`, not to `EpochRows`. Feature
   context extends beyond the requested session. The existing bounded accel
   coverage and unobserved-run semantics remain in use.
-- Registry counters `found.core`, `found.rr_correction`, `sleep.stage`,
+- Registry counters `found.core`, `found.rr_correction`, `found.energy`, `sleep.stage`,
   `hrv.freq`, `night.rhythm` and `activity.load` are 2. A group's own algorithm
   changes, including rounding and abstention, require a bump; dependency-only
   changes propagate through `deps`. One bump per group covers this PR:
   - `found.core`: Lomb-Scargle now subtracts the first timestamp.
   - `found.rr_correction`: the artifact-run cap, already bumped.
+  - `found.energy`: hourly buckets floor negative adjusted minute keys.
   - `sleep.stage`: retain the existing bump; its direct staging path also
     computes adopted HRV statistics. Session-onset/post-gap anchoring is retained.
   - `hrv.freq`: adopted HRV rounding and non-finite-time abstention.

@@ -8,6 +8,7 @@ void main() {
     const changed = {
       'found.core', // Lomb-Scargle first-sample origin.
       'found.rr_correction', // Artifact-run cap, already bumped.
+      'found.energy', // Floor negative adjusted minutes in hourly energy.
       'sleep.stage', // Already bumped; also owns adopted HRV staging paths.
       'hrv.freq', // HRV aggregator rounding and invalid-time abstention.
       'night.rhythm', // Cosinor/circadian and gap-aware irregular screening.
