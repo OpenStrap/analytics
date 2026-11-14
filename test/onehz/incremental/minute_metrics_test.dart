@@ -5,6 +5,28 @@ import '../support/incremental_compare.dart';
 import '../support/incremental_fixtures.dart';
 
 void main() {
+  // why: an accepted checkpoint must remain identical on an unchanged sync,
+  // even when its stored basal rate differs from the current calculator.
+  test('restored basal rate survives unchanged sync until repricing', () {
+    final profile = energyProfiles['male']!;
+    final original = IncrementalMinuteMetrics();
+    original.sync([0], [110], restingHr: 54, maxHr: 186, profile: profile);
+    final saved = checkpoint(original.toJson());
+    final basal = (saved['basalPerMinute'] as num).toDouble() + 1;
+    saved['basalPerMinute'] = basal;
+    final restored = IncrementalMinuteMetrics.fromJson(saved);
+    final accepted = checkpoint(restored.toJson());
+    final result = restored.sync([0], [110],
+        restingHr: 54, maxHr: 186, profile: profile);
+    expect(restored.toJson(), accepted);
+    expect(result.minutes!.basalKcalPerMin, basal);
+    restored.sync([0, 1], [110, 120],
+        restingHr: 54, maxHr: 186, profile: profile);
+    expect(restored.toJson()['basalPerMinute'], basal);
+    final forced = restored.sync([0, 1], [110, 120],
+        restingHr: 54, maxHr: 186, profile: profile, force: true);
+    expect(forced.minutes!.basalKcalPerMin, basal - 1);
+  });
   for (final entry in energyProfiles.entries) {
     for (final sex in Sex.values) {
       for (final chunk in [1, 19, 128]) {

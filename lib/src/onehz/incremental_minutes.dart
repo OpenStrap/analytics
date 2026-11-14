@@ -213,7 +213,9 @@ class IncrementalMinuteMetrics {
           ? null
           : Calories.minuteEnergyPricer(
               profile: profile, hrmax: maxHr, restingHr: restingHr);
-      _basalPerMinute = _energyPricer?.basalKcalPerMin;
+      // Restoring the callable must not change an accepted checkpoint's rate.
+      // Only an explicit repricing replaces retained pricing state.
+      if (reprice) _basalPerMinute = _energyPricer?.basalKcalPerMin;
       _pricerReady = true;
     }
     if (reprice) {
