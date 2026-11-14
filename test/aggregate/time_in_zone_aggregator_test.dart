@@ -585,4 +585,38 @@ void main() {
       }
     });
   });
+
+  // # catches: HrStream.fromJson checks column lengths only, so a retained edge
+  // with an infinite timestamp decoded and later became an infinite credit gap,
+  // a histogram key that restore refuses.
+  group('retained timestamps must be finite at restore', () {
+    final three = _S([0, 1000, 2000], [150, 150, 150]).stream;
+    Map windows(Object? s) => (s as Map)['windows'] as Map;
+    for (final bad in ['Infinity', '-Infinity', 'NaN']) {
+      test('last edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['last'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'last $bad');
+      });
+      test('first edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['first'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'first $bad');
+      });
+      test('tail timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (s as Map)['tailTimestampMs'] = bad;
+          return s;
+        }, reason: 'tail $bad');
+      });
+    }
+    test('a good checkpoint still restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, three),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
 }
