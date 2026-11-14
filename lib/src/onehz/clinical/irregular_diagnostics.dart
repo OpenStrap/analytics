@@ -46,6 +46,13 @@ class RrCleaningCounts {
 double? diagnosticArtifactFraction(double fraction, RrCleaningCounts? cleaning) =>
     cleaning != null && cleaning.raw == 0 ? null : fraction;
 
+/// A long-term SD (SDNN) below this many milliseconds is floating-point noise,
+/// not variability. A constant series has SDNN 0 exactly, but the batch mean is
+/// a repeated sum, so it leaves ~1e-11 ms of rounding around the true value
+/// while the streaming running moments stay at exactly 0. Both paths treat
+/// anything under this floor as "no long-term variability" so they agree.
+const double kDegenerateSdnnMs = 1e-6;
+
 /// Why a screen produced no value. Wire names (toJson): `too_few_beats`,
 /// `artifact`, `no_successive_pairs`, `no_long_term_variability`.
 enum IrregularAbstain {

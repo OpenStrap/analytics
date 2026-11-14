@@ -294,6 +294,23 @@ void main() {
       _expectSameScreen(got, want, 'flat');
     });
 
+    // why: 800.1 is not representable, so the batch mean (a repeated sum) lands
+    // a hair off it and its SDNN is ~1e-11 instead of 0, while the running
+    // moments stay at exactly 0. Both must abstain.
+    // # catches: batch publishes ratio 0 with a rounding-sized SD2 while the
+    // stream abstains.
+    test('flat series at 800.1 abstains in both', () {
+      final nn = List<double>.filled(600, 800.1);
+      var acc = 0.0;
+      final t = [for (var i = 0; i < 600; i++) acc += nn[i]];
+      final got = (IrregularScreenState()..fold(nn, t))
+          .evaluate(const [], const []);
+      final want = _batch(nn, t, 600);
+      expect(want.present, isFalse, reason: 'the batch abstains');
+      expect(got.present, isFalse, reason: 'the stream abstains');
+      _expectSameScreen(got, want, 'flat 800.1');
+    });
+
     test('no two adjacent clean beats: nothing to build a Poincare plot from',
         () {
       // every other beat out of range: 300 clean beats, zero adjacent pairs.

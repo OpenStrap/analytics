@@ -16,18 +16,44 @@ void main() {
   // warm
   correctRr(day.rr.sublist(0, 4000), rrTsMs: day.ts.sublist(0, 4000));
 
-  final sw = Stopwatch()..start();
-  final oracle = correctRr(day.rr, rrTsMs: day.ts);
-  print('oracle one-shot: ${ms(sw).toStringAsFixed(0)} ms '
-      '(${(ms(sw) * 1000 / n).toStringAsFixed(1)} us/beat)');
+  // The two one-shot measurements alternate order across rounds (oracle first,
+  // stream first, ...) so a fixed order cannot favour either; the median of the
+  // rounds is reported.
+  const rounds = 5;
+  final sw = Stopwatch();
+  final oracleMs = <double>[], streamMs = <double>[];
+  late RrCorrectionResult oracle;
+  late RrSettled s1;
+  late RrSnapshot snap1;
+  void runOracle() {
+    sw..reset()..start();
+    oracle = correctRr(day.rr, rrTsMs: day.ts);
+    oracleMs.add(ms(sw));
+  }
 
-  // streaming, one fold of the whole day
-  sw..reset()..start();
-  final one = RrCorrector();
-  final s1 = one.fold(day.rr, tsMs: day.ts);
-  final snap1 = one.snapshot();
-  print('stream one-shot fold+snapshot: ${ms(sw).toStringAsFixed(0)} ms '
-      '(${(ms(sw) * 1000 / n).toStringAsFixed(1)} us/beat)');
+  void runStream() {
+    sw..reset()..start();
+    final one = RrCorrector();
+    s1 = one.fold(day.rr, tsMs: day.ts);
+    snap1 = one.snapshot();
+    streamMs.add(ms(sw));
+  }
+
+  for (var r = 0; r < rounds; r++) {
+    if (r.isEven) {
+      runOracle();
+      runStream();
+    } else {
+      runStream();
+      runOracle();
+    }
+  }
+  final oMs = _median(oracleMs), sMs = _median(streamMs);
+  print('oracle one-shot (median of $rounds): ${oMs.toStringAsFixed(0)} ms '
+      '(${(oMs * 1000 / n).toStringAsFixed(1)} us/beat)');
+  print('stream one-shot fold+snapshot (median of $rounds): '
+      '${sMs.toStringAsFixed(0)} ms '
+      '(${(sMs * 1000 / n).toStringAsFixed(1)} us/beat)');
   final same = [...s1.nn, ...snap1.tailNn];
   print('  identical nn: ${same.length == oracle.nn.length && _eq(same, oracle.nn)}');
 
@@ -76,6 +102,11 @@ bool _eq(List<double> a, List<double> b) {
     if (a[i] != b[i]) return false;
   }
   return true;
+}
+
+double _median(List<double> x) {
+  final v = [...x]..sort();
+  return v.isEmpty ? 0 : v[v.length ~/ 2];
 }
 
 double _mean(List<double> x) => x.isEmpty ? 0 : _sum(x) / x.length;

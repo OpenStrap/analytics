@@ -399,7 +399,7 @@ class IrregularScreenState {
     final sd1 = sdsd / math.sqrt2;
     final v = 2 * sdnn * sdnn - sd1 * sd1;
     final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-    if (sd2 <= 0) {
+    if (sd2 <= 0 || sdnn < kDegenerateSdnnMs) {
       return abstain(
           IrregularAbstain.noLongTermVariability,
           'no long-term variability (SD2 = 0) — the SD1/SD2 ratio is '

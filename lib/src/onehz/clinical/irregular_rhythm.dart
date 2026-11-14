@@ -242,7 +242,7 @@ IrregularScreenResult irregularBeatScreenDetailed(
   final sd1 = sdsd / math.sqrt2;
   final v = 2 * sdnn * sdnn - sd1 * sd1;
   final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-  if (sd2 <= 0) {
+  if (sd2 <= 0 || sdnn < kDegenerateSdnnMs) {
     // SD1/SD2 is undefined without long-term variability to divide by; emitting
     // ratio 0.0 with sd1 = sd2 = 0 published "perfectly regular" as a
     // measurement of a degenerate series.
