@@ -206,13 +206,16 @@ TimedValues _lawSeries(Rng r, int i) {
 }
 
 void main() {
+  // The singular case is built to be EXACT, not near the gate. Every sample sits
+  // at the same time, so cos and sin receive bit-identical inputs and every
+  // sample has the same c and s. The running means then equal c and s exactly,
+  // so each later deviation is exactly 0 and mCC, mSS and mCS stay exactly 0 (in
+  // one slice and across merges, where the mean difference is exactly 0 too).
+  // The determinant is 0 and the gate `0 <= 1e-12 * 0 * 0` holds whatever libm
+  // returns for cos and sin. Nothing here sits near the 1e-12 threshold, so no
+  // platform's rounding can move it.
   test('tiny phase coverage returns an absent metric, not a fabricated fit', () {
-    // Distinct finite times, clustered around phase pi/4. The two centered
-    // design columns become nearly collinear despite enough observations.
-    // The relative determinant of this design is about 1e-14, two orders under
-    // the 1e-12 gate. (A 1e-6 step gives 1.15e-12, which sits ON the gate: the
-    // verdict then depended on how the platform rounds cos/sin.)
-    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-7];
+    final t = List<double>.filled(16, 3.0);
     final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
     final batch = _tv(t, y);
     final agg = cosinorAggregator();
@@ -227,6 +230,26 @@ void main() {
       expect(result.inputs_used, ['signal_timeseries']);
       expect(result.note,
           'singular cosinor design (insufficient phase coverage)');
+    }
+  });
+
+  // Control: a narrow phase window that is still sufficient. The times span
+  // 0.015 h (about 54 s) in 1e-3 h steps. The relative determinant of that
+  // design is about 1.15e-6, over a million times the 1e-12 gate, and the
+  // cancellation in the determinant costs about 1e-10 relative, so the verdict
+  // does not depend on how a platform rounds cos and sin.
+  test('a narrow but sufficient phase window still fits', () {
+    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-3];
+    final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
+    final batch = _tv(t, y);
+    final agg = cosinorAggregator();
+    final left = agg.addSlice(agg.empty(), batch, 0, 8);
+    final right = agg.addSlice(agg.empty(), batch, 8, batch.length);
+    for (final result in [agg.run(batch),
+      agg.finish(agg.combine(left, right)), cosinor(t, y)]) {
+      expect(result.present, isTrue);
+      expect(result.value, isNotNull);
+      expect(result.value!.amplitude.isFinite, isTrue);
     }
   });
 
