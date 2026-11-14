@@ -12,6 +12,8 @@ import 'package:openstrap_analytics/aggregate.dart' show Beats;
 import 'package:openstrap_analytics/onehz.dart'
     hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'package:openstrap_analytics/src/onehz/clinical/hrv_jitter_evidence.dart';
+import 'package:openstrap_analytics/src/onehz/clinical/irregular_window.dart'
+    show irregularWindowConfigOk;
 
 // ===========================================================================
 // 1. hrvTime scalars: RMSSD, pNN50, SDNN, SDANN, SDNN-index, diffAcf1
@@ -43,6 +45,9 @@ class HrvTimeAcc {
   // them, fed beat by beat (origin = the first beat).
   JitterState ev = JitterState();
   JitterEvidenceAggregator? _evAgg;
+  // A beat time moved backward at some fold: hrvTime refuses the whole input
+  // on it, and the summaries kept here cannot show it afterwards.
+  bool regressing = false;
 
   HrvTimeAcc();
 
@@ -51,6 +56,7 @@ class HrvTimeAcc {
       ..n = n
       ..prevNn = prevNn
       ..prevT = prevT
+      ..regressing = regressing
       ..t0 = t0
       ..wMean = wMean
       ..wM2 = wM2
@@ -73,6 +79,7 @@ class HrvTimeAcc {
   }
 
   void add(double v, double t) {
+    if (n > 0 && t.isFinite && prevT.isFinite && t < prevT) regressing = true;
     _evAgg ??= JitterEvidenceAggregator(originMs: t, gapAware: true);
     ev = _evAgg!.addSlice(
         ev, Beats(Float64List.fromList([v]), Float64List.fromList([t])), 0, 1);
@@ -127,6 +134,13 @@ class HrvTimeAcc {
 
   Metric<HrvTime> _finish(double artifactFraction) {
     const inputs = ['rr_cleaned'];
+    if (regressing) {
+      return const Metric<HrvTime>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (n < 2) {
       return const Metric<HrvTime>.absent(
         tier: Tier.high,
@@ -194,6 +208,7 @@ class HrvTimeAcc {
         'n': n,
         'prevNn': prevNn,
         'prevT': prevT,
+        'regressing': regressing,
         't0': t0,
         'wMean': wMean,
         'wM2': wM2,
@@ -219,6 +234,7 @@ class HrvTimeAcc {
       ..n = j['n'] as int
       ..prevNn = (j['prevNn'] as num).toDouble()
       ..prevT = (j['prevT'] as num).toDouble()
+      ..regressing = j['regressing'] as bool? ?? false
       ..t0 = (j['t0'] as num).toDouble()
       ..wMean = (j['wMean'] as num).toDouble()
       ..wM2 = (j['wM2'] as num).toDouble()
@@ -334,7 +350,13 @@ class NightShapeState {
   // closed bins by index (holes included): [n, rmssd?, lo?, hi?]
   final List<List<num?>> closed = [];
 
-  NightShapeState({this.binMin = 30, this.minBeatsPerBin = kMinBeatsPerHrvBin});
+  NightShapeState({this.binMin = 30, this.minBeatsPerBin = kMinBeatsPerHrvBin}) {
+    // A bin of no width never reaches the next edge: the closing loop in
+    // [_step] would spin forever on the first beat.
+    if (!binMin.isFinite || binMin <= 0) {
+      throw ArgumentError.value(binMin, 'binMin', 'must be positive and finite');
+    }
+  }
 
   double get _binMs => binMin * 60000.0;
   double _hi(int b) => _t0! + (b + 1) * _binMs;
@@ -708,6 +730,10 @@ class NocturnalRmssdState {
   int _idx = 0;
   List<double> _nn = [], _t = [];
   final List<_WinRec> recs = [];
+  // The last folded beat time and whether any time moved backward: the batch
+  // refuses the whole night on it.
+  double? _prevT;
+  bool _regressing = false;
 
   NocturnalRmssdState({this.windowMs = 300000.0, this.minBeatsPerWindow = 5});
 
@@ -732,6 +758,10 @@ class NocturnalRmssdState {
   }
 
   void _step(double v, double tm, List<_WinRec> sink) {
+    if (_prevT != null && tm.isFinite && _prevT!.isFinite && tm < _prevT!) {
+      _regressing = true;
+    }
+    _prevT = tm;
     _t0 ??= tm;
     final idx = ((tm - _t0!) / windowMs).floor();
     if (idx != _idx && _nn.isNotEmpty) {
@@ -756,6 +786,15 @@ class NocturnalRmssdState {
   Metric<double> evaluate(List<double> tailNn, List<double> tailT,
       {List<bool>? stageMaskPerSec, RrCoverage? coverage}) {
     const inputs = ['rr_cleaned', 'beat_times'];
+    // First, as in the batch: folded beats, the seam to the tail, the tail.
+    if (_regressing ||
+        hasRegressingBeatTimes([if (_prevT != null) _prevT!, ...tailT])) {
+      return const Metric<double>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (coverage != null && coverage.overCounted) {
       return Metric<double>.absent(
         tier: Tier.high,
@@ -790,7 +829,7 @@ class NocturnalRmssdState {
     final meanRr = <double>[];
     for (final r in all) {
       if (stageMaskPerSec != null) {
-        final midSec = ((r.idx + 0.5) * windowMs / 1000.0).floor();
+        final midSec = ((c._t0! + (r.idx + 0.5) * windowMs) / 1000.0).floor();
         final keep = midSec >= 0 &&
             midSec < stageMaskPerSec.length &&
             stageMaskPerSec[midSec];
@@ -1178,6 +1217,15 @@ class SessionRmssdState {
   int _idx = -1;
   List<double> _rr = [], _ts = [];
   final List<_WinRec> recs = [];
+  double? _previousTime;
+  bool _regressing = false;
+  // Any non-finite RR, in the session or not: the batch refuses the whole input
+  // before segmentation, and cleaning that drops the value would publish RMSSD
+  // 0 from the beats around it.
+  bool _nonFinite = false;
+  // Any non-finite beat TIME: the batch refuses the whole input on it, and
+  // rounding one to a second would throw partway through a fold.
+  bool _nonFiniteTime = false;
   int _seen = 0; // beats folded, in the session or not
   // Session-wide coverage (rrCoverage over the in-session beats), from
   // running figures: the earliest beat (first of equals) and its interval,
@@ -1217,6 +1265,17 @@ class SessionRmssdState {
   }
 
   void _step(double rr, double ts, List<_WinRec> sink) {
+    if (!rr.isFinite) _nonFinite = true;
+    if (!ts.isFinite) {
+      // Nothing else is read from a beat with no place on the clock; the
+      // evaluation refuses. The previous time stays as it was, as the batch's
+      // order check skips non-finite times.
+      _nonFiniteTime = true;
+      _seen++;
+      return;
+    }
+    if (_previousTime != null && ts < _previousTime!) _regressing = true;
+    _previousTime = ts;
     _seen++;
     final tsSec = (ts / 1000.0).round();
     if (tsSec < startSec || tsSec >= endSec) return;
@@ -1243,6 +1302,10 @@ class SessionRmssdState {
   }
 
   void fold(List<double> rr, List<double> ts) {
+    // Before any state changes: a short column would throw part-way through.
+    if (rr.length != ts.length) {
+      throw ArgumentError('rr and ts must have the same length');
+    }
     for (var i = 0; i < rr.length; i++) {
       _step(rr[i], ts[i], recs);
     }
@@ -1270,11 +1333,26 @@ class SessionRmssdState {
   /// The open bucket is closed on a copy; the state is not changed.
   Metric<double> evaluate() {
     const inputs = ['rr_sleep_window'];
+    if (_regressing) {
+      return const Metric<double>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'regressing beat time');
+    }
+    if (_nonFinite) {
+      return const Metric<double>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'non-finite NN interval');
+    }
     if (startSec <= 0 || endSec <= startSec || _seen == 0) {
       return const Metric<double>.absent(
         tier: Tier.high,
         inputs_used: inputs,
         note: 'invalid or empty RR session window',
+      );
+    }
+    if (_nonFiniteTime) {
+      return const Metric<double>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'non-finite beat time',
       );
     }
     if (_inN == 0) {
@@ -1521,7 +1599,7 @@ class IrregularScreenState {
     final sd1 = sdsd / math.sqrt2;
     final v = 2 * sdnn * sdnn - sd1 * sd1;
     final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-    if (sd2 <= 0) {
+    if (sd2 <= 0 || sdnn < kDegenerateSdnnMs) {
       return const Metric<IrregularRhythm>.absent(
         tier: Tier.estimate,
         inputs_used: inputs,
@@ -1533,7 +1611,12 @@ class IrregularScreenState {
     final pnnPct = c._dN == 0 ? 0.0 : 100.0 * c._over / c._dN;
     final aggregateHigh = ratio >= sd1sd2Flag && pnnPct >= pnnFlagPct;
     var flag = false;
-    if (aggregateHigh) {
+    // A bad window config fails CLOSED, as in the batch: never sustained.
+    final windowsOk = irregularWindowConfigOk(
+        windowMinutes: windowMs / 60000,
+        minWindowBeats: minWindowBeats,
+        sustainedFraction: sustainedFraction);
+    if (aggregateHigh && windowsOk) {
       c._flush(); // the open window closes at end of data
       flag = c._valid != 0 && c._flagged / c._valid >= sustainedFraction;
     }
@@ -1557,6 +1640,12 @@ class IrregularScreenState {
   }
 
   Map<String, dynamic> toJson() => {
+        'sd1sd2Flag': sd1sd2Flag,
+        'pnnThresholdMs': pnnThresholdMs,
+        'pnnFlagPct': pnnFlagPct,
+        'windowMinutes': windowMs / 60000,
+        'minWindowBeats': minWindowBeats,
+        'sustainedFraction': sustainedFraction,
         'prevKept': _prevKept,
         'prevV': _prevV,
         'prevT': _prevT.isFinite ? _prevT : null,
@@ -1569,14 +1658,21 @@ class IrregularScreenState {
         'lMean': _lMean,
         'lM2': _lM2,
         'winStart': _winStart,
-        'bk': _bk,
+        'bk': List<double>.of(_bk),
         'bkAdj': [for (final a in _bkAdj) a ? 1 : 0],
         'valid': _valid,
         'flagged': _flagged,
       };
 
   factory IrregularScreenState.fromJson(Map<String, dynamic> j) {
-    final s = IrregularScreenState();
+    final s = IrregularScreenState(
+      sd1sd2Flag: (j['sd1sd2Flag'] as num).toDouble(),
+      pnnThresholdMs: (j['pnnThresholdMs'] as num).toDouble(),
+      pnnFlagPct: (j['pnnFlagPct'] as num).toDouble(),
+      windowMinutes: (j['windowMinutes'] as num).toDouble(),
+      minWindowBeats: j['minWindowBeats'] as int,
+      sustainedFraction: (j['sustainedFraction'] as num).toDouble(),
+    );
     s._prevKept = j['prevKept'] as bool;
     s._prevV = (j['prevV'] as num).toDouble();
     s._prevT = (j['prevT'] as num?)?.toDouble() ?? double.nan;

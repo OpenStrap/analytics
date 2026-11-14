@@ -1,6 +1,6 @@
 // LAWS of the append-only beat streams behind the night's spectral and CVHR
 // estimators: `RsaRespStream` (respiration/resp_rate.dart, checkpoint v3),
-// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v1) and `CvhrStream`
+// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v2) and `CvhrStream`
 // (respiration/cvhr_apnea.dart, v1). Each folds settled NN with their beat
 // times and answers `snapshot` with a provisional tail; the batch functions
 // (`rsaRespRate`, `hrvFreq`, `cvhrApneaScreen`) are the reference.
@@ -27,8 +27,9 @@
 //        as written. An unknown key: ignored.
 //   L4   identity: an empty fold changes nothing (on a fresh stream it records
 //        nothing), `snapshot` never writes, and a refused fold (lengths that
-//        differ, a non-finite beat time, a time that steps back) leaves the
-//        stream unchanged.
+//        differ or a non-finite beat time) leaves the stream unchanged. A
+//        backward beat is refused by RSA/CVHR; spectral HRV counts its omission
+//        and keeps the retained samples and closed powers unchanged.
 //   L5   conservation, from counts made HERE from the input: the stream counts
 //        every folded beat once; RsaRespStream keeps exactly the sorted
 //        multiset of the folded NN and has closed exactly the sub-windows the
@@ -167,6 +168,9 @@ abstract class _Ops<S> {
 
   /// Whether a fold with a non-finite beat time is refused.
   bool get refusesNonFiniteTimes => true;
+
+  /// Spectral HRV omits backward beats; RSA and CVHR refuse them at fold.
+  bool get omitsRegressingTimes => false;
 
   /// Counts made from the input ([nn] / [t], everything folded so far).
   void conserved(Json cp, List<double> nn, List<double> t, int cfg, String why);
@@ -410,8 +414,23 @@ void _l4<S>(_Ops<S> ops, _Case c) {
     }
   }
   if (cut > 0) {
-    refused('a time that steps back',
-        () => ops.fold(s, const [800.0], [x.t[cut - 1] - 1000]), throwsStateError);
+    final backward = x.t[cut - 1] - 1000;
+    if (ops.omitsRegressingTimes) {
+      // why: the batch spectral policy drops backward beats and counts them;
+      // this fold must leave the retained samples and band sums unchanged.
+      final expected = (jsonDecode(before) as Map).cast<String, dynamic>()
+        ..['n'] = cut + 1
+        ..['dropped'] = 1;
+      ops.fold(s, const [800.0], [backward]);
+      expect(_text(ops, s), jsonEncode(expected), reason: '$tag: omission only');
+      expect(ops.show(ops.snapshot(s, ev, const [], const [])),
+          ops.show(ops.batch([...x.nn.take(cut), 800.0],
+              [...x.t.take(cut), backward], cfg, ev)),
+          reason: '$tag: backward beat follows batch policy');
+    } else {
+      refused('a time that steps back',
+          () => ops.fold(s, const [800.0], [backward]), throwsStateError);
+    }
   }
 }
 
@@ -760,6 +779,8 @@ const _bandLo = [0.0003, 0.003, 0.04, 0.15];
 
 class _HrvOps extends _Ops<HrvFreqStream> {
   @override
+  bool get omitsRegressingTimes => true;
+  @override
   String get name => 'HrvFreqStream';
   @override
   String get type => 'HrvFreqStream';
@@ -804,7 +825,7 @@ class _HrvOps extends _Ops<HrvFreqStream> {
   HrvFreqStream fromJson(Json j) => HrvFreqStream.fromJson(j);
 
   @override
-  List<Object?> get badVersions => const [0, 2, -1, '1', null, true, 1.5, 1 << 40];
+  List<Object?> get badVersions => const [0, 1, 3, -1, '2', null, true, 2.5, 1 << 40];
 
   @override
   List<void Function(Json)> get refuseMutations => [
