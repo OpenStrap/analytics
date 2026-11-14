@@ -228,6 +228,19 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
       throw const FormatException('Lookback length disagrees with epoch count');
     }
     final groups = decodeMap(field(lookback, 'inner'));
+    if (count > 0) {
+      // The last edge's absolute index is fixed by the first and the count. A
+      // wrong one decodes and then breaks the join with the next batch (or,
+      // without assertions, compares against the wrong day).
+      final firstEdge = decodeMap(field(lookback, 'first'));
+      final lastEdge = decodeMap(field(lookback, 'last'));
+      final firstAt = decodeCount(field(firstEdge, 'firstIndex'));
+      final lastAt = decodeCount(field(lastEdge, 'firstIndex'));
+      final lastLen = Epochs.fromJson(lastEdge).length;
+      if (lastLen < 1 || lastAt != firstAt + count - lastLen) {
+        throw const FormatException('Last SRI epoch is out of position');
+      }
+    }
     if (count <= epochsPerDay) {
       if (groups.isNotEmpty) {
         throw const FormatException('Pair days without complete comparisons');

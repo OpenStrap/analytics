@@ -1,5 +1,8 @@
-// EpochSeries + circadianNpAggregator must reproduce circadianNonparametric
-// (the reference, unchanged) under every slicing / chunking, and obey the laws.
+// EpochSeries + circadianNpAggregator must reproduce the batch calculation
+// under every slicing / chunking, and obey the laws. The batch calculation is
+// `_referenceCircadianNp` below, the pre-aggregator implementation kept in this
+// file: `circadianNonparametric` now delegates to the aggregator, so comparing
+// against it would let a shared mistake pass.
 //
 // Contract: EpochSeries(Float64List x, {firstIndex = 0}); copyRange copies and
 // shifts firstIndex; join asserts other.firstIndex == firstIndex + length.
@@ -11,6 +14,7 @@
 // window margin is not available to the equality, so only integer cases check
 // starts).
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
@@ -43,6 +47,114 @@ EpochSeries _es(List<num> x, {int first = 0}) => EpochSeries(
     Float64List.fromList([for (final v in x) v.toDouble()]),
     firstIndex: first);
 
+double _mean(List<double> v) {
+  var s = 0.0;
+  for (final x in v) {
+    s += x;
+  }
+  return s / v.length;
+}
+
+/// The batch rule as it was before `circadianNonparametric` delegated to the
+/// aggregator (Witting 1990, van Someren 1999), written out again here: Welford
+/// total variance, the epoch-of-day profile, IS, IV and the circular M10/L5
+/// windows. Nothing below calls the code under test.
+Metric<CircadianNp> _referenceCircadianNp(List<double> x, int epochsPerDay,
+    {int? m10Epochs, int? l5Epochs}) {
+  const inputs = ['activity_or_hr_epochs'];
+  final n = x.length;
+  if (epochsPerDay <= 0 || n < epochsPerDay) {
+    return const Metric<CircadianNp>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'need ≥1 full day of epochs for circadian metrics',
+    );
+  }
+  final mEp = m10Epochs ?? (epochsPerDay * 10 ~/ 24);
+  final lEp = l5Epochs ?? (epochsPerDay * 5 ~/ 24);
+  final grand = _mean(x);
+  var ssTot = 0.0, center = 0.0, count = 0;
+  for (final value in x) {
+    count++;
+    if (!value.isFinite) {
+      ssTot = double.nan;
+      break;
+    }
+    final delta = value - center;
+    center += delta / count;
+    ssTot += delta * (value - center);
+  }
+  if (ssTot == 0) {
+    return const Metric<CircadianNp>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no variance in activity series',
+    );
+  }
+  final p = epochsPerDay;
+  final hourMeans = List<double>.filled(p, 0);
+  final hourCounts = List<int>.filled(p, 0);
+  for (var i = 0; i < n; i++) {
+    hourMeans[i % p] += x[i];
+    hourCounts[i % p]++;
+  }
+  for (var h = 0; h < p; h++) {
+    if (hourCounts[h] > 0) hourMeans[h] /= hourCounts[h];
+  }
+  var ssHour = 0.0;
+  for (var h = 0; h < p; h++) {
+    final d = hourMeans[h] - grand;
+    ssHour += d * d;
+  }
+  final isValue = (n * ssHour) / (p * ssTot);
+  var ssDiff = 0.0;
+  for (var i = 1; i < n; i++) {
+    final d = x[i] - x[i - 1];
+    ssDiff += d * d;
+  }
+  final iv = (n * ssDiff) / ((n - 1) * ssTot);
+
+  (double, int) best(int w, {required bool maximize}) {
+    if (w >= p) return (_mean(hourMeans), 0);
+    double? bestValue;
+    var bestStart = 0;
+    for (var s = 0; s < p; s++) {
+      var sum = 0.0;
+      for (var k = 0; k < w; k++) {
+        sum += hourMeans[(s + k) % p];
+      }
+      final m = sum / w;
+      if (bestValue == null || (maximize ? m > bestValue : m < bestValue)) {
+        bestValue = m;
+        bestStart = s;
+      }
+    }
+    return (bestValue ?? 0, bestStart);
+  }
+
+  final m10 = best(mEp, maximize: true);
+  final l5 = best(lEp, maximize: false);
+  final ra = (m10.$1 + l5.$1) > 0 ? (m10.$1 - l5.$1) / (m10.$1 + l5.$1) : 0.0;
+  final days = n / epochsPerDay;
+  final conf = (days / 7.0).clamp(0.3, 0.95);
+  return Metric<CircadianNp>(
+    value: CircadianNp(
+      interdailyStability: isValue.clamp(0, 1),
+      intradailyVariability: math.max(0, iv),
+      m10: m10.$1,
+      l5: l5.$1,
+      relativeAmplitude: ra.clamp(0, 1),
+      m10StartEpoch: m10.$2,
+      l5StartEpoch: l5.$2,
+    ),
+    confidence: conf,
+    tier: Tier.high,
+    inputs_used: inputs,
+    note: 'IS/IV/RA/L5/M10 (van Someren 1999); circadian phase anchored on the '
+        'L5 nocturnal trough, not the daytime peak',
+  );
+}
+
 /// Seeded series: [count] lengths in 0..10 days plus a partial day.
 List<EpochSeries> _cases(int seed, int p, double Function(Rng) draw,
     {int count = 10}) {
@@ -66,7 +178,7 @@ void _parity(String name, int p, {int? m10, int? l5, bool ints = true}) {
     expectConversion<dynamic, EpochSeries, Metric<CircadianNp>>(
       (_) => circadianNpAggregator(p, m10Epochs: m10, l5Epochs: l5),
       _cases(p * 31 + (ints ? 1 : 0), p, draw),
-      (b) => circadianNonparametric(b.x, p, m10Epochs: m10, l5Epochs: l5),
+      (b) => _referenceCircadianNp(b.x, p, m10Epochs: m10, l5Epochs: l5),
       equals: ints ? _exact : _real,
       seed: p,
     );
@@ -123,7 +235,7 @@ void main() {
       final x = _es([for (var i = 0; i < 3 * 1440; i++) r.intIn(0, 900)]);
       expectConversion<dynamic, EpochSeries, Metric<CircadianNp>>(
           (_) => circadianNpAggregator(1440), [x],
-          (b) => circadianNonparametric(b.x, 1440),
+          (b) => _referenceCircadianNp(b.x, 1440),
           // Laws are covered by the small-p cases above; here each finish runs
           // the O(p·w) window search, so the law sweep alone took ~9 s.
           equals: _exact, chunkings: 4, laws: false);
@@ -138,7 +250,7 @@ void main() {
   group('absent cases and extremes', () {
     void same(String name, EpochSeries s, int p, {int? m10, int? l5}) =>
         test(name, () {
-          final want = circadianNonparametric(s.x, p, m10Epochs: m10, l5Epochs: l5);
+          final want = _referenceCircadianNp(s.x, p, m10Epochs: m10, l5Epochs: l5);
           final got = circadianNpAggregator(p, m10Epochs: m10, l5Epochs: l5)
               .run(s);
           expect(_exact(got, want), isTrue, reason: '$got vs $want');
@@ -179,7 +291,7 @@ void main() {
     void same(String name, List<double> x, int p, {int? m10, int? l5}) =>
         test(name, () {
           final s = _es(x);
-          final want = circadianNonparametric(s.x, p, m10Epochs: m10, l5Epochs: l5);
+          final want = _referenceCircadianNp(s.x, p, m10Epochs: m10, l5Epochs: l5);
           final agg = circadianNpAggregator(p, m10Epochs: m10, l5Epochs: l5);
           final got = agg.run(s);
           expect(_exact(got, want), isTrue, reason: 'whole: $got vs $want');
@@ -226,7 +338,7 @@ void main() {
                       : r.intIn(0, 500).toDouble()
               ]),
           ],
-          (b) => circadianNonparametric(b.x, p),
+          (b) => _referenceCircadianNp(b.x, p),
           equals: _exact,
           seed: p,
         );
@@ -310,8 +422,62 @@ void main() {
         return s;
       });
     });
+    // # catches: only the first edge's index was checked, so a last edge at the
+    // wrong index decoded and then failed when the next batch was joined to it.
+    test('the last edge must sit at firstIndex + count - 1', () {
+      for (final bad in [7, 9, 0, 100]) {
+        expectDamagedCheckpointRefused(agg, x, (s) {
+          (lookback(s)['last'] as Map)['firstIndex'] = bad;
+          return s;
+        }, reason: 'last.firstIndex $bad');
+      }
+      // The right value (9 epochs from index 0: last at 8) is accepted.
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, x),
+              kind: 'test', version: 1),
+          isNotNull);
+      // A checkpoint that starts later moves the expected index with it.
+      final tail = EpochSeries(Float64List.fromList([1, 2, 3, 4, 5]),
+          firstIndex: 4);
+      final a = circadianNpAggregator(6);
+      expectDamagedCheckpointRefused(a, tail, (s) {
+        (lookback(s)['last'] as Map)['firstIndex'] = 4;
+        return s;
+      });
+    });
     test('a consistent checkpoint resumes after the checks', () {
       expectCheckpointResumes(agg, x, equals: _exact);
+    });
+  });
+
+  // The public batch function now runs the aggregator; it must still equal the
+  // independent reference, including the awkward series.
+  group('circadianNonparametric agrees with the frozen reference', () {
+    final p = 6;
+    final series = <String, List<double>>{
+      'ordinary': [for (var i = 0; i < 4 * p; i++) (i * 7 % 11).toDouble()],
+      'partial day': [for (var i = 0; i < 2 * p + 3; i++) (i * 5 % 9).toDouble()],
+      'constant': List<double>.filled(3 * p, 4.0),
+      'one value off': [for (var i = 0; i < 3 * p; i++) i == 7 ? 100.0 : 3.0],
+      'huge values': [for (var i = 0; i < 3 * p; i++) (i.isEven ? 1e300 : 1e-300)],
+      'a NaN': [for (var i = 0; i < 3 * p; i++) i == 5 ? double.nan : i.toDouble()],
+      'an Infinity': [for (var i = 0; i < 3 * p; i++) i == 9 ? double.infinity : i.toDouble()],
+      'too short': [1.0, 2.0, 3.0],
+      'empty': <double>[],
+    };
+    for (final e in series.entries) {
+      test(e.key, () {
+        final got = circadianNonparametric(e.value, p);
+        final want = _referenceCircadianNp(e.value, p);
+        expect(_withStarts(got).map((v) => v is double && v.isNaN ? 'NaN' : v),
+            _withStarts(want).map((v) => v is double && v.isNaN ? 'NaN' : v));
+      });
+    }
+    test('epochsPerDay <= 0 is the absent metric', () {
+      for (final bad in [0, -3]) {
+        expect(_vals(circadianNonparametric([1, 2, 3], bad)),
+            _vals(_referenceCircadianNp([1, 2, 3], bad)));
+      }
     });
   });
 }

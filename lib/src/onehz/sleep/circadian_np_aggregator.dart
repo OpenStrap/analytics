@@ -304,6 +304,16 @@ Aggregator<dynamic, EpochSeries, Metric<CircadianNp>> circadianNpAggregator(
     if (firstEpoch.length != 1) {
       throw const FormatException('Expected one first circadian epoch');
     }
+    // The last edge row sits at an absolute index the epoch count fixes. A
+    // wrong one decodes (the lookback checks only the length) and then fails
+    // when the next batch is joined to it, so it is refused here.
+    final lastRaw = field(lookback, 'last');
+    if (lastRaw == null) throw const FormatException('Missing last circadian epoch');
+    final lastEpoch = EpochSeries.fromJson(lastRaw);
+    if (lastEpoch.length != 1 ||
+        lastEpoch.firstIndex != firstEpoch.firstIndex + count - 1) {
+      throw const FormatException('Last circadian epoch is out of position');
+    }
     final start = firstEpoch.firstIndex % p;
     final expectedGroups = count < p ? count : p;
     if (groups.length != expectedGroups) {
