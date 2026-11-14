@@ -49,9 +49,7 @@ export 'src/onehz/workout/workout.dart';
 export 'src/onehz/wellness/wellness.dart';
 export 'src/onehz/human/human.dart';
 
-
+export 'src/onehz/incremental.dart';
 
 // Calculation-group registry (design 06): the groups this package declares.
-
-
-export 'src/onehz/incremental_core.dart';
+export 'src/onehz/registry/group_registry.dart';
