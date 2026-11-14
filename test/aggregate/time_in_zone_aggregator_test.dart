@@ -406,6 +406,93 @@ void main() {
         equals: _eq);
   });
 
+  group('checkpoint zone identity', () {
+    final rows = _S([0, 1000], [110, 130]).stream;
+
+    // why: old histogram credits must never mix with a new tail/append zone
+    // definition (review 4573606761). Catches a restore without zone identity.
+    test('a different max-HR zone set is refused', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(180));
+      expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: legacy state has no evidence of which zones own its credits.
+    test('a checkpoint without zone identity is refused', () {
+      final checkpoint = checkpointOf(_agg, rows);
+      (checkpoint['state'] as Map).remove('zoneSet');
+      expect(decodeCheckpoint<dynamic>(_agg, checkpoint,
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: maxHr/source alone cannot identify custom zone boundaries or order.
+    test('custom boundaries and reordered zones are refused', () {
+      final changed = HeartRateZone(
+        number: 1,
+        lower: 90,
+        upper: 120,
+        lowerPct: .5,
+        upperPct: .6,
+      );
+      for (final zones in [
+        [changed, ..._zones.zones.skip(1)],
+        _zones.zones.reversed.toList(),
+      ]) {
+        final other = timeInZoneAggregator(HeartRateZoneSet(
+            zones: zones, maxHr: _zones.maxHr, source: _zones.source));
+        expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+            kind: 'test', version: 1), isNull);
+      }
+    });
+
+    // why: identity is by definition, not Dart object identity; accepted state
+    // must retain old credits and credit appended rows under the same zones.
+    test('an equivalent zone set restores and continues', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(200));
+      final restored = decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1);
+      expect(restored, isNotNull);
+      final result = other.finish(other.addSlice(
+          restored, _S([2000], [190]).stream, 0, 1))!;
+      // Three one-second credits: 110 in z1, 130 in z2, 190 in z5.
+      expect(result.seconds, [1, 1, 0, 0, 1]);
+      expect(result.belowZone1, 0);
+    });
+  });
+
+  group('checkpoint tail agrees with the retained last row', () {
+    // why: independently restored tail fields could silently move the final
+    // credit or disagree with the seam timestamp (review 4573606767).
+    for (final field in ['tailHr', 'tailTimestampMs']) {
+      for (final size in [1, 2, 3]) {
+        test('$field mismatch is refused for $size rows', () {
+          final rows = _S([for (var i = 0; i < size; i++) i * 1000.0],
+              [110.0, 130.0, 150.0].take(size).toList()).stream;
+          expectDamagedCheckpointRefused(_agg, rows, (s) {
+            (s as Map)[field] = field == 'tailHr' ? 190.0 : 9000.0;
+            return s;
+          });
+        });
+      }
+    }
+
+    // why: NaN HR is accepted as invalid/off-skin input; NaN != NaN must not
+    // make a valid checkpoint unrestoreable when the two tails agree.
+    test('matching non-finite heart rates restore and continue', () {
+      for (final hr in [double.nan, double.infinity, double.negativeInfinity]) {
+        final rows = _S([0, 1000], [110, hr]).stream;
+        final restored = decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, rows),
+            kind: 'test', version: 1);
+        expect(restored, isNotNull, reason: '$hr');
+        final result = _agg.finish(_agg.addSlice(
+            restored, _S([2000], [130]).stream, 0, 1))!;
+        // +Infinity is zone 5; NaN/-Infinity are invalid and get no credit.
+        expect(result.seconds, [1, 1, 0, 0, hr == double.infinity ? 1 : 0]);
+        expect(result.belowZone1, 0);
+      }
+    });
+  });
+
   group('lawful', () {
     final r = Rng(0x1a3);
     final cases = <HrStream>[
