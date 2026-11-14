@@ -8,7 +8,7 @@ Hand-off for getting the incremental work into the app (`edge`). Read
 
 | Repo | Branch | Location | State |
 |---|---|---|---|
-| analytics | `feat/minute-energy` | this checkout | `4bd76f7` committed; later changes below uncommitted |
+| analytics | `split/area-6-integration` | [PR #108](https://github.com/OpenStrap/analytics/pull/108) | committed; integration review in progress |
 | edge | `feat/incremental-analytics` | `../edge.worktrees/incremental-analytics` (git worktree of `../edge`) | all incremental work uncommitted on top of `687b5bd0` |
 
 `687b5bd0` is a snapshot of the scheduler work that was uncommitted in
@@ -79,20 +79,15 @@ before the work: about 350 ms compute per derive in
 
 ## Steps
 
-1. **Land this repo's changes.** Uncommitted:
-   - `hrDipFromDayTotals`, which `hrDip` now shares its scoring with
-   - `IncrementalMinuteMetrics.sync` taking `int dayMinutes` (as
-     `Calories.dailyEnergy` does)
-   - day-duration tests
-   - `drift_test.dart`
-   - `IntHistogram`
-   - the first-sample time shift in `lombScargle` and its precision test
-   - this plan
+1. **Land the analytics integration.** The analytics changes described here
+   are committed in [PR #108](https://github.com/OpenStrap/analytics/pull/108),
+   including the preceding split areas. Start app integration from that PR's
+   reviewed head, or its merged commit once available, and record the full SHA
+   used for the edge dependency pin.
 
-   Commit them, open a PR, and note the new commit SHA. The incremental work
-   changes no algorithm output, but the `lombScargle` shift does (about 1e-6
-   relative, worst case), so edge must bump `kAlgoVersion` when it pins a commit
-   that contains it.
+   The `lombScargle` first-timestamp shift changes output (about 1e-6 relative,
+   worst case), so edge must bump `kAlgoVersion` when it pins a commit that
+   contains it.
 
 2. **Move the edge work onto the current edge branch.** Commit the worktree's
    changes on `feat/incremental-analytics`, then rebase onto

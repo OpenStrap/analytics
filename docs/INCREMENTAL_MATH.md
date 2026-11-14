@@ -237,15 +237,22 @@ With fixed resting HR `R`, maximum `H`, coefficients `c,b`, and time weight `dt`
 x = clamp((HR-R)/(H-R), 0, 1)
 f(x) = c*x*exp(b*x)
 TRIMP = sum(dt*f(x))
-baseline = wakeMinutes*f(q)
-net = TRIMP-baseline
+exercise = sum(f(x)-f(q), over valid minutes with x >= 0.40)
+living = sum(f(x)-f(q), over valid minutes with x < 0.40)
+net = exercise + max(0, living)
 u = clamp(net/400, 0, 1)
 strain = 21*log(1+14*u)/log(15)
 ```
 
-For net at or below zero, current strain is zero. Awake minute count is part
-of the state because additional quiet time changes the subtraction too.
-The separate legacy 0–100 map remains a separate API.
+This is the headline `netTrimpAboveQuiet` rule for one-minute inputs. Each
+valid minute subtracts the quiet rate `f(q)`, but the living block is floored
+at zero so quiet living minutes cannot debit the exercise block. Off-skin
+and non-finite HR minutes are excluded.
+
+The separate lump form is `max(0, TRIMP - wakeMinutes*f(q))`; it subtracts
+quiet cost across all minutes together and can debit exercise with quiet
+living minutes. Awake minute count is part of that state because additional
+quiet time changes the subtraction. The legacy 0–100 map is also separate.
 
 For timestamp-weighted scoring, the last sample provisionally gets median
 cadence. Arrival of the next sample replaces that duration with the capped

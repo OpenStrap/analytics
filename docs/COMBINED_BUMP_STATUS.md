@@ -22,7 +22,8 @@ Implemented APIs:
   coverage is retained so sparse cardiac evidence cannot appear complete
   merely because each epoch has a mean. Carry-only epochs also remain in the
   classifier's coverage denominator.
-- The default advanced stager delegates to these rows. Feature
+- The default advanced stager delegates to `cardioStager` with a
+  `CardioRowCache`, not to `EpochRows`. Feature
   context extends beyond the requested session. The existing bounded accel
   coverage and unobserved-run semantics remain in use.
 - Registry counters `found.core`, `found.rr_correction`, `sleep.stage`,
@@ -169,10 +170,10 @@ Tests changed:
 The existing advanced-stager efficiency assertion and the 0.97 agreement
 assertion have not been weakened. With option 2 the former passes again.
 
-The capped latency is above target, the still-night efficiency guard fails
-(see Grid), and the sandwich reach and the adversarial soft-run influence
-bounds still need a proof beyond the passing prefix/oracle cases. These are
-open limitations, not completed acceptance criteria.
+The still-night efficiency guard passes with option 2 (see Grid). Capped
+latency remains above target, and the sandwich reach and adversarial soft-run
+influence bounds still need a proof beyond the passing prefix/oracle cases.
+These remain open limitations.
 
 Benchmarks below used the supplied Dart 3.11.4 executable in JIT mode. They
 are local measurements, not device timings. The new probe is reproducible via
