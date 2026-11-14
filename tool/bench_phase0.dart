@@ -240,9 +240,8 @@ void main(List<String> args) {
   print('case                         before us  after us');
   var parity = true;
   void row(String key, String name, void Function() before, void Function() after,
-      bool Function() compare) {
+      bool same) {
     if (!selected.contains(key)) return;
-    final same = compare();
     parity = parity && same;
     final beforeUs = _medianUs(before);
     final afterUs = _medianUs(after);
@@ -250,11 +249,11 @@ void main(List<String> args) {
         '${afterUs.toString().padLeft(9)} parity=$same');
   }
   row('cvhr', 'cvhrApneaScreen (8 h)', cvhrBefore, cvhrAfter,
-      () => _sameCvhr(cvhrBefore(), cvhrAfter()));
+      _sameCvhr(cvhrBefore(), cvhrAfter()));
   row('hrv', 'hrvFreq (30k beats)', hrvBefore, hrvAfter,
-      () => _sameHrv(hrvBefore(), hrvAfter()));
+      _sameHrv(hrvBefore(), hrvAfter()));
   row('cardio', 'cardioStager (one night)', stagerBefore, stagerAfter,
-      () => _sameStager(stagerBefore(), stagerAfter()));
+      _sameStager(stagerBefore(), stagerAfter()));
   if (args.isEmpty || selected.contains('cvhr-stream')) _cvhrStreamBench();
   if (selected.contains('cardio') || selected.contains('cache')) {
     final extra = frozen.genNight(9004, 15 * 60, rrOutliers: true);
