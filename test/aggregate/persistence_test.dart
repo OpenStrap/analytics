@@ -61,7 +61,9 @@ Object? wire(Object? x) => jsonDecode(jsonEncode(x));
 bool close(double a, double b) =>
     a == b ||
     (a.isNaN && b.isNaN) ||
-    (a - b).abs() <= 1e-9 * [1.0, a.abs(), b.abs()].reduce((x, y) => x > y ? x : y);
+    (a.isFinite && b.isFinite &&
+        (a - b).abs() <=
+            1e-9 * [1.0, a.abs(), b.abs()].reduce((x, y) => x > y ? x : y));
 
 bool closeOpt(double? a, double? b) =>
     a == null || b == null ? a == b : close(a, b);
@@ -266,6 +268,18 @@ class _SumCount extends Aggregator<List<int>, _IB, int> {
 }
 
 void main() {
+  // why: Infinity <= Infinity must not let corrupt restored values pass.
+  test('checkpoint comparison distinguishes finite and non-finite values', () {
+    for (final pair in [(1.0, inf), (-inf, 1.0), (inf, -inf), (nan, inf)]) {
+      expect(close(pair.$1, pair.$2), isFalse, reason: '$pair');
+      expect(close(pair.$2, pair.$1), isFalse, reason: 'reversed $pair');
+    }
+    expect(close(inf, inf), isTrue);
+    expect(close(-inf, -inf), isTrue);
+    expect(close(nan, nan), isTrue);
+    expect(close(1.0, 1.0 + 1e-10), isTrue);
+    expect(close(1.0, 1.1), isFalse);
+  });
   group('non-persistable defaults', () {
     test('an aggregator that overrides nothing is not persistable', () {
       const a = _Plain();
