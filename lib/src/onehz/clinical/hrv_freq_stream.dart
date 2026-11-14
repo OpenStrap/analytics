@@ -12,7 +12,6 @@ class _HrvBandState {
 
   double? value(List<double> times, List<double> nn, double last,
       double oversample) {
-    if (last - times.first < segSec) return null;
     var total = sum;
     var n = count;
     final grid = _welchGrid(loHz, hiHz, segSec, oversample);
@@ -57,11 +56,15 @@ List<double> _welchGrid(double lo, double hi, double seg, double oversample) {
 // in hrvFreq(). Closed segments use the exact shared segment function; open data
 // is evaluated provisionally with the same origin, grid and segment order.
 /// Exact, append-only Welch state for [hrvFreq].
+/// Backward beats are omitted, with the batch's 5% refusal gate applied at
+/// snapshot time. Checkpoint v2 retains the omission count; older states must
+/// be recomputed.
 class HrvFreqStream {
   final double oversample;
   final List<double> _nn = [], _times = [];
   late final List<_HrvBandState> _bands;
-  int _n = 0;
+  // _n counts all input beats, including clock regressions omitted from NN.
+  int _n = 0, _dropped = 0;
   double? _first, _last;
 
   HrvFreqStream({this.oversample = 4.0}) {
@@ -79,17 +82,19 @@ class HrvFreqStream {
       if (field(j, 'type') != 'HrvFreqStream') {
         throw const FormatException('not an HrvFreqStream checkpoint');
       }
-      if (field(j, 'version') != 1) {
+      if (field(j, 'version') != 2) {
         throw const FormatException('unsupported HrvFreqStream version');
       }
       final oversample = decodeDouble(field(j, 'oversample'));
       final n = decodeCount(field(j, 'n'));
+      final dropped = decodeCount(field(j, 'dropped'));
       final first = decodeDoubleOrNull(field(j, 'first'));
       final last = decodeDoubleOrNull(field(j, 'last'));
       final nn = decodeDoubles(field(j, 'nn'));
       final times = decodeDoubles(field(j, 'times'));
       final encodedBands = decodeList(field(j, 'bands'));
       if (encodedBands.length != 4 || nn.length != times.length ||
+          dropped > n ||
           !oversample.isFinite || oversample <= 0 ||
           (n == 0 && (first != null || last != null)) ||
           (n > 0 && (first == null || last == null))) {
@@ -97,6 +102,7 @@ class HrvFreqStream {
       }
       final s = HrvFreqStream(oversample: oversample)
         .._n = n
+        .._dropped = dropped
         .._first = first
         .._last = last
         .._nn.addAll(nn)
@@ -129,9 +135,10 @@ class HrvFreqStream {
 
   Map<String, dynamic> toJson() => {
         'type': 'HrvFreqStream',
-        'version': 1,
+        'version': 2,
         'oversample': encodeDouble(oversample),
         'n': _n,
+        'dropped': _dropped,
         'first': _first == null ? null : encodeDouble(_first!),
         'last': _last == null ? null : encodeDouble(_last!),
         'nn': [for (final x in _nn) encodeDouble(x)],
@@ -150,20 +157,25 @@ class HrvFreqStream {
     if (incoming.any((t) => !t.isFinite)) {
       throw ArgumentError('beat times must be finite');
     }
-    if (!_nondecreasing(incoming) ||
-        (_last != null && incoming.first < _last!)) {
-      throw StateError('beat times must be non-decreasing');
-    }
-    if (_first == null) {
-      _first = incoming.first;
-      for (final b in _bands) {
-        b.nextStart = _first!;
-      }
-    }
-    _nn.addAll(nnMs);
-    _times.addAll(incoming);
     _n += nnMs.length;
-    _last = incoming.last;
+    // A capped reset may overlap the previous clock. Match hrvFreq: retain
+    // each beat at/after the latest retained time; count the omitted beats.
+    for (var i = 0; i < incoming.length; i++) {
+      final time = incoming[i];
+      if (_last != null && time < _last!) {
+        _dropped++;
+        continue;
+      }
+      if (_first == null) {
+        _first = time;
+        for (final b in _bands) {
+          b.nextStart = time;
+        }
+      }
+      _nn.add(nnMs[i]);
+      _times.add(time);
+      _last = time;
+    }
     for (final b in _bands) {
       b.settle(_times, _nn, _last!, oversample);
     }
@@ -179,22 +191,37 @@ class HrvFreqStream {
     if (tailNnMs.length != tailNnTimesMs.length) {
       throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
     }
-    // A non-finite tail time: the batch's own answer (it abstains).
-    if (_n + tailNnMs.length < 16 ||
-        _first == null ||
-        tailNnTimesMs.any((t) => !(t / 1000.0).isFinite)) {
-      return hrvFreq([..._nn, ...tailNnMs],
-          [..._times.map((x) => x * 1000.0), ...tailNnTimesMs],
-          artifactFraction: artifactFraction,
-          hfArtifactGate: hfArtifactGate,
-          oversample: oversample);
+    const inputs = ['rr_cleaned', 'beat_times'];
+    final n = _n + tailNnMs.length;
+    if (n < 16) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'too few beats for a spectral estimate');
     }
-    final tail = [for (final t in tailNnTimesMs) t / 1000.0];
-    if (!_nondecreasing(tail) || (tail.isNotEmpty && tail.first < _last!)) {
-      throw StateError('beat times must be non-decreasing');
+    if (tailNnTimesMs.any((t) => !(t / 1000.0).isFinite)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'non-finite beat time');
     }
-    final times = [..._times, ...tail];
-    final nn = [..._nn, ...tailNnMs];
+    if (_first == null) {
+      return hrvFreq(tailNnMs, tailNnTimesMs, artifactFraction: artifactFraction,
+          hfArtifactGate: hfArtifactGate, oversample: oversample);
+    }
+    final times = [..._times], nn = [..._nn];
+    var latest = _last!, dropped = _dropped;
+    for (var i = 0; i < tailNnMs.length; i++) {
+      final time = tailNnTimesMs[i] / 1000.0;
+      if (time < latest) {
+        dropped++;
+      } else {
+        times.add(time);
+        nn.add(tailNnMs[i]);
+        latest = time;
+      }
+    }
+    if (dropped > 0 &&
+        (dropped > n * kMaxRegressingBeatFraction || n - dropped < 16)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'regressing beat time');
+    }
     final last = times.last;
     if (last - _first! <= 0) {
       return hrvFreq(nn, [for (final t in times) t * 1000.0],
@@ -206,7 +233,8 @@ class HrvFreqStream {
       for (final b in _bands) b.value(times, nn, last, oversample),
     ];
     return _hrvFreqMetric(powers[0], powers[1], powers[2], powers[3],
-        artifactFraction: artifactFraction, hfArtifactGate: hfArtifactGate);
+        artifactFraction: artifactFraction, hfArtifactGate: hfArtifactGate,
+        droppedBeats: dropped);
   }
 
   void _compact() {

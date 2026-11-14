@@ -161,7 +161,10 @@ IrregularScreenResult irregularBeatScreenDetailed(
       i > 0 &&
           keep[i] &&
           keep[i - 1] &&
-          (!hasTimes || nnTimesMs[i] - nnTimesMs[i - 1] <= rrMs[i] + 0.5)
+          (!hasTimes ||
+              (nnTimesMs[i].isFinite &&
+                  nnTimesMs[i - 1].isFinite &&
+                  nnTimesMs[i] - nnTimesMs[i - 1] <= rrMs[i] + 0.5))
   ];
   final nnAdjacent = <bool>[
     for (var i = 0; i < rrMs.length; i++)
@@ -239,7 +242,7 @@ IrregularScreenResult irregularBeatScreenDetailed(
   final sd1 = sdsd / math.sqrt2;
   final v = 2 * sdnn * sdnn - sd1 * sd1;
   final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-  if (sd2 <= 0) {
+  if (sd2 <= 0 || sdnn < kDegenerateSdnnMs) {
     // SD1/SD2 is undefined without long-term variability to divide by; emitting
     // ratio 0.0 with sd1 = sd2 = 0 published "perfectly regular" as a
     // measurement of a degenerate series.
@@ -336,7 +339,7 @@ IrregularWindowCounts _countWindows(
   var open = IrregularOpenWindow.none;
   var bucket = <double>[];
   var bucketAdjacent = <bool>[];
-  var windowStart = timesMs.isEmpty ? 0.0 : timesMs.first;
+  double? windowStart;
   void flush() {
     if (bucket.isEmpty) return;
     final verdict = irregularWindowVerdict(bucket, bucketAdjacent,
@@ -358,7 +361,11 @@ IrregularWindowCounts _countWindows(
   }
 
   for (var i = 0; i < rrMs.length; i++) {
-    if (timesMs[i] - windowStart >= windowMs) {
+    // Untimed beats cannot be placed in a window; the aggregate still counts
+    // them. See CLAIM(screen-finite-window-time) and its streaming counterpart.
+    if (!timesMs[i].isFinite) continue;
+    final start = windowStart ??= timesMs[i];
+    if (timesMs[i] - start >= windowMs) {
       flush();
       windowStart = timesMs[i];
     }

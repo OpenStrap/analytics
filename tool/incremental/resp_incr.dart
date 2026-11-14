@@ -9,6 +9,8 @@
 // that list with the batch's own arithmetic => bit-identical.
 import 'dart:math' as math;
 
+import 'package:openstrap_analytics/src/aggregate/json_support.dart';
+
 import 'package:openstrap_analytics/onehz.dart'
     hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
@@ -93,6 +95,12 @@ class RsaWelchState {
   List<double> _sorted = [];
   // A non-finite beat time was folded: the batch abstains on it.
   bool _nonFinite = false;
+  // A beat time moved backward in the folded stream (across folds too): the
+  // batch refuses the whole input on it, and the cached segments cannot show
+  // it once the buffer has been cut, so the fact is kept.
+  bool _regressing = false;
+  // The last folded beat time (ms), for the seam with the next fold or tail.
+  double? _prevMs;
   double? _first;
   int _count = 0;
   double _lastT = 0;
@@ -107,6 +115,19 @@ class RsaWelchState {
       _sc.peaks.length + _sc.atCeiling + _sc.atFloor + _sc.belowBand + _sc.thin + _sc.gappy;
 
   void fold(List<double> nn, List<double> tMs) {
+    // Checked before any state changes: a rejected call must leave the columns
+    // the same length.
+    if (nn.length != tMs.length) {
+      throw ArgumentError('nn and tMs must have the same length');
+    }
+    var prev = _prevMs;
+    for (final t in tMs) {
+      if (prev != null && t.isFinite && prev.isFinite && t < prev) {
+        _regressing = true;
+      }
+      prev = t;
+    }
+    _prevMs = prev;
     _sorted = _mergeSorted(_sorted, [...nn]..sort());
     for (final t in tMs) {
       if (!(t / 1000.0).isFinite) _nonFinite = true;
@@ -206,6 +227,15 @@ class RsaWelchState {
       double minConsensus = 0.5,
       double maxArtifact = 0.30}) {
     const inputs = ['rr_cleaned', 'beat_times'];
+    // Mismatched columns are the batch's "too few beats" refusal; reading
+    // allTs.first below would throw before the batch fallback could say so.
+    if (tailNn.length != tailTMs.length) {
+      return const Metric<RespEstimate>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'too few beats for an RSA spectral estimate (need ≥20)',
+      );
+    }
     final n = _count + tailNn.length;
     if (n < 20) {
       return const Metric<RespEstimate>.absent(
@@ -225,7 +255,8 @@ class RsaWelchState {
       // makes every window length depend on the total. Buffer holds all
       // beats here (no folding yet, and a non-finite time never starts it),
       // so just call the oracle.
-      return rsaRespRate(allNn, allTMs, artifactFraction: artifactFraction);
+      return rsaRespRate(allNn, allTMs, artifactFraction: artifactFraction,
+          tolBrpm: tolBrpm, minConsensus: minConsensus, maxArtifact: maxArtifact);
     }
     if (artifactFraction > maxArtifact) {
       return Metric<RespEstimate>.absent(
@@ -242,6 +273,16 @@ class RsaWelchState {
         note: 'non-finite beat time',
       );
     }
+    // The batch checks order before the span: folded beats, the seam to the
+    // tail, and the tail itself.
+    if (_regressing ||
+        hasRegressingBeatTimes([if (_prevMs != null) _prevMs!, ...tailTMs])) {
+      return const Metric<RespEstimate>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (spanSec <= 0) {
       return const Metric<RespEstimate>.absent(
         tier: Tier.high,
@@ -249,9 +290,11 @@ class RsaWelchState {
         note: 'degenerate beat times',
       );
     }
-    // The beat interval is the median NN over settled ++ tail (gap-free).
+    // The beat interval is the median NN over settled ++ tail (gap-free);
+    // _mergeSorted already returns it sorted.
     final beatSec =
-        percentile(_mergeSorted(_sorted, [...tailNn]..sort()), 50)! / 1000.0;
+        percentileSorted(_mergeSorted(_sorted, [...tailNn]..sort()), 50)! /
+            1000.0;
     final hiHz = rsaCeilingHz(beatSec);
     if (hiHz < rsaHiHz) {
       return Metric<RespEstimate>.absent(
@@ -365,18 +408,20 @@ class RsaWelchState {
   }
 
   Map<String, dynamic> toJson() => {
-        'tMs': _tMs,
-        'nn': _nn,
-        'sorted': _sorted,
+        'tMs': [for (final x in _tMs) encodeDouble(x)],
+        'nn': [for (final x in _nn) encodeDouble(x)],
+        'sorted': [for (final x in _sorted) encodeDouble(x)],
         'nonFinite': _nonFinite,
+        'regressing': _regressing,
+        'prevMs': _prevMs == null ? null : encodeDouble(_prevMs!),
         'first': _first,
         'count': _count,
         'lastT': _lastT,
         'folding': _folding,
         'next': _next,
-        'peaks': _sc.peaks,
-        'peakHz': _sc.peakHz,
-        'peakPwr': _sc.peakPwr,
+        'peaks': List<double>.of(_sc.peaks),
+        'peakHz': List<double>.of(_sc.peakHz),
+        'peakPwr': List<double>.of(_sc.peakPwr),
         'atCeiling': _sc.atCeiling,
         'atFloor': _sc.atFloor,
         'belowBand': _sc.belowBand,
@@ -387,13 +432,15 @@ class RsaWelchState {
       };
 
   factory RsaWelchState.fromJson(Map<String, dynamic> j) {
-    List<double> dl(Object? o) => [for (final x in o as List) (x as num).toDouble()];
+    List<double> dl(Object? o) => [for (final x in o as List) decodeDouble(x)];
     final s = RsaWelchState();
     s._tMs = dl(j['tMs']);
     s._ts = [for (final t in s._tMs) t / 1000.0];
     s._nn = dl(j['nn']);
     s._sorted = dl(j['sorted']);
     s._nonFinite = j['nonFinite'] as bool;
+    s._regressing = j['regressing'] as bool? ?? false;
+    s._prevMs = j['prevMs'] == null ? null : decodeDouble(j['prevMs']);
     s._first = (j['first'] as num?)?.toDouble();
     s._count = j['count'] as int;
     s._lastT = (j['lastT'] as num).toDouble();
@@ -423,18 +470,46 @@ class RespWindowsState {
   int _bin = 0;
   RsaWelchState _open = RsaWelchState();
   int _openCount = 0;
+  // The open bin is one the clock came back to: the batch would merge these
+  // beats into the bin's earlier ones, which are no longer held, so it gets no
+  // estimate at all rather than a second one beside the old.
+  bool _openReturned = false;
   final List<double> closed = [];
+  // Bin index of each entry of [closed], and every bin closed so far
+  // (estimate or not), to tell a return from a step forward.
+  final List<int> _closedIdx = [];
+  final Set<int> _seen = {};
 
   RespWindowsState({this.windowMs = 1800000.0, this.minBeats = 60});
 
-  void _closeOpen(List<double> sink, RsaWelchState st, int count) {
-    if (count < minBeats) return;
+  /// Closes the open bin [idx]: its estimate joins [sink] unless it is thin,
+  /// unresolved, or a returned bin.
+  void _closeOpen(List<double> sink, List<int> sinkIdx, int idx,
+      RsaWelchState st, int count, bool returned) {
+    if (count < minBeats || returned) return;
     final r = st.evaluate(const [], const [], artifactFraction: 0.0);
     final b = r.present ? r.value!.brpm : null;
-    if (b != null) sink.add(b);
+    if (b != null) {
+      sink.add(b);
+      sinkIdx.add(idx);
+    }
+  }
+
+  /// The clock moved to a bin that was already closed: its old estimate is
+  /// dropped, so the bin has none.
+  static void _withdraw(List<double> sink, List<int> sinkIdx, int idx) {
+    for (var k = sinkIdx.length - 1; k >= 0; k--) {
+      if (sinkIdx[k] == idx) {
+        sinkIdx.removeAt(k);
+        sink.removeAt(k);
+      }
+    }
   }
 
   void fold(List<double> nn, List<double> tMs) {
+    if (nn.length != tMs.length) {
+      throw ArgumentError('nn and tMs must have the same length');
+    }
     var from = 0;
     for (var i = 0; i < nn.length; i++) {
       _t0 ??= tMs[i];
@@ -443,7 +518,10 @@ class RespWindowsState {
         _open.fold(nn.sublist(from, i), tMs.sublist(from, i));
         _openCount += i - from;
         from = i;
-        _closeOpen(closed, _open, _openCount);
+        _closeOpen(closed, _closedIdx, _bin, _open, _openCount, _openReturned);
+        _seen.add(_bin);
+        _openReturned = _seen.contains(idx);
+        if (_openReturned) _withdraw(closed, _closedIdx, idx);
         _open = RsaWelchState();
         _openCount = 0;
         _bin = idx;
@@ -456,40 +534,47 @@ class RespWindowsState {
   /// `_respPerWindow(settled ++ tail)`.
   List<double> evaluate(List<double> tailNn, List<double> tailTMs) {
     final out = [...closed];
+    final outIdx = [..._closedIdx];
     if (tailNn.isEmpty) {
-      _closeOpen(out, _open, _openCount);
+      _closeOpen(out, outIdx, _bin, _open, _openCount, _openReturned);
       return out;
     }
+    final seen = {..._seen};
     // tail beats may open new bins: split by bin index
     var curIdx = _bin;
     var curSettledOpen = _open;
     var curCount = _openCount;
+    var curReturned = _openReturned;
     var from = 0;
-    var useCopy = true; // the first bin continues the settled open bin
     for (var i = 0; i < tailNn.length; i++) {
       final idx = ((tailTMs[i] - (_t0 ?? tailTMs[0])) / windowMs).floor();
       if (idx != curIdx) {
-        _flushTail(out, curSettledOpen, curCount, useCopy, tailNn.sublist(from, i),
-            tailTMs.sublist(from, i));
-        useCopy = false;
+        _flushTail(out, outIdx, curIdx, curSettledOpen, curCount, curReturned,
+            tailNn.sublist(from, i), tailTMs.sublist(from, i));
+        seen.add(curIdx);
+        curReturned = seen.contains(idx);
+        if (curReturned) _withdraw(out, outIdx, idx);
         curSettledOpen = RsaWelchState();
         curCount = 0;
         curIdx = idx;
         from = i;
       }
     }
-    _flushTail(out, curSettledOpen, curCount, useCopy, tailNn.sublist(from),
-        tailTMs.sublist(from));
+    _flushTail(out, outIdx, curIdx, curSettledOpen, curCount, curReturned,
+        tailNn.sublist(from), tailTMs.sublist(from));
     return out;
   }
 
-  void _flushTail(List<double> out, RsaWelchState st, int count, bool settled,
-      List<double> nn, List<double> t) {
+  void _flushTail(List<double> out, List<int> outIdx, int idx, RsaWelchState st,
+      int count, bool returned, List<double> nn, List<double> t) {
     final total = count + nn.length;
-    if (total < minBeats) return;
+    if (total < minBeats || returned) return;
     final r = st.evaluate(nn, t, artifactFraction: 0.0);
     final b = r.present ? r.value!.brpm : null;
-    if (b != null) out.add(b);
+    if (b != null) {
+      out.add(b);
+      outIdx.add(idx);
+    }
   }
 }
 
@@ -526,7 +611,7 @@ class HrvFreqState {
   final List<_Band> _bands;
   List<double> _ts = [], _y = [];
   double? _first;
-  int _count = 0;
+  int _count = 0, _dropped = 0;
   double _lastT = 0;
 
   HrvFreqState({this.oversample = 4.0, this.includeUlf = true})
@@ -561,13 +646,21 @@ class HrvFreqState {
   }
 
   void fold(List<double> nn, List<double> tMs) {
+    if (nn.length != tMs.length) throw ArgumentError('beat columns differ');
+    if (tMs.any((t) => !(t / 1000.0).isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
+    _count += nn.length;
     for (var i = 0; i < nn.length; i++) {
-      _y.add(nn[i]);
       final s = tMs[i] / 1000.0;
+      if (_first != null && s < _lastT) {
+        _dropped++;
+        continue;
+      }
+      _y.add(nn[i]);
       _ts.add(s);
       _first ??= s;
       _lastT = s;
-      _count++;
     }
     if (_count == 0) return;
     for (final b in _bands) {
@@ -627,8 +720,29 @@ class HrvFreqState {
         note: 'too few beats for a spectral estimate',
       );
     }
-    final ts = [..._ts, for (final t in tailTMs) t / 1000.0];
-    final y = [..._y, ...tailNn];
+    if (tailNn.length != tailTMs.length) throw ArgumentError('beat columns differ');
+    if (tailTMs.any((t) => !(t / 1000.0).isFinite)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'non-finite beat time');
+    }
+    final ts = [..._ts], y = [..._y];
+    var latest = _first == null ? double.negativeInfinity : _lastT;
+    var dropped = _dropped;
+    for (var i = 0; i < tailNn.length; i++) {
+      final t = tailTMs[i] / 1000.0;
+      if (t < latest) {
+        dropped++;
+      } else {
+        ts.add(t);
+        y.add(tailNn[i]);
+        latest = t;
+      }
+    }
+    if (dropped > 0 &&
+        (dropped > n * kMaxRegressingBeatFraction || n - dropped < 16)) {
+      return const Metric<HrvFreq>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'regressing beat time');
+    }
     final first = _first ?? ts.first;
     final last = ts.last;
     final spanSec = last - first;
@@ -690,15 +804,19 @@ class HrvFreqState {
       note: hfGated
           ? 'HF suppressed: artifact fraction ${round6(artifactFraction)} '
               '> gate — LF/VLF reported, HF/LF-HF/nu/total withheld'
-          : 'PRV spectrum; HF band quantization-limited at 1 Hz',
+          : dropped > 0
+              ? 'PRV spectrum; $dropped beats behind a re-anchored clock '
+                  'left out; HF band quantization-limited at 1 Hz'
+              : 'PRV spectrum; HF band quantization-limited at 1 Hz',
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'ts': _ts,
-        'y': _y,
+        'ts': List<double>.of(_ts),
+        'y': List<double>.of(_y),
         'first': _first,
         'count': _count,
+        'dropped': _dropped,
         'lastT': _lastT,
         'bands': [
           for (final b in _bands)
@@ -713,6 +831,7 @@ class HrvFreqState {
     s._y = [for (final x in j['y'] as List) (x as num).toDouble()];
     s._first = (j['first'] as num?)?.toDouble();
     s._count = j['count'] as int;
+    s._dropped = j['dropped'] as int;
     s._lastT = (j['lastT'] as num).toDouble();
     final bs = j['bands'] as List;
     for (var i = 0; i < s._bands.length; i++) {

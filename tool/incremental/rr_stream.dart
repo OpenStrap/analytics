@@ -132,13 +132,21 @@ class RrCorrector {
     final out = RrSettled();
     if (rrMs.isEmpty) return out;
     final wall = tsMs != null && tsMs.length == rrMs.length;
-    _wall ??= wall;
-    if (_wall != wall) {
+    if ((_wall ?? wall) != wall) {
       throw StateError('timestamps must be supplied for every fold or none');
     }
+    // The whole chunk is checked before any state changes, so a rejected chunk
+    // can be corrected and retried without the beats before the bad one being
+    // kept twice.
+    for (var k = 0; k < rrMs.length; k++) {
+      if (!rrMs[k].isFinite) throw ArgumentError('non-finite rr at $k');
+      if (wall && !tsMs[k].isFinite) {
+        throw ArgumentError('non-finite timestamp at $k');
+      }
+    }
+    _wall ??= wall;
     for (var k = 0; k < rrMs.length; k++) {
       final r = rrMs[k];
-      if (!r.isFinite) throw ArgumentError('non-finite rr at $k');
       final i = n;
       double cur;
       final ts = wall ? tsMs[k] : 0.0;
@@ -511,18 +519,18 @@ class RrCorrector {
         'prevTs': _prevTs,
         'prevRr': _prevRr,
         'off': _off,
-        'rr': _rr,
-        't': _t,
-        'd': _d,
+        'rr': List.of(_rr),
+        't': List.of(_t),
+        'd': List.of(_d),
         'c1': _c1,
         'c2': _c2,
         'ce': _ce,
-        'fcls': _fcls,
+        'fcls': List.of(_fcls),
         'lastFinal': _lastFinal,
         'normalFinal': _normalFinal,
         'dropped': _dropped,
         'corrected': _corrected,
-        'lastNormals': _lastNormals,
+        'lastNormals': List.of(_lastNormals),
       };
 
   factory RrCorrector.fromJson(Map<String, dynamic> j) {

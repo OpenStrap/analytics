@@ -15,9 +15,6 @@
 //       honesty-bounded; stager.dart holds only the shared post-processing
 //       (StagerResult, Webster rescore, consolidation) it reuses. The
 //       autonomic-HR-only stager that used to live in stager.dart is DELETED.
-//   - CAUSAL (online) wake/NREM/REM stager       (causal_stager.dart) —
-//       the same features/weights/cutoffs on past-only windows, abstains with a
-//       reason; for live decisions, NOT a replacement for cardioStager.
 //   - Nonparametric circadian IS/IV/RA/L5/M10     (circadian_np.dart)
 //
 // Pure Dart, built on the package foundations (RR correction, Lomb-Scargle,

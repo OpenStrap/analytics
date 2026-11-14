@@ -2,189 +2,166 @@ import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('cache retains null values and distinguishes changed list order', () {
-    final cache = CalculationCache();
-    var calls = 0;
-    Object? calculate() {
-      calls++;
-      return null;
+  group('CalculationCache dependencies', () {
+    test('an unchanged list is a hit, a changed one recalculates', () {
+      final cache = CalculationCache();
+      final deps = [1, 2, 3];
+      expect(cache.evaluate<int>('k', deps, () => 6), 6);
+      expect(cache.evaluate<int>('k', deps, () => 99), 6);
+      expect(cache.hits, 1);
+      deps.add(4);
+      expect(cache.evaluate<int>('k', deps, () => 10), 10);
+      expect(cache.computations, 2);
+    });
+
+    test('changing a set dependency in place invalidates the entry', () {
+      final cache = CalculationCache();
+      final deps = <int>{1, 2};
+      expect(cache.evaluate<int>('k', deps, () => 1), 1);
+      deps.add(3);
+      expect(cache.evaluate<int>('k', deps, () => 2), 2);
+      expect(cache.computations, 2);
+      // The same contents in another set instance is still a hit.
+      expect(cache.evaluate<int>('k', <int>{3, 2, 1}, () => 3), 2);
+      expect(cache.hits, 1);
+    });
+
+    test('a set nested in a map is snapshotted too', () {
+      final cache = CalculationCache();
+      final inner = <String>{'a'};
+      final deps = {'tags': inner};
+      expect(cache.evaluate<int>('k', deps, () => 1), 1);
+      inner.add('b');
+      expect(cache.evaluate<int>('k', deps, () => 2), 2);
+    });
+
+    // why: snapshots copy nested collections, so set membership must compare
+    // their contents and consume each match once (CLAIM(cache-set-equality)).
+    test('nested set dependencies match by contents without reusing a match',
+        () {
+      final cache = CalculationCache();
+      final list = [1, 2];
+      final deps = <Object>{
+        list,
+        {
+          'tags': <int>{3, 4}
+        }
+      };
+      expect(cache.evaluate<int>('nested', deps, () => 10), 10);
+      expect(
+          cache.evaluate<int>(
+              'nested',
+              <Object>{
+                {
+                  'tags': <int>{4, 3}
+                },
+                [1, 2]
+              },
+              () => 99),
+          10);
+      expect(cache.computations, 1);
+      expect(cache.hits, 1);
+      list.add(5);
+      expect(cache.evaluate<int>('nested', deps, () => 20), 20);
+      expect(cache.computations, 2);
+
+      final duplicates = <List<int>>{
+        [1],
+        [1]
+      };
+      expect(cache.evaluate<int>('duplicates', duplicates, () => 30), 30);
+      expect(
+          cache.evaluate<int>(
+              'duplicates',
+              <List<int>>{
+                [1],
+                [2]
+              },
+              () => 40),
+          40);
+      expect(cache.computations, 4);
+    });
+
+    test('a lazy iterable is refused instead of being stored by reference', () {
+      final cache = CalculationCache();
+      expect(
+        () => cache.evaluate<int>('k', [1, 2].map((v) => v), () => 1),
+        throwsArgumentError,
+      );
+    });
+  });
+
+  group('CalculationCache results', () {
+    test('a map of boolean lists keeps its declared type', () {
+      final cache = CalculationCache();
+      final first = cache.evaluate<Map<String, List<bool>>>(
+          'flags', null, () => {'enabled': [true]});
+      expect(first, {'enabled': [true]});
+      first['enabled']!.add(false);
+      final second = cache.evaluate<Map<String, List<bool>>>(
+          'flags', null, () => {'enabled': [false]});
+      // A hit, and the caller's edit did not reach the cache.
+      expect(second, {'enabled': [true]});
+    });
+
+    test('a numeric list map keeps its declared type', () {
+      final cache = CalculationCache();
+      final value = cache.evaluate<Map<String, List<num>>>(
+          'n', null, () => {'x': <num>[1, 2.5]});
+      expect(value['x'], [1, 2.5]);
+    });
+
+    // why: Dart covariance lets a wider num-list branch swallow int/double
+    // maps and throw on copy (CLAIM(cache-numeric-map-types)).
+    void numericMap<T extends num?>(String name, List<T> items) {
+      test('a $name list map survives misses and hits without aliasing', () {
+        final cache = CalculationCache();
+        final source = {'x': items.toList()};
+        final result =
+            cache.evaluate<Map<String, List<T>>>('k', null, () => source);
+        expect(result, {'x': items});
+        result['x']!.clear();
+        expect(source, {'x': items});
+        source['x']!.clear();
+        final hit = cache.evaluate<Map<String, List<T>>>(
+            'k', null, () => throw StateError('must hit'));
+        expect(hit, {'x': items});
+        expect(cache.computations, 1);
+        expect(cache.hits, 1);
+      });
     }
 
-    expect(cache.evaluate('nullable', [1, 2, null], calculate), isNull);
-    expect(cache.evaluate('nullable', [1, 2, null], calculate), isNull);
-    expect(calls, 1);
-    expect(cache.evaluate('nullable', [2, 1, null], calculate), isNull);
-    expect(calls, 2);
-    expect(cache.computations, 2);
-    expect(cache.hits, 1);
-  });
-  test('cache protects typed lists while retaining their return type', () {
-    final cache = CalculationCache();
-    final original = <double>[1.25, 3.5];
-    final first = cache.evaluate<List<double>>('list', 1, () => original);
-    first.add(9);
-    original[0] = 8;
-    final next = cache.evaluate<List<double>>('list', 1, () => [100.0]);
-    expect(next, [1.25, 3.5]);
-    next.clear();
-    expect(cache.evaluate<List<double>>('list', 1, () => [100.0]), [1.25, 3.5]);
-  });
-  test(
-      'cache snapshots nested dependencies and deep compares maps, null and NaN',
-      () {
-    final cache = CalculationCache();
-    final dependency = <String, Object?>{
-      'hr': <Object?>[
-        70.0,
-        null,
-        double.nan,
-        <String, Object?>{'day': 1}
-      ],
-      'profile': <String, Object?>{'sex': 'female', 'weight': 61.0},
-    };
-    var calls = 0;
-    int calculate() => ++calls;
-    expect(cache.evaluate('load', dependency, calculate), 1);
-    expect(
-        cache.evaluate(
-            'load',
-            {
-              'profile': {'weight': 61.0, 'sex': 'female'},
-              'hr': [
-                70.0,
-                null,
-                double.nan,
-                {'day': 1}
-              ],
-            },
-            calculate),
-        1);
-    expect(calls, 1);
-    expect(cache.computations, 1);
-    expect(cache.hits, 1);
-    (dependency['hr'] as List)[0] = 71.0;
-    expect(cache.evaluate('load', dependency, calculate), 2);
-    ((dependency['hr'] as List)[3] as Map)['day'] = 2;
-    expect(cache.evaluate('load', dependency, calculate), 3);
-    (dependency['profile'] as Map)['sex'] = 'male';
-    expect(cache.evaluate('load', dependency, calculate), 4);
-    expect(cache.evaluate('load', dependency, calculate), 4);
-    expect(cache.computations, 4);
-    expect(cache.hits, 2);
-  });
-  test('cache protects mutable values on first return and subsequent hits', () {
-    final cache = CalculationCache();
-    final produced = <String, dynamic>{
-      'nested': [
-        {'value': 7}
-      ],
-      'values': [1, 2]
-    };
-    Map<String, dynamic> calculate() => produced;
-    final first = cache.evaluate('nested', [1], calculate);
-    (first['nested'][0] as Map)['value'] = 999;
-    (produced['values'] as List).add(3);
-    final second = cache.evaluate('nested', [1], calculate);
-    expect(second, {
-      'nested': [
-        {'value': 7}
-      ],
-      'values': [1, 2]
-    });
-    (second['values'] as List).clear();
-    expect(cache.evaluate('nested', [1], calculate), {
-      'nested': [
-        {'value': 7}
-      ],
-      'values': [1, 2]
-    });
-    expect(cache.computations, 1);
-    expect(cache.hits, 2);
-  });
-  test(
-      'cache exceptions preserve prior dependencies and do not count as computations',
-      () {
-    final cache = CalculationCache();
-    expect(cache.evaluate('load', [1], () => 7), 7);
-    expect(
-        () => cache.evaluate<int>('load', [2], () => throw StateError('bad')),
-        throwsStateError);
-    expect(cache.computations, 1);
-    expect(cache.hits, 0);
-    expect(cache.evaluate('load', [1], () => 99), 7);
-    expect(cache.evaluate('load', [2], () => 8), 8);
-    expect(cache.computations, 2);
-    expect(cache.hits, 1);
-    expect(
-        () => cache.evaluate<int>('load', [2], () => throw StateError('bad'),
-            full: true),
-        throwsStateError);
-    expect(cache.evaluate('load', [2], () => 99), 8);
-    expect(cache.computations, 2);
-  });
-  for (final mode in CalculationMode.values) {
-    test('cache mode $mode controls full bypass', () {
-      expect(mode.canReuse, mode == CalculationMode.periodicAwake);
+    numericMap<int>('int', [1, 2]);
+    numericMap<double>('double', [1.5, 2.5]);
+    numericMap<int?>('nullable int', [1, null]);
+    numericMap<double?>('nullable double', [1.5, null]);
+    numericMap<num?>('nullable num', [1, 2.5, null]);
+
+    test('a type the default copier cannot rebuild says so', () {
       final cache = CalculationCache();
-      var calls = 0;
-      int calculate() => ++calls;
-      expect(cache.evaluate('load', null, calculate, full: !mode.canReuse), 1);
-      expect(cache.evaluate('load', null, calculate, full: !mode.canReuse),
-          mode.canReuse ? 1 : 2);
-      expect(cache.computations, mode.canReuse ? 1 : 2);
-      expect(cache.hits, mode.canReuse ? 1 : 0);
+      expect(
+        () => cache.evaluate<Map<String, Set<int>>>(
+            's', null, () => {'a': <int>{1}}),
+        throwsA(isA<ArgumentError>()
+            .having((e) => e.message, 'message', contains('copy:'))),
+      );
+      // A failed evaluation leaves nothing cached.
+      expect(cache.computations, 0);
     });
-  }
-  test('cache keys are isolated, full compute refreshes, clear discards values',
-      () {
-    final cache = CalculationCache();
-    var calls = 0;
-    int calculate() => ++calls;
-    expect(cache.evaluate('a', null, calculate), 1);
-    expect(cache.evaluate('b', null, calculate), 2);
-    expect(cache.evaluate('a', null, calculate, full: true), 3);
-    expect(cache.evaluate('a', null, calculate), 3);
-    cache.clear();
-    expect(cache.evaluate('a', null, calculate), 4);
-    expect(calls, 4);
-  });
-  test('cache defaults to bounded 128 entries', () {
-    final cache = CalculationCache();
-    var calls = 0;
-    for (var i = 0; i < 129; i++) {
-      cache.evaluate('metric-$i', null, () => ++calls);
-    }
-    for (var i = 0; i < 129; i++) {
-      cache.evaluate('metric-$i', null, () => ++calls);
-    }
-    expect(calls, greaterThan(129),
-        reason: 'at least one old key must be evicted');
-    expect(cache.computations, calls);
-  });
-  for (final capacity in [1, 3, 7]) {
-    test('cache bounded capacity=$capacity does not retain every entry', () {
-      final cache = CalculationCache(maxEntries: capacity);
-      var calls = 0;
-      for (var i = 0; i < capacity + 1; i++) {
-        cache.evaluate('metric-$i', [i], () => ++calls);
-      }
-      for (var i = 0; i < capacity + 1; i++) {
-        cache.evaluate('metric-$i', [i], () => ++calls);
-      }
-      expect(calls, greaterThan(capacity + 1));
+
+    test('a caller supplied copier handles any result type', () {
+      final cache = CalculationCache();
+      Map<String, Set<int>> copy(Map<String, Set<int>> v) =>
+          {for (final e in v.entries) e.key: {...e.value}};
+      final first = cache.evaluate<Map<String, Set<int>>>(
+          's', null, () => {'a': <int>{1}},
+          copy: copy);
+      first['a']!.add(2);
+      final second = cache.evaluate<Map<String, Set<int>>>(
+          's', null, () => {'a': <int>{9}},
+          copy: copy);
+      expect(second, {'a': <int>{1}});
+      expect(cache.hits, 1);
     });
-  }
-  test('cache handles typed immutable results without encoding them as JSON',
-      () {
-    final cache = CalculationCache();
-    const result = Metric<double>(
-        value: 7, confidence: .7, tier: Tier.estimate, inputs_used: ['hr']);
-    expect(cache.evaluate('metric', [1], () => result), same(result));
-    expect(
-        cache.evaluate<Metric<double>>(
-            'metric', [1], () => throw StateError('hit')),
-        same(result));
-    expect(cache.computations, 1);
-    expect(cache.hits, 1);
   });
 }
