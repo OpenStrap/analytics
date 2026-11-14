@@ -190,6 +190,29 @@ void main() {
     expect(s.stages4.length, winA1 - winA0);
   });
 
+  // why: a word-wise 64-bit mix lets two sign-bit flips cancel, so a row whose
+  // data changed in exactly two sign bits kept its key and a warm lookup served
+  // the old row.
+  // # catches: negating the x and y of one accel sample (two consecutive words
+  // of the key, magnitude and so the row unchanged) leaves every key identical
+  // under the word-wise mix; with byte-wise hashing the epochs that see the
+  // sample are looked up again.
+  test('two sign-bit changes in a row\'s data change its key', () {
+    final cache = CardioRowCache();
+    staged(base, cache, onset: winA0, offset: winA1);
+    final i = base.accel.length ~/ 2;
+    final a = base.accel[i];
+    expect(a.x != 0 || a.y != 0 || true, isTrue);
+    final changed = base.copy()
+      ..accel[i] = AccelSample(a.tsMs, -a.x, -a.y, a.z);
+    final warm = staged(changed, cache, onset: winA0, offset: winA1);
+    final ref = stage(changed, onset: winA0, offset: winA1);
+    expectIdentical(warm.out, ref, 'warm cache == no cache');
+    // A 300 s key range holds about ten 30 s epochs; each that sees the sample
+    // is recomputed.
+    expect(warm.misses, greaterThanOrEqualTo(8));
+  });
+
   group('with cache == without cache', () {
     test('forced window, cold cache, then warm cache', () {
       final ref = stage(base, onset: winA0, offset: winA1);

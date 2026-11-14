@@ -447,28 +447,33 @@ void main() {
       // Keys and values as the old extractor stored them for gravity (0,0,1)
       // each second and HR 60 then 0 at each second over [0,90): HR 60 where
       // the oracle's last-wins reading has none (0-90:unobserved).
-      final stale = CardioRowCache.fromJson({
-        'version': 2,
-        'rows': [
-          for (final (s, fp) in [
-            (0, '-518569928497453641'),
-            (30, '6424718457559164343'),
-            (60, '6000305869726000567'),
-          ])
-            {
-              'startSec': s,
-              'epochSec': 30,
-              'fingerprint': fp,
-              'motion': 0.0,
-              'hr': 60.0,
-              'hrSd': 0.0,
-              'rmssd': 'NaN',
-              'lfhf': 'NaN',
-              'rk': 'NaN',
-              'sdnn': 'NaN',
-            }
-        ],
-      });
+      Map<String, Object?> cacheJson(int version) => {
+            'version': version,
+            'rows': [
+              for (final (s, fp) in [
+                (0, '-518569928497453641'),
+                (30, '6424718457559164343'),
+                (60, '6000305869726000567'),
+              ])
+                {
+                  'startSec': s,
+                  'epochSec': 30,
+                  'fingerprint': fp,
+                  'motion': 0.0,
+                  'hr': 60.0,
+                  'hrSd': 0.0,
+                  'rmssd': 'NaN',
+                  'lfhf': 'NaN',
+                  'rk': 'NaN',
+                  'sdnn': 'NaN',
+                }
+            ],
+          };
+      // A cache written under the old identity (version 2) is refused on load.
+      expect(() => CardioRowCache.fromJson(cacheJson(2)), throwsFormatException);
+      // Even if the same keys sit under the current version they are old
+      // fingerprints: nothing matches the byte-wise ones, so nothing is served.
+      final stale = CardioRowCache.fromJson(cacheJson(3));
       final grav = flatGrav(0, 90);
       final hr = [for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]];
       final got = AdvancedSleepStager.stageWindow(0, 90, grav, hr,

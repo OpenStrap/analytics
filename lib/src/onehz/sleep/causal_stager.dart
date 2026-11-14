@@ -318,7 +318,7 @@ class CausalEpochRow {
     if (vals.any((v) => v != null && !v.isFinite)) return null;
     final li = j[10];
     if (li != null && (li is! int || li < 0 || li > 2)) return null;
-    return CausalEpochRow(
+    final row = CausalEpochRow(
       epoch: (j[0] as num).toInt(),
       hrN: (j[1] as num).toInt(),
       hrOffN: (j[2] as num).toInt(),
@@ -331,7 +331,35 @@ class CausalEpochRow {
       lfhf: vals[5],
       label: li == null ? null : CausalStage.values[li as int],
     );
+    // Cross-field invariants a row built by the stager always satisfies. A row
+    // that breaks one would pass `usable` and then fail inside a decision
+    // (motion is read for every usable row), so it is refused here and the
+    // caller restarts, as the persistence contract says.
+    if (row.hrN < 0 ||
+        row.hrOffN < 0 ||
+        row.accelN < 0 ||
+        row.hrN > kCausalEpochSec ||
+        row.hrOffN > kCausalEpochSec ||
+        row.accelN > kCausalEpochSec) {
+      return null;
+    }
+    if (row.usable && row.motion == null) return null;
+    // A label is only ever decided for a usable row.
+    if (row.label != null && !row.usable) return null;
+    return row;
   }
+
+  /// Whether every measured feature is the same (null counts as the same).
+  bool sameFeatures(CausalEpochRow o) =>
+      hrN == o.hrN &&
+      hrOffN == o.hrOffN &&
+      accelN == o.accelN &&
+      motion == o.motion &&
+      hr == o.hr &&
+      hrSd == o.hrSd &&
+      sdnn == o.sdnn &&
+      rk == o.rk &&
+      lfhf == o.lfhf;
 }
 
 /// The carried state. Plain data: JSON-serialisable and isolate-sendable.
@@ -579,18 +607,10 @@ abstract final class CausalStager {
       return no(CausalAbstention.warmup,
           note: _warmNote(usableCount, cfg.warmupEpochs), row: row);
     }
-    final firstEpoch = rows.first.epoch;
-    final from = math.max(firstEpoch, kLatest - cfg.warmupEpochs + 1);
-    final span = kLatest - from + 1;
-    var recentUsable = 0, recentRr = 0;
-    for (var e = from; e <= kLatest; e++) {
-      final r = byEpoch[e];
-      if (r != null && r.usable) {
-        recentUsable++;
-        if (r.sdnn != null) recentRr++;
-      }
-    }
-    if (recentUsable / span < minHrCoverage) {
+    final recent = _recentCoverage(byEpoch, rows.first.epoch, kLatest, cfg);
+    final span = recent.span;
+    final recentUsable = recent.usable, recentRr = recent.rr;
+    if (!recent.ok) {
       return no(CausalAbstention.lowCoverage, row: row);
     }
 
@@ -884,9 +904,20 @@ List<CausalEpochRow> _rebuildRows(
       }
       // Decide labels in epoch order, each on baselines built from rows up to
       // and including its own epoch — never later ones.
+      final before = {for (final r in st.rows) r.epoch: r};
       for (var k = kLo; k <= kLatest; k++) {
         final row = byEpoch[k];
         if (row == null) continue;
+        // Once history has rolled over, the rows an earlier epoch's baseline
+        // used are gone, so a re-decision here would run on a shorter baseline
+        // and could clear (or change) a label that nothing about the epoch has
+        // changed. An unchanged row keeps the label it was decided with.
+        final truncated = oldestKept > 0 && k - cfg.historyEpochs + 1 < oldestKept;
+        final prior = before[k];
+        if (truncated && prior != null && prior.sameFeatures(row)) {
+          byEpoch[k] = row.withLabel(prior.label);
+          continue;
+        }
         final d = _decide(byEpoch, k, cfg);
         byEpoch[k] = row.withLabel(d?.stage);
       }
@@ -975,12 +1006,41 @@ class _Decision {
       this.hrMed, this.bigMove);
 }
 
+/// The recent-coverage rule for epoch [k]: of the last `warmupEpochs` epochs
+/// (fewer at the start of the held history, from [firstEpoch]) enough must be
+/// usable. One rule for [observe] and for [_decide], so an epoch the observer
+/// would abstain on never gets a stored label that a later run could count.
+({int usable, int rr, int span, bool ok}) _recentCoverage(
+    Map<int, CausalEpochRow> byEpoch, int firstEpoch, int k,
+    CausalStagerConfig cfg) {
+  final from = math.max(firstEpoch, k - cfg.warmupEpochs + 1);
+  final span = k - from + 1;
+  var usable = 0, rr = 0;
+  for (var e = from; e <= k; e++) {
+    final r = byEpoch[e];
+    if (r != null && r.usable) {
+      usable++;
+      if (r.sdnn != null) rr++;
+    }
+  }
+  return (
+    usable: usable,
+    rr: rr,
+    span: span,
+    ok: usable / span >= minHrCoverage
+  );
+}
+
 /// Decide epoch [k] using only usable rows with epoch in (k - historyEpochs, k].
-/// Null when [k] is unusable or fewer than `warmupEpochs` usable rows exist.
+/// Null when [k] is unusable, fewer than `warmupEpochs` usable rows exist, or
+/// the recent-coverage rule of [observe] fails.
 _Decision? _decide(
     Map<int, CausalEpochRow> byEpoch, int k, CausalStagerConfig cfg) {
   final row = byEpoch[k];
   if (row == null || !row.usable) return null;
+  if (!_recentCoverage(byEpoch, byEpoch.keys.reduce(math.min), k, cfg).ok) {
+    return null;
+  }
   final base = <CausalEpochRow>[
     for (var e = k - cfg.historyEpochs + 1; e <= k; e++)
       if (byEpoch[e] != null && byEpoch[e]!.usable) byEpoch[e]!

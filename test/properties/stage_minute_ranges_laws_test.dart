@@ -143,7 +143,10 @@ List<StageEpochEvidence> _clear(List<_Ep> n) => [
     ];
 
 double? _clearOf(double? s, double cut) {
-  if (s == null || !_near(s, cut)) return s;
+  // A missing score decided nothing, so it is undecided and never clear: L3
+  // gives it a score well clear of the cutoff, like any other.
+  if (s == null || s.isNaN) return cut + 2 * _margin;
+  if (!_near(s, cut)) return s;
   return s >= cut ? cut + _margin : cut - _margin;
 }
 
