@@ -27,6 +27,69 @@ void main() {
         restingHr: 54, maxHr: 186, profile: profile, force: true);
     expect(forced.minutes!.basalKcalPerMin, basal - 1);
   });
+  // why: restored bills and appended HR/walking surplus must share the
+  // reported basal, even if the current calculator would choose another rate.
+  // proves: CLAIM(restored-minute-pricing)
+  // catches: rebuilding the pricer without its checkpoint's basal rate.
+  for (final includeMinuteSeries in [true, false]) {
+    test('restored basal prices appended surplus series=$includeMinuteSeries',
+        () {
+      const profile =
+          WorkoutUserProfile(weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const taller =
+          WorkoutUserProfile(weightKg: 80, heightCm: 200, age: 30, sex: 'male');
+      const keys = [0, 1, 2, 3];
+      const hr = [60.0, 150.0, 60.0, 150.0];
+      const cadence = <double?>[110, null, 110, null];
+      final original = IncrementalMinuteMetrics();
+      original.sync(keys.sublist(0, 2), hr.sublist(0, 2),
+          cadenceSpm: cadence.sublist(0, 2),
+          restingHr: 54,
+          maxHr: 186,
+          profile: profile);
+      final saved = checkpoint(original.toJson());
+      // Simulate a checkpoint whose accepted basal differs from today's
+      // profile calculation. Height changes basal only, so a fresh computation
+      // with the original profile is an oracle for every retained/new bill.
+      ((saved['parameters'] as List)[3] as List)[1] = taller.heightCm;
+      final restored = IncrementalMinuteMetrics.fromJson(saved);
+      final result = restored.sync(keys, hr,
+          cadenceSpm: cadence,
+          restingHr: 54,
+          maxHr: 186,
+          profile: taller,
+          includeMinuteSeries: includeMinuteSeries);
+      final freshState = IncrementalMinuteMetrics();
+      final fresh = freshState.sync(keys, hr,
+          cadenceSpm: cadence, restingHr: 54, maxHr: 186, profile: profile);
+      // Mifflin: (10*80 + 6.25*180 - 5*30 + 5)/1440 = 89/72.
+      const basal = 89 / 72;
+      // 110 spm is 4 METs; Keytel male at 150 bpm is
+      // (-55.0969 + .6309*150 + .1988*80 + .2017*30)/4.184 kcal/min.
+      const walking = 3 * basal;
+      const active = 61.4931 / 4.184 - basal;
+      final bills = restored.toJson()['bills'] as List;
+      expect(bills[2]['source'], 'cadence');
+      expect(bills[2]['walking'], closeTo(walking, 1e-12));
+      expect(bills[2]['active'], 0);
+      expect(bills[3]['source'], 'hr');
+      expect(bills[3]['active'], closeTo(active, 1e-12));
+      expect(bills[3]['walking'], 0);
+      expect(restored.toJson()['basalPerMinute'], basal);
+      expect(result.energy!.basal, basal * 1440);
+      expect(result.energy, fresh.energy);
+      expect(bills, freshState.toJson()['bills']);
+      expect(restored.processedMinutes, 4,
+          reason: 'accepted prefix bills remain priced exactly once');
+      if (includeMinuteSeries) {
+        expect(result.minutes!.basalKcalPerMin, basal);
+        expect(result.minutes!.minutes[2].walking, closeTo(walking, 1e-12));
+        expect(result.minutes!.minutes[3].active, closeTo(active, 1e-12));
+      } else {
+        expect(result.minutes, isNull);
+      }
+    });
+  }
   for (final entry in energyProfiles.entries) {
     for (final sex in Sex.values) {
       for (final chunk in [1, 19, 128]) {

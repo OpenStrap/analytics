@@ -372,7 +372,8 @@ class Calories {
     double hrmax,
     double flexHr,
     double basalPerMin,
-  })? _energyCtx(WorkoutUserProfile profile, double hrmax, double restingHr) {
+  })? _energyCtx(WorkoutUserProfile profile, double hrmax, double restingHr,
+      {double? basalKcalPerMin}) {
     final weightKg = profile.weightKg > 0 ? profile.weightKg : 70.0;
     final heightCm = profile.heightCm > 0 ? profile.heightCm : 170.0;
     final age = profile.age > 0 ? profile.age : 30.0;
@@ -384,8 +385,8 @@ class Calories {
       age: age,
       hrmax: hrmax,
       flexHr: flexHr,
-      basalPerMin: mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex) /
-          1440.0,
+      basalPerMin: basalKcalPerMin ??
+          mifflinBmrKcalDay(weightKg, heightCm, age, profile.sex) / 1440.0,
     );
   }
 
@@ -529,6 +530,8 @@ class Calories {
 
   /// Prepares fixed profile and anchor math once for independent minute bills.
   /// Returns null under the same anchor gate as [dailyEnergy].
+  /// [basalKcalPerMin] retains a checkpoint's pricing basis for both HR and
+  /// walking surplus; otherwise the profile determines the basal rate.
   // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
   // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
   // preserve bill order and separate HR/walking accumulation; hourly output sums
@@ -537,8 +540,10 @@ class Calories {
     required WorkoutUserProfile profile,
     required double hrmax,
     required double restingHr,
+    double? basalKcalPerMin,
   }) {
-    final ctx = _energyCtx(profile, hrmax, restingHr);
+    final ctx =
+        _energyCtx(profile, hrmax, restingHr, basalKcalPerMin: basalKcalPerMin);
     if (ctx == null) return null;
     return MinuteEnergyPricer._(
         ctx.basalPerMin, (hr, cadence) => _bill(ctx, hr, cadence));
