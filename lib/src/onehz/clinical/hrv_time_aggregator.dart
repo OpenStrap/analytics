@@ -167,18 +167,26 @@ class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
   @override
   _CheckedBeatState<S> addSlice(
       _CheckedBeatState<S> state, Beats batch, int start, int end) {
-    var previous = state.last;
+    // Finiteness of every row first, then order: a slice that is both out of
+    // order and holds a non-finite value is refused as the non-finite one, the
+    // same answer however the rows are arranged. Nothing changes either way.
     for (var i = start; i < end; i++) {
       if (!batch.nnMs[i].isFinite) {
         throw ArgumentError('NN intervals must be finite');
       }
-      if (!gapAware) continue;
-      final time = batch.timeMs[i];
-      if (!time.isFinite) throw ArgumentError('beat times must be finite');
-      if (previous != null && time < previous) {
-        throw StateError('beat times must be non-decreasing');
+      if (gapAware && !batch.timeMs[i].isFinite) {
+        throw ArgumentError('beat times must be finite');
       }
-      previous = time;
+    }
+    var previous = state.last;
+    if (gapAware) {
+      for (var i = start; i < end; i++) {
+        final time = batch.timeMs[i];
+        if (previous != null && time < previous) {
+          throw StateError('beat times must be non-decreasing');
+        }
+        previous = time;
+      }
     }
     state.inner = inner.addSlice(state.inner, batch, start, end);
     if (gapAware && start < end) {
