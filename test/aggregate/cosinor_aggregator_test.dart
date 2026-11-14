@@ -27,6 +27,7 @@
 //  * Batch now runs the same aggregator. The near-singular fixture below
 //    pins its relative gate; ordinary parity fixtures avoid that threshold.
 
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -637,5 +638,91 @@ void main() {
         narrow(20, step: .005),
       ], equals: _eq);
     });
+  });
+
+  // A column of pure rounding residue is not data. With a 24 h period and
+  // t = 12 i the phase is exactly pi i, so the true sine is 0 at every sample;
+  // the computed values are tiny, nonzero and arbitrary (sin of fl(pi) * i). The
+  // cosine column is +-1 and well conditioned, so the design is not collinear in
+  // the relative sense and used to pass the gate and report an amplitude read
+  // from that residue. The guard compares the column's centered energy with the
+  // most rounding can produce at that argument scale (see the aggregator), which
+  // follows from machine epsilon and the largest argument, not a tuned constant:
+  // here the residue is about 1e-14 against a floor near 1e-13, and any real
+  // sine column is many orders above it, so no platform's libm can move this.
+  group('a column of rounding residue makes the metric absent', () {
+    const note = 'singular cosinor design (insufficient phase coverage)';
+    void expectAbsent(List<double> t, String why) {
+      final y = [for (var i = 0; i < t.length; i++) 60.0 + 3 * (i % 5)];
+      final batch = _tv(t, y);
+      final agg = cosinorAggregator();
+      final half = t.length ~/ 2;
+      final left = agg.addSlice(agg.empty(), batch, 0, half);
+      final right = agg.addSlice(agg.empty(), batch, half, batch.length);
+      for (final (name, result) in [
+        ('run', agg.run(batch)),
+        ('merged', agg.finish(agg.combine(left, right))),
+        ('batch', cosinor(t, y)),
+      ]) {
+        expect(result.present, isFalse, reason: '$why $name');
+        expect(result.value, isNull, reason: '$why $name');
+        expect(result.note, note, reason: '$why $name');
+      }
+    }
+
+    test('sine column: t = 12 i, period 24 (the true sine is 0)', () {
+      expectAbsent([for (var i = 0; i < 48; i++) 12.0 * i], 'sine');
+    });
+    test('cosine column: t = 6 + 12 i (the true cosine is 0)', () {
+      expectAbsent([for (var i = 0; i < 48; i++) 6.0 + 12.0 * i], 'cosine');
+    });
+    test('the same holds for a long record, where the argument is large', () {
+      expectAbsent([for (var i = 0; i < 2000; i++) 12.0 * i], 'long sine');
+    });
+    test('the guard survives a checkpoint', () {
+      final t = [for (var i = 0; i < 48; i++) 12.0 * i];
+      final y = [for (var i = 0; i < 48; i++) 60.0 + 3 * (i % 5)];
+      final batch = _tv(t, y);
+      final agg = cosinorAggregator();
+      final json = jsonDecode(jsonEncode(
+          agg.encodeState(agg.addSlice(agg.empty(), batch, 0, 24))));
+      final back = agg.decodeState(json);
+      final done = agg.finish(agg.addSlice(back, batch, 24, 48));
+      expect(done.present, isFalse);
+      expect(done.note, note);
+    });
+    test('a negative stored argument scale is refused', () {
+      final batch = _tv([0, 1, 2, 3], [1, 2, 3, 4]);
+      final agg = cosinorAggregator();
+      final json = jsonDecode(jsonEncode(
+          agg.encodeState(agg.addSlice(agg.empty(), batch, 0, 4)))) as Map;
+      expect(() => agg.decodeState(json), returnsNormally);
+      json['maxArg'] = -1.0;
+      expect(() => agg.decodeState(json), throwsFormatException);
+    });
+  });
+
+  // The relative-determinant gate still does its own job: two distinct phases
+  // only (t = 0 and t = 6, a quarter period apart) make every centered column a
+  // multiple of the same two-valued indicator, so the design has rank one while
+  // both columns carry real energy. Each column takes exactly two values (equal
+  // inputs give equal outputs), so the only noise is the accumulation, about
+  // 1e-16 relative, four orders under the 1e-12 gate.
+  test('two phases only: rank one, caught by the determinant gate', () {
+    final t = [for (var i = 0; i < 16; i++) i.isEven ? 0.0 : 6.0];
+    final y = [for (var i = 0; i < 16; i++) 60.0 + (i.isEven ? 0.0 : 5.0) + i * 0.01];
+    final batch = _tv(t, y);
+    final agg = cosinorAggregator();
+    final left = agg.addSlice(agg.empty(), batch, 0, 8);
+    final right = agg.addSlice(agg.empty(), batch, 8, 16);
+    for (final result in [
+      agg.run(batch),
+      agg.finish(agg.combine(left, right)),
+      cosinor(t, y)
+    ]) {
+      expect(result.present, isFalse);
+      expect(result.note,
+          'singular cosinor design (insufficient phase coverage)');
+    }
   });
 }

@@ -69,7 +69,14 @@ class _S {
 /// the per-gap histogram and the tail are written out again.
 TimeInHeartRateZone? _referenceTimeInZone(
     List<HrSample> hr, HeartRateZoneSet zoneSet) {
-  final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
+  // Stable: by timestamp, then input position, so repeated timestamps keep the
+  // order they arrived in (Dart's List.sort is not stable for long lists).
+  final order = List<int>.generate(hr.length, (i) => i)
+    ..sort((a, b) {
+      final c = hr[a].tsMs.compareTo(hr[b].tsMs);
+      return c != 0 ? c : a.compareTo(b);
+    });
+  final sorted = [for (final i in order) hr[i]];
   final cadence =
       sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
   if (cadence == null) return null;
@@ -704,6 +711,57 @@ void main() {
           decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, three),
               kind: 'test', version: 1),
           isNotNull);
+    });
+  });
+
+  // # catches: HeartRateZones.timeInZone re-sorted with Dart's unstable
+  // List.sort, so the 34 rows at one instant (more than the 32 that sort keeps
+  // in order) could swap places and a different reading was credited than the
+  // aggregator, which keeps input order, credited.
+  group('repeated timestamps keep their input order on every path', () {
+    // maxHr 200. 34 rows at t = 0: 33 at HR 110 then one at 190. Then six
+    // off-skin rows a second apart, from 500 ms.
+    final ts = <double>[for (var i = 0; i < 34; i++) 0, for (var i = 0; i < 6; i++) 500.0 + 1000 * i];
+    final hr = <double>[for (var i = 0; i < 33; i++) 110, 190, for (var i = 0; i < 6; i++) 0];
+    final s = _S(ts, hr);
+
+    test('the aggregator and the batch function both match the reference', () {
+      final want = _referenceTimeInZone(s.samples, _zones);
+      expect(want, isNotNull);
+      _same(_agg.run(s.stream), want, 'aggregator');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'batch');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), _agg.run(s.stream),
+          'batch vs aggregator');
+    });
+
+    test('the order the rows arrive in decides the credit, so it is kept', () {
+      // The same rows with the 190 reading first: a different credit, which
+      // shows the ordering is real and that the stable one is what is returned.
+      final swapped = _S(ts, [190, for (var i = 0; i < 33; i++) 110, for (var i = 0; i < 6; i++) 0]);
+      final a = HeartRateZones.timeInZone(s.samples, _zones)!;
+      final b = HeartRateZones.timeInZone(swapped.samples, _zones)!;
+      expect(_eq(a, b), isFalse,
+          reason: 'the last reading at the repeated instant is credited');
+      _same(b, _referenceTimeInZone(swapped.samples, _zones), 'swapped');
+    });
+
+    test('many repeated instants in a longer stream stay in input order', () {
+      final r = Rng(0x5712);
+      for (var k = 0; k < 10; k++) {
+        final n = 40 + r.intIn(0, 60);
+        final t = <double>[];
+        final h = <double>[];
+        var at = 0.0;
+        for (var i = 0; i < n; i++) {
+          if (r.nextBool(.3)) at += 1000;
+          t.add(at);
+          h.add(r.nextBool(.1) ? 0 : 60 + r.nextDouble() * 130);
+        }
+        final x = _S(t, h);
+        final want = _referenceTimeInZone(x.samples, _zones);
+        _same(HeartRateZones.timeInZone(x.samples, _zones), want, 'batch $k');
+        _same(_agg.run(x.stream), want, 'aggregator $k');
+      }
     });
   });
 }

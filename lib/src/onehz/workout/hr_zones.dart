@@ -191,7 +191,17 @@ class HeartRateZones {
     if (hr.any((s) => !s.tsMs.isFinite)) return null;
     // Runs [timeInZoneAggregator] over the sorted stream in one slice: the
     // aggregator holds the cadence rule, the credit bounding and the tail.
-    final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
+    // Ordered by (timestamp, input position). Dart's List.sort is not stable
+    // above a few dozen elements, so equal timestamps could reorder, and the
+    // order decides which reading is credited for a repeated instant. The
+    // aggregator credits rows in the order it is given, so this puts both on the
+    // same deterministic one.
+    final order = List<int>.generate(hr.length, (i) => i)
+      ..sort((a, b) {
+        final c = hr[a].tsMs.compareTo(hr[b].tsMs);
+        return c != 0 ? c : a.compareTo(b);
+      });
+    final sorted = [for (final i in order) hr[i]];
     return timeInZoneAggregator(zoneSet).run(HrStream(
       Float64List.fromList([for (final s in sorted) s.tsMs]),
       Float64List.fromList([for (final s in sorted) s.hr]),
