@@ -14,7 +14,8 @@
 //   hi[s] = lo[s] + epochs that could still be s: uncovered or unlabelled
 //           epochs (any stage), and asleep epochs with a score inside the
 //           margin (REM score: REM and its NREM substage; deep score: light
-//           and deep).
+//           and deep). A score that is missing (null or NaN) is inside the
+//           margin by definition: it did not decide, so it cannot be clear.
 // Owner decision (2026-10-19): a fully covered night has lo == hi only where
 // every score is clear of its cutoff. Nothing here moves the stager's label.
 
@@ -128,9 +129,11 @@ StageMinuteRanges? stageMinuteRanges(
 }) {
   if (epochs == null || epochs.isEmpty) return null;
   // Written as an open interval on `cut ± margin` so a score of exactly
-  // `cut + margin` compares equal to the bound and counts as clear.
+  // `cut + margin` compares equal to the bound and counts as clear. A missing
+  // score (null, or NaN) decided nothing: it is undecided, never "clear", so
+  // the decision it would have made stays open on both sides.
   bool near(double? s, double cut) =>
-      s != null && s > cut - margin && s < cut + margin;
+      s == null || s.isNaN || (s > cut - margin && s < cut + margin);
 
   final lo = <int, int>{_wake: 0, _light: 0, _deep: 0, _rem: 0, _nremSet: 0};
   final hi = <int, int>{_wake: 0, _light: 0, _deep: 0, _rem: 0, _nremSet: 0};

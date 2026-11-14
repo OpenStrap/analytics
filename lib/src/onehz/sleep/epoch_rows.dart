@@ -350,6 +350,17 @@ class EpochRows {
     return a;
   }
 
+  /// Where a run's data stops for the gravity reference. Batch staging cuts
+  /// every run that another one follows to whole epochs before extracting
+  /// features, and only the last run keeps its sub-epoch tail; the same bound
+  /// here keeps a reference window from reading samples the batch never sees.
+  double _refEndMs(_Run run) {
+    if (identical(run, _runs.last)) return run.endSec * 1000.0;
+    const epSec = kEpochMs ~/ 1000;
+    final whole = (run.endSec - run.startSec) ~/ epSec;
+    return (run.startSec + whole * epSec) * 1000.0;
+  }
+
   List<EpochFeatureRow> _rows(List<int> starts) {
     if (starts.isEmpty) return [];
     final eff = _effAccel();
@@ -374,7 +385,7 @@ class EpochRows {
       final nextHi = _sampleLower(
           eff,
           math.min(start + 180000.0,
-              run == null ? double.infinity : run.endSec * 1000.0),
+              run == null ? double.infinity : _refEndMs(run)),
           (a) => a.tsMs);
       while (lo < nextLo && lo < hi) {
         sorted.remove(mag[lo]);
@@ -402,7 +413,7 @@ class EpochRows {
     final ae = _sampleLower(
         eff,
         math.min(end + (reference == null ? 150000.0 : 0.0),
-            run == null ? double.infinity : run.endSec * 1000.0),
+            run == null ? double.infinity : _refEndMs(run)),
         (a) => a.tsMs);
     final hb = _sampleLower(_hr, start.toDouble(), (h) => h.tsMs);
     final he = _sampleLower(_hr, end.toDouble(), (h) => h.tsMs);
@@ -423,12 +434,15 @@ class EpochRows {
     if (_cache != null) {
       var hash = 0xcbf29ce484222325;
       final bits = ByteData(8);
+      // Byte-wise FNV-1a: mixing a whole word lets two sign-bit flips cancel.
       void number(double v) {
         bits.setFloat64(0, v, Endian.little);
-        hash = (hash ^ bits.getUint64(0, Endian.little)) * 0x100000001b3;
+        for (var i = 0; i < 8; i++) {
+          hash = (hash ^ bits.getUint8(i)) * 0x100000001b3;
+        }
       }
 
-      number(0x45504f434833.toDouble()); // EPOCH3: 81b9b4b changed row semantics.
+      number(0x45504f434834.toDouble()); // EPOCH4: byte-wise hash.
       for (final a in av) {
         number(a.tsMs);
         number(a.x);

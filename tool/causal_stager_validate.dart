@@ -29,15 +29,62 @@ const _fixtures = 'test/onehz/fixtures/';
 /// Shift the fixture's 0-based clock to a realistic, 30 s-aligned absolute one.
 const double _t0Ms = 1700000010000;
 
-void main(List<String> args) {
-  final pos = [for (final a in args) if (!a.startsWith('--')) a];
-  int intArg(String n, int d) {
-    final i = args.indexOf(n);
-    return (i >= 0 && i + 1 < args.length) ? int.parse(args[i + 1]) : d;
-  }
+/// The parsed command line: fixture paths plus the two options.
+class ValidateArgs {
+  /// Arguments no option consumed: the one-Hz and RR fixture paths.
+  final List<String> pos;
+  final int stepSec, warmup;
 
-  final stepSec = intArg('--step', 30);
-  final warm = intArg('--warmup', CausalStagerConfig.defaults.warmupEpochs);
+  /// Set when the command line is not usable.
+  final String? error;
+  const ValidateArgs(this.pos, this.stepSec, this.warmup, [this.error]);
+}
+
+/// Each option is read together with its value (`--step 60` or `--step=60`), so
+/// a value is never mistaken for a fixture path.
+ValidateArgs parseValidateArgs(List<String> args,
+    {int defaultStep = 30, int? defaultWarmup}) {
+  final pos = <String>[];
+  var step = defaultStep;
+  var warm = defaultWarmup ?? CausalStagerConfig.defaults.warmupEpochs;
+  ValidateArgs bad(String why) => ValidateArgs(pos, step, warm, why);
+  for (var i = 0; i < args.length; i++) {
+    final a = args[i];
+    if (!a.startsWith('--')) {
+      pos.add(a);
+      continue;
+    }
+    final eq = a.indexOf('=');
+    final name = eq >= 0 ? a.substring(0, eq) : a;
+    if (name != '--step' && name != '--warmup') return bad('unknown option $name');
+    String? raw = eq >= 0 ? a.substring(eq + 1) : null;
+    if (raw == null) {
+      if (i + 1 >= args.length) return bad('$name needs a value');
+      raw = args[++i];
+    }
+    final n = int.tryParse(raw);
+    if (n == null || n <= 0) {
+      return bad('$name needs a positive whole number, got "$raw"');
+    }
+    if (name == '--step') {
+      step = n;
+    } else {
+      warm = n;
+    }
+  }
+  return ValidateArgs(pos, step, warm);
+}
+
+void main(List<String> args) {
+  final parsed = parseValidateArgs(args);
+  if (parsed.error != null) {
+    stderr.writeln(parsed.error);
+    exitCode = 64;
+    return;
+  }
+  final pos = parsed.pos;
+  final stepSec = parsed.stepSec;
+  final warm = parsed.warmup;
   final onehz = pos.isNotEmpty ? pos[0] : '${_fixtures}real_night_2026_07_onehz.csv';
   final rrPath = pos.length > 1 ? pos[1] : '${_fixtures}real_night_2026_07_rr.csv';
   if (!File(onehz).existsSync() || !File(rrPath).existsSync()) {

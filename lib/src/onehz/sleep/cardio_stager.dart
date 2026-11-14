@@ -744,9 +744,16 @@ CardioRowKey _cardioRowKey(
   List<int> runStarts,
 ) {
   var hash = _fnvOffset64;
+  // Byte-wise FNV-1a. Mixing a whole 64-bit word at a time lets two sign-bit
+  // flips cancel: flipping bit 63 survives every later multiply by the odd
+  // prime as the same flip, so two such changes undo each other.
   void word(int value) {
-    hash ^= value & _u64Mask;
-    hash = (hash * _fnvPrime64) & _u64Mask;
+    var v = value & _u64Mask;
+    for (var i = 0; i < 8; i++) {
+      hash ^= v & 0xff;
+      hash = (hash * _fnvPrime64) & _u64Mask;
+      v >>>= 8;
+    }
   }
   void number(double value) {
     final bytes = ByteData(8)..setFloat64(0, value, Endian.little);
@@ -762,7 +769,7 @@ CardioRowKey _cardioRowKey(
   }
   final lo = math.max(runLo, s - gRefHalf);
   final hi = math.min(runHi, t + gRefHalf);
-  word(0x43415244494f31); // domain separator: CARDIO1
+  word(0x43415244494f32); // domain separator: CARDIO2 (byte-wise hash)
   word(epochSec);
   word(perEpoch);
   number(cadenceSec);
