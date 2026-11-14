@@ -61,7 +61,12 @@ class _CosinorState {
   var mCY = 0.0;
   var mSY = 0.0;
 
-  void addCentered(double c, double s, double y) {
+  /// The largest |2 pi t / period| seen: the scale of the argument the cosine
+  /// and sine columns were evaluated at, which bounds their rounding error.
+  /// Once non-finite it stays so, and the design is refused as non-finite.
+  var maxArg = 0.0;
+
+  void addCentered(double c, double s, double y, [double arg = 0.0]) {
     final nextN = n + 1;
     final dc = c - meanC;
     final ds = s - meanS;
@@ -78,6 +83,7 @@ class _CosinorState {
     meanC = nextMeanC;
     meanS = nextMeanS;
     meanY = nextMeanY;
+    maxArg = _maxAbs(maxArg, arg);
     n = nextN;
   }
 
@@ -93,6 +99,7 @@ class _CosinorState {
       mCS = other.mCS;
       mCY = other.mCY;
       mSY = other.mSY;
+      maxArg = other.maxArg;
       n = other.n;
       return;
     }
@@ -110,9 +117,30 @@ class _CosinorState {
     meanC += dc * other.n / total;
     meanS += ds * other.n / total;
     meanY += dy * other.n / total;
+    maxArg = _maxAbs(maxArg, other.maxArg);
     n = total;
   }
 }
+
+/// A stored argument scale is an absolute value: negative is not a state this
+/// aggregator can have built (NaN and infinity are, and are refused at finish).
+double _decodeMaxArg(Object? json) {
+  final v = decodeDouble(json);
+  if (v < 0) throw const FormatException('Negative cosinor argument scale');
+  return v;
+}
+
+/// max(|current|, |value|) that keeps a non-finite result: a NaN or infinite
+/// argument must reach the finiteness check, not be dropped by a comparison.
+double _maxAbs(double current, double value) {
+  final a = value.abs();
+  if (!current.isFinite) return current;
+  if (!a.isFinite) return a;
+  return a > current ? a : current;
+}
+
+/// Double machine epsilon, 2^-52.
+const double _machineEps = 2.220446049250313e-16;
 
 class _CosinorStats
     extends Aggregator<_CosinorState, TimedValues, _CosinorState> {
@@ -132,7 +160,7 @@ class _CosinorStats
       final c = math.cos(w * batch.tHours[i]);
       final s = math.sin(w * batch.tHours[i]);
       final y = batch.y[i];
-      state.addCentered(c, s, y);
+      state.addCentered(c, s, y, w * batch.tHours[i]);
     }
     return state;
   }
@@ -161,6 +189,7 @@ class _CosinorStats
         'mCS': encodeDouble(state.mCS),
         'mCY': encodeDouble(state.mCY),
         'mSY': encodeDouble(state.mSY),
+        'maxArg': encodeDouble(state.maxArg),
       };
 
   @override
@@ -176,7 +205,8 @@ class _CosinorStats
       ..mYY = decodeDouble(field(map, 'mYY'))
       ..mCS = decodeDouble(field(map, 'mCS'))
       ..mCY = decodeDouble(field(map, 'mCY'))
-      ..mSY = decodeDouble(field(map, 'mSY'));
+      ..mSY = decodeDouble(field(map, 'mSY'))
+      ..maxArg = _decodeMaxArg(field(map, 'maxArg'));
   }
 }
 
@@ -227,12 +257,35 @@ Metric<CosinorFit> _finishCosinor(
     state.mYY,
     state.mCS,
     state.mCY,
-    state.mSY
+    state.mSY,
+    state.maxArg
   ].every((v) => v.isFinite)) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'non-finite cosinor design',
+    );
+  }
+  // A column whose centered energy is only what rounding can produce carries no
+  // phase information. Each cosine or sine is evaluated at fl(fl(2 pi / period)
+  // * t): that argument has a relative error of about 1.5 eps (the rounded
+  // period constant and the rounded product), so an absolute error of at most
+  // 1.5 eps A for A = max |argument|, and the library function adds at most one
+  // ulp (about eps). Every computed value is within 2 eps (A + 1) of the exact
+  // one, so two of them differ by at most 4 eps (A + 1), and a column whose true
+  // values are all equal (a sine at t = 12 i with a 24 h period is exactly zero
+  // at every sample) has a centered sum of squares of at most n * that bound
+  // squared. At or under it the column is indistinguishable from constant and
+  // its coefficient would be read from rounding residue, not data. The bound
+  // follows from eps and the argument scale, not from a tuned constant, and a
+  // real column (variation of even 1e-9 rad) is far above it.
+  final noise = 4 * _machineEps * (state.maxArg + 1);
+  final noiseFloor = n * noise * noise;
+  if (state.mCC <= noiseFloor || state.mSS <= noiseFloor) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
   final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
