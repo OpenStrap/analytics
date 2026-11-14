@@ -17,6 +17,7 @@
 //  * primeDays 0 behaves as 1 (reference clamps), primeDays > rows as rows.
 //  * Constructing the aggregator never throws for the parameters below.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
@@ -52,6 +53,59 @@ void _same(Metric<LoadState> got, Metric<LoadState> want, String tag) {
   expect(got.note, want.note, reason: '$tag note');
 }
 
+/// The reference: CTL / ATL / TSB written out one day at a time, not through
+/// `ctlAtlTsb`, which now runs the aggregator (and whose recurrence the
+/// aggregator evaluates as an affine map, a different computation).
+///
+/// Banister et al. 1975: an exponentially weighted moving average,
+///   x[t] = x[t-1] + lambda * (v[t] - x[t-1]),  lambda = 1 - exp(-1 / days),
+/// 42 days for chronic load, 7 for acute. Both start at the plain mean of the
+/// first `primeDays` observed days (never one day, never later days) and then
+/// take each remaining day in turn; TSB = CTL - ATL. Below `minDays`, or for any
+/// non-finite load, it abstains.
+Metric<LoadState> _referenceCtlAtl(List<double> daily,
+    {double ctlDays = 42,
+    double atlDays = 7,
+    int minDays = ctlAtlMinDays,
+    int primeDays = 7}) {
+  const inputs = ['daily_trimp'];
+  if (daily.any((v) => !v.isFinite)) {
+    return const Metric<LoadState>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'non-finite daily TRIMP',
+    );
+  }
+  if (daily.length < minDays) {
+    return Metric<LoadState>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'need_baseline:have=${daily.length},need=$minDays',
+    );
+  }
+  final prime = math.min(math.max(primeDays, 1), daily.length);
+  var seed = 0.0;
+  for (var i = 0; i < prime; i++) {
+    seed += daily[i];
+  }
+  seed /= prime;
+  final lambdaCtl = 1 - math.exp(-1 / ctlDays);
+  final lambdaAtl = 1 - math.exp(-1 / atlDays);
+  var ctl = seed, atl = seed;
+  for (var i = prime; i < daily.length; i++) {
+    ctl += lambdaCtl * (daily[i] - ctl);
+    atl += lambdaAtl * (daily[i] - atl);
+  }
+  return Metric<LoadState>(
+    value: LoadState(ctl, atl, ctl - atl),
+    confidence: (daily.length / 42.0).clamp(0.3, 0.85),
+    tier: Tier.estimate,
+    inputs_used: inputs,
+    note: 'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $prime observed '
+        'days; descriptive load, not injury risk',
+  );
+}
+
 class _P {
   const _P(this.name, {this.ctl = 42, this.atl = 7, this.min = ctlAtlMinDays, this.prime = 7});
   final String name;
@@ -59,7 +113,7 @@ class _P {
   final int min, prime;
   _Agg get agg => ctlAtlTsbAggregator(
       ctlDays: ctl, atlDays: atl, minDays: min, primeDays: prime);
-  Metric<LoadState> want(DoubleColumn c) => ctlAtlTsb(c.values.toList(),
+  Metric<LoadState> want(DoubleColumn c) => _referenceCtlAtl(c.values.toList(),
       ctlDays: ctl, atlDays: atl, minDays: min, primeDays: prime);
 }
 
@@ -93,6 +147,7 @@ DoubleColumn _series(Rng r, int n) => DoubleColumn(Float64List.fromList([
     ]));
 
 void main() {
+  _referenceChecks();
   group('absent below minDays', () {
     test('identical to the reference for every short length', () {
       for (final p in _params) {
@@ -111,8 +166,8 @@ void main() {
 
     test('empty state is absent for minDays >= 1', () {
       final a = ctlAtlTsbAggregator();
-      _same(a.finish(a.empty()), ctlAtlTsb(<double>[]), 'empty state');
-      _same(a.run(col([])), ctlAtlTsb(<double>[]), 'empty column');
+      _same(a.finish(a.empty()), _referenceCtlAtl(<double>[]), 'empty state');
+      _same(a.run(col([])), _referenceCtlAtl(<double>[]), 'empty column');
     });
 
     test('length minDays - 1 absent, minDays present (default)', () {
@@ -131,7 +186,7 @@ void main() {
       expect(got.value!.ctl, closeTo(120, 1e-9));
       expect(got.value!.atl, closeTo(120, 1e-9));
       expect(got.value!.tsb, closeTo(0, 1e-9));
-      _same(got, ctlAtlTsb(c.values.toList()), 'constant');
+      _same(got, _referenceCtlAtl(c.values.toList()), 'constant');
     });
 
     test('exactly primeDays == rows: the value is the mean', () {
@@ -163,7 +218,7 @@ void main() {
     test('rest days decay the load: all-zero tail', () {
       final c = col([200, 200, 200, 200, 200, 200, 200, ...List.filled(40, 0.0)]);
       final got = ctlAtlTsbAggregator().run(c);
-      _same(got, ctlAtlTsb(c.values.toList()), 'decay');
+      _same(got, _referenceCtlAtl(c.values.toList()), 'decay');
       expect(got.value!.atl, lessThan(got.value!.ctl));
       expect(got.value!.tsb, greaterThan(0));
     });
@@ -171,12 +226,12 @@ void main() {
     test('a single spike on the last day', () {
       final xs = [...List.filled(30, 50.0), 5000.0];
       final c = col(xs);
-      _same(ctlAtlTsbAggregator().run(c), ctlAtlTsb(xs), 'spike');
+      _same(ctlAtlTsbAggregator().run(c), _referenceCtlAtl(xs), 'spike');
     });
 
     test('confidence is exact: rows/42 clamped to 0.3..0.85', () {
       final a = ctlAtlTsbAggregator();
-      expect(a.run(_iotaCol(14)).confidence, ctlAtlTsb(_iotaCol(14).values.toList()).confidence);
+      expect(a.run(_iotaCol(14)).confidence, _referenceCtlAtl(_iotaCol(14).values.toList()).confidence);
       expect(a.run(_iotaCol(30)).confidence, 30 / 42.0);
       expect(a.run(_iotaCol(300)).confidence, 0.85);
     });
@@ -206,7 +261,7 @@ void main() {
         cols.add(col(List.filled(n, v)));
       }
       expectConversion<dynamic, DoubleColumn, Metric<LoadState>>(
-          (_) => ctlAtlTsbAggregator(), cols, (c) => ctlAtlTsb(c.values.toList()),
+          (_) => ctlAtlTsbAggregator(), cols, (c) => _referenceCtlAtl(c.values.toList()),
           equals: _eqExact);
     });
 
@@ -214,7 +269,7 @@ void main() {
       final r = Rng(0xC73);
       final a = ctlAtlTsbAggregator();
       final c = _series(r, 40);
-      final want = ctlAtlTsb(c.values.toList());
+      final want = _referenceCtlAtl(c.values.toList());
       for (final cut in [1, 2, 6, 7, 8, 13, 14, 15]) {
         _allPaths(a, c, [0, cut, 40], want, 'cut $cut');
         _allPaths(a, c, [0, 3, cut > 3 ? cut : 3, 40], want, 'cuts 3,$cut');
@@ -287,3 +342,42 @@ void main() {
 }
 
 DoubleColumn _iotaCol(int n) => col([for (var i = 0; i < n; i++) 5.0 + i * 3]);
+
+/// The reference itself, and the public batch function against it.
+void _referenceChecks() {
+  // Seven days at 10 prime both loads at 10; seven days at 20 then move each by
+  //   x = 10 + (1 - exp(-7 / days)) * 10
+  // because (1 - lambda)^7 = exp(-7 / days). So CTL (42 d) and ATL (7 d) are
+  //   10 + 10 * (1 - exp(-1/6))   and   10 + 10 * (1 - exp(-1)).
+  test('the reference gives the hand-computed step response', () {
+    final day = [...List.filled(7, 10.0), ...List.filled(7, 20.0)];
+    final m = _referenceCtlAtl(day);
+    expect(m.present, isTrue);
+    expect(m.value!.ctl, closeTo(10 + 10 * (1 - math.exp(-1 / 6)), 1e-12));
+    expect(m.value!.atl, closeTo(10 + 10 * (1 - math.exp(-1)), 1e-12));
+    expect(m.value!.tsb, closeTo(m.value!.ctl - m.value!.atl, 1e-15));
+  });
+
+  // The public batch function now runs the aggregator; it must still equal the
+  // independent reference, for every parameter set and random series.
+  test('ctlAtlTsb agrees with the day-by-day reference', () {
+    final r = Rng(0xC71);
+    for (final p in _params) {
+      for (var k = 0; k < 15; k++) {
+        final v = _series(r, r.intIn(0, 120)).values.toList();
+        _same(
+            ctlAtlTsb(v,
+                ctlDays: p.ctl,
+                atlDays: p.atl,
+                minDays: p.min,
+                primeDays: p.prime),
+            _referenceCtlAtl(v,
+                ctlDays: p.ctl,
+                atlDays: p.atl,
+                minDays: p.min,
+                primeDays: p.prime),
+            '${p.name} $k');
+      }
+    }
+  });
+}

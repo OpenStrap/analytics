@@ -480,4 +480,32 @@ void main() {
       }
     });
   });
+
+  // # catches: merging two halves scaled delta * delta by both counts before
+  // dividing by their sum, so 1e306 * 51 * 50 overflowed to Infinity while the
+  // one-pass total (about 2.5e307) is finite. IS then came out 0 instead of the
+  // one-pass value.
+  test('merging halves of a huge-valued series equals one pass', () {
+    const p = 6;
+    final x = _es([
+      for (var i = 0; i < 101; i++) i < 51 ? 0.0 : 1e153,
+    ]);
+    final agg = circadianNpAggregator(p);
+    final want = _referenceCircadianNp(x.x, p);
+    expect(want.present, isTrue);
+    final one = agg.run(x);
+    final left = agg.addSlice(agg.empty(), x, 0, 51);
+    final right = agg.addSlice(agg.empty(), x, 51, 101);
+    final merged = agg.finish(agg.combine(left, right));
+    expect(_real(one, want), isTrue, reason: 'one pass vs reference');
+    expect(_real(merged, want), isTrue, reason: 'merged halves vs reference');
+    expect(merged.value!.interdailyStability, greaterThan(0));
+    // Merged the other way round (left half is the larger value block).
+    final big = _es([for (var i = 0; i < 101; i++) i < 50 ? 1e153 : 0.0]);
+    final bigWant = _referenceCircadianNp(big.x, p);
+    final bl = agg.addSlice(agg.empty(), big, 0, 50);
+    final br = agg.addSlice(agg.empty(), big, 50, 101);
+    expect(_real(agg.finish(agg.combine(bl, br)), bigWant), isTrue,
+        reason: 'merged, big block first');
+  });
 }

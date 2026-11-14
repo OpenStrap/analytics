@@ -175,7 +175,11 @@ class _CircadianStatsAggregator
     left
       ..sum += right.sum
       ..mean += delta * right.count / count
-      ..m2 += right.m2 + delta * delta * leftCount * right.count / count
+      // The pair weight leftCount * right.count / count comes first: scaling
+      // delta * delta by the two counts before dividing by their sum can pass
+      // the double range (1e306 * 51 * 50) when the combined value, with the
+      // division applied, is finite (about 2.5e307).
+      ..m2 += right.m2 + delta * delta * (leftCount * right.count / count)
       ..count = count;
     return left;
   }

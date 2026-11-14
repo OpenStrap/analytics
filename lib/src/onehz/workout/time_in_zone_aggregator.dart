@@ -141,6 +141,20 @@ class _TimeInZoneAggregator
     final length = decodeCount(field(windows, 'length'));
     final hasTail = field(map, 'hasTail');
     if (hasTail is! bool) throw const FormatException('Expected a bool');
+    // Every timestamp the state retains must be finite. The stream decoder only
+    // checks column lengths, so an infinite edge timestamp would decode and
+    // later turn into an infinite credit gap, a histogram key that restore then
+    // refuses. Ingestion refuses non-finite timestamps, so no state it built
+    // holds one.
+    for (final edge in ['first', 'last']) {
+      final raw = windows[edge];
+      if (raw == null) continue;
+      for (final t in HrStream.fromJson(raw).tsMs) {
+        if (!t.isFinite) {
+          throw const FormatException('Non-finite retained timestamp');
+        }
+      }
+    }
     final result = empty()
       ..windows = _windows.decodeState(windows)
       ..hasTail = hasTail
@@ -148,6 +162,9 @@ class _TimeInZoneAggregator
       ..tailHr = decodeDouble(field(map, 'tailHr'));
     if (hasTail != (length > 0)) {
       throw const FormatException('Invalid tail');
+    }
+    if (hasTail && !result.tailTimestampMs.isFinite) {
+      throw const FormatException('Non-finite tail timestamp');
     }
     _validateHistogramCounts(result.histograms(), length);
     return result;
