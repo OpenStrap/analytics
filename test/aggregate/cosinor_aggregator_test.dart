@@ -209,7 +209,10 @@ void main() {
   test('tiny phase coverage returns an absent metric, not a fabricated fit', () {
     // Distinct finite times, clustered around phase pi/4. The two centered
     // design columns become nearly collinear despite enough observations.
-    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-6];
+    // The relative determinant of this design is about 1e-14, two orders under
+    // the 1e-12 gate. (A 1e-6 step gives 1.15e-12, which sits ON the gate: the
+    // verdict then depended on how the platform rounds cos/sin.)
+    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-7];
     final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
     final batch = _tv(t, y);
     final agg = cosinorAggregator();
