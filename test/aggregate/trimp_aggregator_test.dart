@@ -50,8 +50,50 @@ void _same(Metric<double> got, Metric<double> want, String tag) {
 _Agg _agg(double? rest, double? max, Sex sex) =>
     banisterTrimpAggregator(restingHr: rest, maxHr: max, sex: sex);
 
+/// The reference: Banister TRIMP written out from the published formula
+/// (Banister 1991, Morton 1990), not through `banisterTrimp`, which now runs the
+/// aggregator, nor through the shared weighting helper:
+///   TRIMP = sum over worn minutes of x * y(x),  x = (HR - RHR) / (HRmax - RHR)
+///   men   y = 0.64 * e^(1.92 x)      women y = 0.86 * e^(1.67 x)
+/// Its own filtering (off-skin and non-finite minutes are skipped) and clamping
+/// (x into [0, 1]). A plain sum: every term is non-negative and bounded, so it
+/// agrees with the aggregator's compensated sum to far under the 1e-12 used.
+Metric<double> _referenceBanister(List<double> hrPerMin,
+    {required double? restingHr, required double? maxHr, required Sex sex}) {
+  const inputs = ['hr_per_min', 'resting_hr', 'max_hr'];
+  if (restingHr == null ||
+      maxHr == null ||
+      !restingHr.isFinite ||
+      !maxHr.isFinite ||
+      maxHr <= restingHr ||
+      hrPerMin.isEmpty) {
+    return const Metric<double>.absent(
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)',
+    );
+  }
+  final reserve = maxHr - restingHr;
+  var total = 0.0;
+  for (final hr in hrPerMin) {
+    if (!hr.isFinite || hr <= 0) continue;
+    final x = math.min(1.0, math.max(0.0, (hr - restingHr) / reserve));
+    final y = sex == Sex.female
+        ? 0.86 * math.exp(1.67 * x)
+        : 0.64 * math.exp(1.92 * x);
+    total += x * y;
+  }
+  return Metric<double>(
+    value: total,
+    confidence: 0.6,
+    tier: Tier.estimate,
+    inputs_used: inputs,
+    note: 'Banister exponential TRIMP (wrist HR estimate)',
+  );
+}
+
 Metric<double> _want(DoubleColumn c, double? rest, double? max, Sex sex) =>
-    banisterTrimp(c.values, restingHr: rest, maxHr: max, sex: sex);
+    _referenceBanister(c.values, restingHr: rest, maxHr: max, sex: sex);
 
 double _hr(Rng r) {
   final k = r.nextDouble();
@@ -227,5 +269,30 @@ void main() {
     }
     test('invalid anchors',
         () => expectLawful(_agg(null, 190, Sex.male), cols, equals: _eq));
+  });
+
+  // The public batch function runs the aggregator now; it must still equal the
+  // independent reference on ordinary, off-skin, non-finite and clamped minutes.
+  test('banisterTrimp agrees with the published-formula reference', () {
+    final r = Rng(0xB17);
+    for (final sex in Sex.values) {
+      for (var k = 0; k < 25; k++) {
+        final hr = [for (var i = r.intIn(0, 200); i > 0; i--) _hr(r)];
+        final rest = 45 + r.nextDouble() * 25, max = 170 + r.nextDouble() * 40;
+        _same(banisterTrimp(hr, restingHr: rest, maxHr: max, sex: sex),
+            _referenceBanister(hr, restingHr: rest, maxHr: max, sex: sex),
+            '${sex.name} $k');
+      }
+    }
+    // Known values at the endpoints and the midpoint of the reserve.
+    for (final (hr, male, female) in [
+      (55.0, 0.0, 0.0), // at rest: no reserve used
+      (190.0, 0.64 * math.exp(1.92), 0.86 * math.exp(1.67)), // full reserve
+    ]) {
+      expect(_referenceBanister([hr], restingHr: 55, maxHr: 190, sex: Sex.male).value,
+          closeTo(male, 1e-9));
+      expect(_referenceBanister([hr], restingHr: 55, maxHr: 190, sex: Sex.female).value,
+          closeTo(female, 1e-9));
+    }
   });
 }

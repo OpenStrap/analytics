@@ -254,8 +254,11 @@ void main() {
   });
 
   group('TimedValues batch', () {
-    final d = _tv([0, 1, 2, 3, 4], [10, 11, 12, 13, 14]);
+    // A fresh batch for every test: one of them writes into it, so a shared one
+    // would hand the others different data depending on the run order.
+    TimedValues fresh() => _tv([0, 1, 2, 3, 4], [10, 11, 12, 13, 14]);
     test('length, copyRange, join', () {
+      final d = fresh();
       expect(d.length, 5);
       final c = d.copyRange(1, 4);
       expect(c.tHours, [1.0, 2.0, 3.0]);
@@ -266,6 +269,7 @@ void main() {
       expect(d.copyRange(2, 2).length, 0);
     });
     test('copies are independent of the source and of the join inputs', () {
+      final d = fresh();
       final c = d.copyRange(0, 3);
       d.y[0] = -1;
       d.tHours[1] = -1;

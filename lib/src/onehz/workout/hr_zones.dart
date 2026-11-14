@@ -186,6 +186,9 @@ class HeartRateZones {
     List<HrSample> hr,
     HeartRateZoneSet zoneSet,
   ) {
+    // A timestamp that is not a finite number has no place on the clock, so
+    // there is no time-in-zone to report (the aggregator refuses such a slice).
+    if (hr.any((s) => !s.tsMs.isFinite)) return null;
     // Runs [timeInZoneAggregator] over the sorted stream in one slice: the
     // aggregator holds the cadence rule, the credit bounding and the tail.
     final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));

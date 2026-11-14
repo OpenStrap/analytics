@@ -647,6 +647,33 @@ void main() {
         return s;
       });
     });
+    // # catches: only the first edge's index was checked, so a last edge at the
+    // wrong index decoded and then broke the join with the next batch (or, with
+    // assertions off, compared against the wrong day).
+    test('the last edge must sit at first + count - its length', () {
+      // 14 epochs from index 0: the last edge holds 4 rows, from index 10.
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+              kind: 'test', version: 1),
+          isNotNull);
+      for (final bad in [0, 9, 11, 14, 100]) {
+        expectDamagedCheckpointRefused(agg, b, (s) {
+          (lookback(s)['last'] as Map)['firstIndex'] = bad;
+          return s;
+        }, reason: 'last.firstIndex $bad');
+      }
+    });
+    test('a short record (one day or less) checks its edges too', () {
+      final short = _record(Rng(0x5A2), 3, 4, masked: false, flipP: .3).epochs;
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, short),
+              kind: 'test', version: 1),
+          isNotNull);
+      expectDamagedCheckpointRefused(agg, short, (s) {
+        (lookback(s)['last'] as Map)['firstIndex'] = 1;
+        return s;
+      });
+    });
     test('a consistent checkpoint restores', () {
       expect(
           decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),

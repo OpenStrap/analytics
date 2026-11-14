@@ -25,6 +25,8 @@
 //    streams of <= 32 rows. The hand-written duplicate case uses 5 rows with
 //    differing hr.
 
+import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
@@ -60,8 +62,41 @@ class _S {
       sampleCadenceSeconds([for (final t in ts) t / 1000.0]);
 }
 
-TimeInHeartRateZone? _want(_S s) =>
-    HeartRateZones.timeInZone(s.samples, _zones);
+/// The reference: the batch rule as it was before `HeartRateZones.timeInZone`
+/// delegated to the aggregator, kept here verbatim so a regression in the
+/// aggregator cannot also change what it is compared with. Its only shared
+/// piece is [sampleCadenceSeconds], a separate function; the credit bounding,
+/// the per-gap histogram and the tail are written out again.
+TimeInHeartRateZone? _referenceTimeInZone(
+    List<HrSample> hr, HeartRateZoneSet zoneSet) {
+  final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
+  final cadence =
+      sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
+  if (cadence == null) return null;
+  final credits = List.generate(6, (_) => <double, int>{});
+  for (var i = 1; i < sorted.length; i++) {
+    final previous = sorted[i - 1];
+    if (!previous.valid) continue;
+    final gap = (sorted[i].tsMs - previous.tsMs) / 1000.0;
+    final histogram = credits[zoneSet.zoneNumber(previous.hr)];
+    histogram[gap] = (histogram[gap] ?? 0) + 1;
+  }
+  final seconds = List<double>.filled(6, 0);
+  for (var zone = 0; zone < credits.length; zone++) {
+    for (final entry in credits[zone].entries) {
+      final gap = entry.key;
+      seconds[zone] +=
+          entry.value * (gap > 0 ? math.min(gap, cadence) : cadence);
+    }
+  }
+  if (sorted.isNotEmpty && sorted.last.valid) {
+    seconds[zoneSet.zoneNumber(sorted.last.hr)] += cadence;
+  }
+  return TimeInHeartRateZone(
+      seconds: seconds.sublist(1), belowZone1: seconds[0]);
+}
+
+TimeInHeartRateZone? _want(_S s) => _referenceTimeInZone(s.samples, _zones);
 
 void _same(TimeInHeartRateZone? got, TimeInHeartRateZone? want, String tag) {
   expect(_eq(got, want), isTrue,
@@ -499,6 +534,55 @@ void main() {
       refuses(one, (s) => (s as Map)['hasTail'] = false);
       final empty = HrStream(Float64List(0), Float64List(0));
       refuses(empty, (s) => (s as Map)['hasTail'] = true);
+    });
+  });
+
+  // The batch function and the aggregator agree with the independent reference
+  // on the ordinary streams the parity tests build, including the public entry.
+  test('HeartRateZones.timeInZone agrees with the frozen reference', () {
+    final r = Rng(0x71A);
+    for (var k = 0; k < 20; k++) {
+      final s = _gen(r, r.intIn(2, 60));
+      final want = _referenceTimeInZone(s.samples, _zones);
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'public $k');
+    }
+  });
+
+  // # catches: a non-finite timestamp stored an infinite gap (cadence [1, 1,
+  // Infinity], 4 s credited at 150 bpm). The state encoded, but restore refuses
+  // infinite histogram keys, so an accepted state could not be restored.
+  group('a non-finite timestamp is refused before it can be stored', () {
+    final bad = _S([0, 1000, 2000, double.infinity], [150, 150, 150, 150]);
+
+    test('the aggregator refuses the slice and the state is unchanged', () {
+      final state = _agg.fold(_S([0, 1000], [150, 150]).stream);
+      final before = jsonEncode(_agg.encodeState(state));
+      expect(() => _agg.addSlice(state, bad.stream, 0, bad.n),
+          throwsArgumentError);
+      expect(jsonEncode(_agg.encodeState(state)), before);
+      expect(() => _agg.fold(bad.stream), throwsArgumentError);
+    });
+
+    test('NaN and -Infinity are refused the same way', () {
+      for (final t in [double.nan, double.negativeInfinity]) {
+        final s = _S([0, 1000, t, 3000], [150, 150, 150, 150]);
+        expect(() => _agg.fold(s.stream), throwsArgumentError, reason: '$t');
+      }
+    });
+
+    test('the batch entry point has no time-in-zone to report', () {
+      expect(HeartRateZones.timeInZone(bad.samples, _zones), isNull);
+    });
+
+    test('every accepted state encodes, restores and finishes the same', () {
+      final r = Rng(0x71B);
+      for (var k = 0; k < 10; k++) {
+        final s = _gen(r, r.intIn(2, 80));
+        final state = _agg.fold(s.stream);
+        final back = _agg.decodeState(
+            jsonDecode(jsonEncode(_agg.encodeState(state))));
+        _same(_agg.finish(back), _agg.finish(_agg.fold(s.stream)), 'trip $k');
+      }
     });
   });
 }

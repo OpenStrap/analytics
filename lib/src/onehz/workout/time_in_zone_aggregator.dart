@@ -94,6 +94,14 @@ class _TimeInZoneAggregator
   @override
   _TimeInZoneState addSlice(
       _TimeInZoneState state, HrStream batch, int start, int end) {
+    // Checked before anything changes. A non-finite timestamp would store an
+    // infinite or NaN gap in the histograms, a state that restore refuses
+    // (finite keys are its contract), so an accepted state could not round-trip.
+    for (var i = start; i < end; i++) {
+      if (!batch.tsMs[i].isFinite) {
+        throw ArgumentError('heart-rate timestamps must be finite');
+      }
+    }
     state.windows = _windows.addSlice(state.windows, batch, start, end);
     if (start < end) {
       state.hasTail = true;
