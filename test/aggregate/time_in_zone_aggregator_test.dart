@@ -1,0 +1,767 @@
+// timeInZoneAggregator must agree with HeartRateZones.timeInZone for the same
+// (time-sorted) rows under any slicing or chunking, and obey the aggregator
+// laws.
+//
+// Contract used here (docs: r6-time-in-zone.md):
+//  * HrStream(Float64List tsMs, Float64List hr) is a Batch<HrStream>; rows are
+//    sorted by tsMs; a row is valid when hr > 0 (as HrSample.valid).
+//  * timeInZoneAggregator(zoneSet) is an
+//    Aggregator<_, HrStream, TimeInHeartRateZone?>, all exported from
+//    package:openstrap_analytics/aggregate.dart.
+//  * The result is null exactly when HeartRateZones.timeInZone is null (the
+//    sampleCadenceSeconds rule, including fewer than 2 rows). Otherwise every
+//    zone's seconds and belowZone1 are within relTol 1e-12 / absTol 1e-9.
+//  * The median m is bit-identical to sampleCadenceSeconds'. Pinned here by
+//    streams whose only valid row is the LAST one: the only credit is the tail,
+//    so the zone total is m, compared with == (a single add to 0.0 is exact).
+//  * HOOK the implementer must add, exported from the same library:
+//      int timeInZoneStateEntries(Object? state)
+//    = total number of histogram entries (all histograms, all zones) held by a
+//    state returned by agg.fold(...). Must not throw on agg.empty() (returns 0
+//    or a small number).
+//  * Duplicate-timestamp rows in the LARGE random streams carry the same hr as
+//    the row they duplicate: the reference re-sorts with an unstable sort, so
+//    tie order (and so which hr gets the fallback credit) is only defined for
+//    streams of <= 32 rows. The hand-written duplicate case uses 5 rows with
+//    differing hr.
+
+import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:openstrap_analytics/aggregate.dart';
+import 'package:openstrap_analytics/onehz.dart';
+import 'package:test/test.dart';
+
+import '../support/checkpoint_support.dart';
+import '../support/aggregator_laws.dart';
+import '../support/property.dart' show Rng;
+
+typedef _Agg = Aggregator<dynamic, HrStream, TimeInHeartRateZone?>;
+
+final HeartRateZoneSet _zones = HeartRateZones.zonesFromMaxHr(200);
+final _Agg _agg = timeInZoneAggregator(_zones);
+
+List<Object?> _fields(TimeInHeartRateZone? t) =>
+    t == null ? [null] : [...t.seconds, t.belowZone1];
+
+final _eq = fieldsEqual<TimeInHeartRateZone?>(_fields,
+    relTol: 1e-12, absTol: 1e-9);
+
+/// A raw stream: timestamps in ms and hr.
+class _S {
+  _S(this.ts, this.hr);
+  final List<double> ts;
+  final List<double> hr;
+  int get n => ts.length;
+  HrStream get stream =>
+      HrStream(Float64List.fromList(ts), Float64List.fromList(hr));
+  List<HrSample> get samples =>
+      [for (var i = 0; i < n; i++) HrSample(ts[i], hr[i])];
+  double? get cadence =>
+      sampleCadenceSeconds([for (final t in ts) t / 1000.0]);
+}
+
+/// The reference: the batch rule as it was before `HeartRateZones.timeInZone`
+/// delegated to the aggregator, kept here verbatim so a regression in the
+/// aggregator cannot also change what it is compared with. Its only shared
+/// piece is [sampleCadenceSeconds], a separate function; the credit bounding,
+/// the per-gap histogram and the tail are written out again.
+TimeInHeartRateZone? _referenceTimeInZone(
+    List<HrSample> hr, HeartRateZoneSet zoneSet) {
+  // Stable: by timestamp, then input position, so repeated timestamps keep the
+  // order they arrived in (Dart's List.sort is not stable for long lists).
+  final order = List<int>.generate(hr.length, (i) => i)
+    ..sort((a, b) {
+      final c = hr[a].tsMs.compareTo(hr[b].tsMs);
+      return c != 0 ? c : a.compareTo(b);
+    });
+  final sorted = [for (final i in order) hr[i]];
+  final cadence =
+      sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
+  if (cadence == null) return null;
+  final credits = List.generate(6, (_) => <double, int>{});
+  for (var i = 1; i < sorted.length; i++) {
+    final previous = sorted[i - 1];
+    if (!previous.valid) continue;
+    final gap = (sorted[i].tsMs - previous.tsMs) / 1000.0;
+    final histogram = credits[zoneSet.zoneNumber(previous.hr)];
+    histogram[gap] = (histogram[gap] ?? 0) + 1;
+  }
+  final seconds = List<double>.filled(6, 0);
+  for (var zone = 0; zone < credits.length; zone++) {
+    for (final entry in credits[zone].entries) {
+      final gap = entry.key;
+      seconds[zone] +=
+          entry.value * (gap > 0 ? math.min(gap, cadence) : cadence);
+    }
+  }
+  if (sorted.isNotEmpty && sorted.last.valid) {
+    seconds[zoneSet.zoneNumber(sorted.last.hr)] += cadence;
+  }
+  return TimeInHeartRateZone(
+      seconds: seconds.sublist(1), belowZone1: seconds[0]);
+}
+
+TimeInHeartRateZone? _want(_S s) => _referenceTimeInZone(s.samples, _zones);
+
+void _same(TimeInHeartRateZone? got, TimeInHeartRateZone? want, String tag) {
+  expect(_eq(got, want), isTrue,
+      reason: '$tag\n got ${_fields(got)}\nwant ${_fields(want)}');
+  expect(got == null, want == null, reason: '$tag null-ness');
+}
+
+/// Every way of evaluating the aggregator against the reference.
+void _allPaths(_S s, List<int> b, String tag) {
+  final want = _want(s);
+  final st = s.stream;
+  _same(_agg.run(st), want, '$tag whole');
+  _same(runChunked(_agg, st, b), want, '$tag chunks $b');
+  _same(runChunked(_agg, st, b, copy: true), want, '$tag copies $b');
+  _same(runChunkedRight(_agg, st, b), want, '$tag right $b');
+  _same(runSliced(_agg, st, b), want, '$tag sliced $b');
+}
+
+void _parity(_S s, String tag, Rng r) {
+  for (var k = 0; k < 3; k++) {
+    _allPaths(s, randomBounds(r, s.n), tag);
+  }
+  _allPaths(s, singletonBounds(s.n), '$tag singletons');
+}
+
+// ---- generators ------------------------------------------------------------
+
+/// A bpm that hits every zone, the boundaries exactly, off-skin and above max.
+double _bpm(Rng r) {
+  final k = r.nextDouble();
+  if (k < .08) return 0;
+  if (k < .30) {
+    final z = _zones.zones[r.intIn(0, 4)];
+    return r.nextBool() ? z.lower : z.upper;
+  }
+  if (k < .38) return 205 + r.nextDouble() * 30; // above zone 5
+  if (k < .46) return 30 + r.nextDouble() * 60; // below zone 1
+  return 90 + r.nextDouble() * 110;
+}
+
+/// [n] rows at nominal [stepMs] with [jitterMs] jitter, a [dropP] chance of a
+/// long [dropMs] gap, a [dupP] chance of a repeated timestamp (same hr, see
+/// the header), an [offP] chance of an off-skin row.
+_S _gen(Rng r, int n,
+    {double stepMs = 1000,
+    int jitterMs = 20,
+    double dropP = 0,
+    double dropMs = 600000,
+    double dupP = 0,
+    double offP = 0,
+    bool fractional = false}) {
+  final ts = <double>[];
+  final hr = <double>[];
+  var t = 1.7e12 + r.intIn(0, 999999);
+  for (var i = 0; i < n; i++) {
+    if (i > 0 && r.nextBool(dupP)) {
+      ts.add(ts.last);
+      hr.add(hr.last);
+      continue;
+    }
+    if (i > 0) {
+      t += r.nextBool(dropP)
+          ? dropMs
+          : stepMs + r.intIn(-jitterMs, jitterMs) +
+              (fractional ? r.nextDouble() : 0);
+    }
+    ts.add(t);
+    hr.add(r.nextBool(offP) ? 0 : _bpm(r));
+  }
+  return _S(ts, hr);
+}
+
+/// The input families of the spec, by name.
+Map<String, _S Function(Rng, int)> _families() => {
+      '1 Hz jitter': (r, n) => _gen(r, n),
+      '1 Hz fractional ms': (r, n) => _gen(r, n, fractional: true),
+      'dropouts': (r, n) => _gen(r, n, dropP: .05),
+      'duplicate timestamps': (r, n) => _gen(r, n, dupP: .15),
+      'off-skin rows': (r, n) => _gen(r, n, offP: .3),
+      'slow 5 s device': (r, n) => _gen(r, n, stepMs: 5000, jitterMs: 100),
+      'dropouts + dups + off-skin': (r, n) =>
+          _gen(r, n, dropP: .05, dupP: .1, offP: .15, fractional: true),
+      'cadence > 300 s': (r, n) => _gen(r, n, stepMs: 400000, jitterMs: 1000),
+      'fails the mode rule': (r, n) {
+        // Gaps cycle 1 s, 4 s, 10 s: median 4 s, only a third within 2x.
+        if (n == 0) return _S([], []);
+        final ts = <double>[1.7e12];
+        for (var i = 1; i < n; i++) {
+          ts.add(ts.last + const [1000.0, 4000.0, 10000.0][i % 3]);
+        }
+        return _S(ts, [for (var i = 0; i < n; i++) _bpm(r)]);
+      },
+    };
+
+void main() {
+  group('hand-worked', () {
+    test('one row, empty: null', () {
+      expect(_agg.run(HrStream(Float64List(0), Float64List(0))), isNull);
+      expect(_agg.run(_S([5000], [120]).stream), isNull);
+      expect(_want(_S([5000], [120])), isNull);
+      expect(_agg.finish(_agg.empty()), isNull);
+    });
+    test('two rows: the tail gets m', () {
+      final s = _S([0, 1000], [110, 130]);
+      final want = _want(s)!;
+      final got = _agg.run(s.stream)!;
+      _same(got, want, 'two rows');
+      expect(got.secondsInZone(1), closeTo(1, 1e-12));
+      expect(got.secondsInZone(2), closeTo(1, 1e-12));
+    });
+    test('two rows, equal timestamps: no positive gap, null', () {
+      final s = _S([1000, 1000], [110, 130]);
+      expect(_want(s), isNull);
+      expect(_agg.run(s.stream), isNull);
+    });
+    test('five regular rows, one per zone', () {
+      final s = _S([0, 60000, 120000, 180000, 240000],
+          [110, 130, 150, 170, 190]);
+      final got = _agg.run(s.stream)!;
+      for (var z = 1; z <= 5; z++) {
+        expect(got.secondsInZone(z), closeTo(60, 1e-9));
+      }
+      expect(got.belowZone1, 0);
+    });
+    test('long gap is capped at m; duplicate (gap 0) gets m', () {
+      final s = _S([0, 1000, 2000, 2000, 700000], [130, 150, 190, 130, 190]);
+      _same(_agg.run(s.stream), _want(s), 'capped');
+      for (final b in [
+        [0, 5],
+        [0, 2, 3, 5],
+        [0, 1, 1, 4, 5],
+        [0, 3, 4, 4, 5]
+      ]) {
+        _same(runChunked(_agg, s.stream, b), _want(s), 'chunks $b');
+        _same(runSliced(_agg, s.stream, b), _want(s), 'sliced $b');
+      }
+    });
+    test('zone boundaries: exactly lower / upper, above zone 5, below zone 1',
+        () {
+      final hr = <double>[
+        for (final z in _zones.zones) ...[z.lower, z.upper],
+        _zones.maxHr + 40,
+        _zones.zones.first.lower - 0.5,
+        0,
+      ];
+      final s = _S([for (var i = 0; i < hr.length; i++) i * 1000.0], hr);
+      final want = _want(s)!;
+      _same(_agg.run(s.stream), want, 'boundaries');
+      expect(want.belowZone1, greaterThan(0));
+      expect(want.seconds[4], greaterThan(0));
+      for (final b in [
+        [0, hr.length],
+        [0, 1, 2, 5, hr.length],
+        [0, 4, 4, hr.length]
+      ]) {
+        _same(runChunked(_agg, s.stream, b), want, 'chunks $b');
+        _same(runSliced(_agg, s.stream, b), want, 'sliced $b');
+      }
+    });
+  });
+
+  group('null exactly when the reference is null', () {
+    test('> 300 s cadence', () {
+      final s = _gen(Rng(1), 12, stepMs: 400000, jitterMs: 1000);
+      expect(_want(s), isNull);
+      _parity(s, '>300', Rng(2));
+      expect(_agg.run(s.stream), isNull);
+    });
+    test('stream failing the mode rule', () {
+      final s = _families()['fails the mode rule']!(Rng(3), 30);
+      expect(_want(s), isNull);
+      _parity(s, 'mode', Rng(4));
+      expect(_agg.run(s.stream), isNull);
+    });
+    test('exactly 300 s cadence is accepted, 301 s is not', () {
+      final ok = _S([for (var i = 0; i < 6; i++) i * 300000.0],
+          [100, 120, 140, 160, 180, 100]);
+      final no = _S([for (var i = 0; i < 6; i++) i * 301000.0],
+          [100, 120, 140, 160, 180, 100]);
+      expect(_want(ok), isNotNull);
+      expect(_want(no), isNull);
+      _parity(ok, '300', Rng(5));
+      _parity(no, '301', Rng(6));
+    });
+    test('all timestamps identical: null', () {
+      final s = _S([5, 5, 5, 5], [100, 100, 100, 100]);
+      expect(_want(s), isNull);
+      _parity(s, 'dups', Rng(7));
+    });
+  });
+
+  group('random parity (seeded)', () {
+    var fam = 0;
+    _families().forEach((name, make) {
+      final seed = 0x7a11 + fam++;
+      test(name, () {
+        final r = Rng(seed);
+        var nonNull = 0;
+        for (var t = 0; t < 14; t++) {
+          final n = r.nextBool(.2) ? r.intIn(0, 4) : r.intIn(5, 160);
+          final s = make(r, n);
+          if (_want(s) != null) nonNull++;
+          _parity(s, '$name t$t n=$n', r);
+        }
+        if (!name.contains('>') && !name.contains('mode')) {
+          expect(nonNull, greaterThan(5), reason: 'generator too degenerate');
+        }
+      });
+    });
+
+    test('one-row and two-row chunks of a long stream', () {
+      final r = Rng(0x51);
+      final s = _gen(r, 90, dropP: .05, offP: .1, fractional: true);
+      for (final b in [
+        [0, 1, 2, 90],
+        [0, 88, 89, 90],
+        [0, 45, 45, 45, 90],
+        [0, 0, 90, 90],
+      ]) {
+        _allPaths(s, b, 'edge $b');
+      }
+    });
+  });
+
+  group('cadence median is bit-identical to sampleCadenceSeconds', () {
+    // Only the last row is valid, so the sole credit is the tail: the zone
+    // total is exactly m (0.0 + m), compared with == on the double.
+    double total(TimeInHeartRateZone t) =>
+        t.seconds.fold<double>(t.belowZone1, (a, b) => a + b);
+
+    _S tailOnly(Rng r, int n, {bool fractional = true, double step = 1000}) {
+      final s = _gen(r, n,
+          stepMs: step, jitterMs: 37, dropP: .05, fractional: fractional);
+      for (var i = 0; i < n - 1; i++) {
+        s.hr[i] = 0;
+      }
+      s.hr[n - 1] = 140;
+      return s;
+    }
+
+    test('tail seconds == sampleCadenceSeconds, random streams and cuts', () {
+      final r = Rng(0xb17);
+      var checked = 0;
+      for (var t = 0; t < 40; t++) {
+        // Both even and odd gap counts (interpolated and exact medians).
+        final n = 2 + r.intIn(0, 120);
+        final s = tailOnly(r, n, step: r.nextBool() ? 1000 : 5000);
+        final m = s.cadence;
+        if (m == null) continue;
+        checked++;
+        final st = s.stream;
+        final b = randomBounds(r, n);
+        expect(total(_agg.run(st)!) == m, isTrue,
+            reason: 't$t whole ${total(_agg.run(st)!)} vs $m');
+        expect(total(runChunked(_agg, st, b)!) == m, isTrue,
+            reason: 't$t chunks $b');
+        expect(total(runChunked(_agg, st, b, copy: true)!) == m, isTrue,
+            reason: 't$t copies $b');
+        expect(total(runChunkedRight(_agg, st, b)!) == m, isTrue,
+            reason: 't$t right $b');
+        expect(total(runSliced(_agg, st, b)!) == m, isTrue,
+            reason: 't$t sliced $b');
+      }
+      expect(checked, greaterThan(25));
+    });
+
+    test('even gap count: the interpolated median, odd: the middle gap', () {
+      // gaps 1,2 -> 1.5 ; gaps 1,2,3 -> 2 (all inside the mode window).
+      final even = _S([0, 1000, 3000], [0, 0, 150]);
+      expect(total(_agg.run(even.stream)!) == 1.5, isTrue);
+      final odd = _S([0, 1000, 3000, 6000], [0, 0, 0, 150]);
+      expect(total(_agg.run(odd.stream)!) == 2.0, isTrue);
+      expect(even.cadence, 1.5);
+      expect(odd.cadence, 2.0);
+    });
+  });
+
+  group('state size', () {
+    test('10,000 rows at 1 Hz with +-20 ms jitter: < 400 histogram entries',
+        () {
+      final r = Rng(0x5eed);
+      final s = _gen(r, 10000);
+      final entries = timeInZoneStateEntries(_agg.fold(s.stream));
+      expect(entries, lessThan(400));
+      expect(entries, greaterThan(0));
+      _same(_agg.run(s.stream), _want(s), 'big');
+    });
+    test('does not grow with rows: 40,000 rows, 7 chunks combined', () {
+      final r = Rng(0x5eee);
+      final s = _gen(r, 40000);
+      final st = s.stream;
+      final b = [0, 5000, 5001, 12000, 20000, 20000, 33333, 40000];
+      var acc = _agg.fold(st, b[0], b[1]);
+      for (var k = 1; k + 1 < b.length; k++) {
+        acc = _agg.combine(acc, _agg.fold(st, b[k], b[k + 1]));
+      }
+      expect(timeInZoneStateEntries(acc), lessThan(400));
+      _same(_agg.finish(acc), _want(s), 'combined');
+    });
+    test('empty state is tiny', () {
+      expect(timeInZoneStateEntries(_agg.empty()), lessThan(10));
+    });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    expectCheckpointResumes(_agg, _gen(Rng(0xC0DE), 45, dropP: .1, offP: .2).stream,
+        equals: _eq);
+  });
+
+  group('checkpoint zone identity', () {
+    final rows = _S([0, 1000], [110, 130]).stream;
+
+    // why: old histogram credits must never mix with a new tail/append zone
+    // definition (review 4573606761). Catches a restore without zone identity.
+    test('a different max-HR zone set is refused', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(180));
+      expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: legacy state has no evidence of which zones own its credits.
+    test('a checkpoint without zone identity is refused', () {
+      final checkpoint = checkpointOf(_agg, rows);
+      (checkpoint['state'] as Map).remove('zoneSet');
+      expect(decodeCheckpoint<dynamic>(_agg, checkpoint,
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: maxHr/source alone cannot identify custom zone boundaries or order.
+    test('custom boundaries and reordered zones are refused', () {
+      final changed = HeartRateZone(
+        number: 1,
+        lower: 90,
+        upper: 120,
+        lowerPct: .5,
+        upperPct: .6,
+      );
+      for (final zones in [
+        [changed, ..._zones.zones.skip(1)],
+        _zones.zones.reversed.toList(),
+      ]) {
+        final other = timeInZoneAggregator(HeartRateZoneSet(
+            zones: zones, maxHr: _zones.maxHr, source: _zones.source));
+        expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+            kind: 'test', version: 1), isNull);
+      }
+    });
+
+    // why: identity is by definition, not Dart object identity; accepted state
+    // must retain old credits and credit appended rows under the same zones.
+    test('an equivalent zone set restores and continues', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(200));
+      final restored = decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1);
+      expect(restored, isNotNull);
+      final result = other.finish(other.addSlice(
+          restored, _S([2000], [190]).stream, 0, 1))!;
+      // Three one-second credits: 110 in z1, 130 in z2, 190 in z5.
+      expect(result.seconds, [1, 1, 0, 0, 1]);
+      expect(result.belowZone1, 0);
+    });
+  });
+
+  group('checkpoint tail agrees with the retained last row', () {
+    // why: independently restored tail fields could silently move the final
+    // credit or disagree with the seam timestamp (review 4573606767).
+    for (final field in ['tailHr', 'tailTimestampMs']) {
+      for (final size in [1, 2, 3]) {
+        test('$field mismatch is refused for $size rows', () {
+          final rows = _S([for (var i = 0; i < size; i++) i * 1000.0],
+              [110.0, 130.0, 150.0].take(size).toList()).stream;
+          expectDamagedCheckpointRefused(_agg, rows, (s) {
+            (s as Map)[field] = field == 'tailHr' ? 190.0 : 9000.0;
+            return s;
+          });
+        });
+      }
+    }
+
+    // why: NaN HR is accepted as invalid/off-skin input; NaN != NaN must not
+    // make a valid checkpoint unrestoreable when the two tails agree.
+    test('matching non-finite heart rates restore and continue', () {
+      for (final hr in [double.nan, double.infinity, double.negativeInfinity]) {
+        final rows = _S([0, 1000], [110, hr]).stream;
+        final restored = decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, rows),
+            kind: 'test', version: 1);
+        expect(restored, isNotNull, reason: '$hr');
+        final result = _agg.finish(_agg.addSlice(
+            restored, _S([2000], [130]).stream, 0, 1))!;
+        // +Infinity is zone 5; NaN/-Infinity are invalid and get no credit.
+        expect(result.seconds, [1, 1, 0, 0, hr == double.infinity ? 1 : 0]);
+        expect(result.belowZone1, 0);
+      }
+    });
+  });
+
+  group('lawful', () {
+    final r = Rng(0x1a3);
+    final cases = <HrStream>[
+      HrStream(Float64List(0), Float64List(0)),
+      _S([1000], [120]).stream,
+      _S([0, 1000], [120, 0]).stream,
+      _S([0, 1000], [0, 150]).stream,
+      _S([0, 0], [100, 100]).stream,
+      _gen(r, 30).stream,
+      _gen(r, 45, dropP: .1, offP: .2).stream,
+      _gen(r, 45, dupP: .2, fractional: true).stream,
+      _gen(r, 25, stepMs: 5000, jitterMs: 100).stream,
+      _families()['fails the mode rule']!(r, 25).stream,
+      for (var i = 0; i < 15; i++) _gen(r, r.intIn(0, 40), offP: .1).stream,
+    ];
+    test('every law holds', () => expectLawful(_agg, cases, equals: _eq));
+  });
+
+  group('checkpoint histograms are consistent with the stored rows', () {
+    // Three rows one second apart at 150 bpm: two pairs, one tail.
+    final three = _S([0, 1000, 2000], [150, 150, 150]).stream;
+    // One row: no pairs, only a tail.
+    final one = _S([5000], [150]).stream;
+    // Two rows: one pair.
+    final two = _S([0, 1000], [150, 150]).stream;
+
+    // State: {windows: {length, first, last, inner: {cadence, credits}},
+    //         hasTail, tailTimestampMs, tailHr}. Histograms are [[gap, n], ..].
+    Map inner(Object? s) => ((s as Map)['windows'] as Map)['inner'] as Map;
+    List cadence(Object? s) => inner(s)['cadence'] as List;
+    List credits(Object? s) => inner(s)['credits'] as List;
+    // The (single) non-empty credit histogram.
+    List credit(Object? s) =>
+        credits(s).cast<List>().firstWhere((h) => h.isNotEmpty);
+
+    void refuses(HrStream batch, void Function(Object? s) damage,
+        [String? why]) {
+      expectDamagedCheckpointRefused(_agg, batch, (s) {
+        damage(s);
+        return s;
+      }, reason: why);
+    }
+
+    test('a good checkpoint has the shape these tests damage', () {
+      final s = checkpointOf(_agg, three)['state'];
+      expect(cadence(s), [
+        [1.0, 2]
+      ]);
+      expect(credit(s), [
+        [1.0, 2]
+      ]);
+    });
+
+    test('review case: histogram multiplicities inflated past the pairs', () {
+      refuses(two, (s) => cadence(s)[0][1] = 300);
+      refuses(two, (s) => credit(s)[0][1] = 300);
+      refuses(three, (s) => cadence(s)[0][1] = 3);
+      refuses(three, (s) => credit(s)[0][1] = 3);
+    });
+    test('credits spread over several zones still sum to at most the pairs',
+        () {
+      refuses(three, (s) {
+        // Two pairs exist; 1 + 2 credits across two zones is three.
+        final h = credit(s);
+        final other = credits(s).cast<List>().firstWhere((x) => x.isEmpty);
+        h[0][1] = 2;
+        other.add([1.0, 1]);
+      });
+    });
+    test('totals at exactly the pairs are accepted', () {
+      for (final batch in [two, three]) {
+        final good = checkpointOf(_agg, batch);
+        expect(decodeCheckpoint<dynamic>(_agg, good, kind: 'test', version: 1),
+            isNotNull);
+      }
+    });
+    test('counts whose sum overflows an int are refused', () {
+      refuses(three, (s) {
+        cadence(s)
+          ..[0][1] = 0x7fffffffffffffff
+          ..add([2.0, 5]);
+      });
+      refuses(three, (s) {
+        credit(s)
+          ..[0][1] = 0x7fffffffffffffff
+          ..add([2.0, 5]);
+      });
+    });
+    test('a histogram with one row behind it must be empty (no pairs)', () {
+      refuses(one, (s) => cadence(s).add([1.0, 1]));
+      refuses(one, (s) => credits(s)[0].add([1.0, 1]));
+      final empty = HrStream(Float64List(0), Float64List(0));
+      expect(decodeCheckpoint<dynamic>(
+          _agg, checkpointOf(_agg, empty), kind: 'test', version: 1),
+          isNotNull);
+    });
+
+    test('review case: cadence [["NaN", 2]] is refused', () {
+      refuses(three, (s) => cadence(s)
+        ..clear()
+        ..add(['NaN', 2]));
+    });
+    test('cadence keys must be finite and positive', () {
+      for (final key in ['NaN', 'Infinity', '-Infinity', 0.0, -1.0, -0.5]) {
+        refuses(three, (s) => cadence(s)[0][0] = key, 'cadence key $key');
+      }
+    });
+    test('credit keys must be finite; zero and negative are fine', () {
+      for (final key in ['NaN', 'Infinity', '-Infinity']) {
+        refuses(three, (s) => credit(s)[0][0] = key, 'credit key $key');
+      }
+      // A zero or negative gap credits one cadence (the fallback), so these
+      // are reachable from non-monotonic timestamps and must still restore.
+      final back = _S([2000, 1000], [150, 150]).stream; // gap -1 s
+      final dup = _S([1000, 1000], [150, 150]).stream; // gap 0
+      for (final batch in [back, dup]) {
+        final good = checkpointOf(_agg, batch);
+        expect(decodeCheckpoint<dynamic>(_agg, good, kind: 'test', version: 1),
+            isNotNull);
+      }
+    });
+
+    test('the tail exists exactly when there are rows', () {
+      refuses(three, (s) => (s as Map)['hasTail'] = false);
+      refuses(two, (s) => (s as Map)['hasTail'] = false);
+      refuses(one, (s) => (s as Map)['hasTail'] = false);
+      final empty = HrStream(Float64List(0), Float64List(0));
+      refuses(empty, (s) => (s as Map)['hasTail'] = true);
+    });
+  });
+
+  // The batch function and the aggregator agree with the independent reference
+  // on the ordinary streams the parity tests build, including the public entry.
+  test('HeartRateZones.timeInZone agrees with the frozen reference', () {
+    final r = Rng(0x71A);
+    for (var k = 0; k < 20; k++) {
+      final s = _gen(r, r.intIn(2, 60));
+      final want = _referenceTimeInZone(s.samples, _zones);
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'public $k');
+    }
+  });
+
+  // # catches: a non-finite timestamp stored an infinite gap (cadence [1, 1,
+  // Infinity], 4 s credited at 150 bpm). The state encoded, but restore refuses
+  // infinite histogram keys, so an accepted state could not be restored.
+  group('a non-finite timestamp is refused before it can be stored', () {
+    final bad = _S([0, 1000, 2000, double.infinity], [150, 150, 150, 150]);
+
+    test('the aggregator refuses the slice and the state is unchanged', () {
+      final state = _agg.fold(_S([0, 1000], [150, 150]).stream);
+      final before = jsonEncode(_agg.encodeState(state));
+      expect(() => _agg.addSlice(state, bad.stream, 0, bad.n),
+          throwsArgumentError);
+      expect(jsonEncode(_agg.encodeState(state)), before);
+      expect(() => _agg.fold(bad.stream), throwsArgumentError);
+    });
+
+    test('NaN and -Infinity are refused the same way', () {
+      for (final t in [double.nan, double.negativeInfinity]) {
+        final s = _S([0, 1000, t, 3000], [150, 150, 150, 150]);
+        expect(() => _agg.fold(s.stream), throwsArgumentError, reason: '$t');
+      }
+    });
+
+    test('the batch entry point has no time-in-zone to report', () {
+      expect(HeartRateZones.timeInZone(bad.samples, _zones), isNull);
+    });
+
+    test('every accepted state encodes, restores and finishes the same', () {
+      final r = Rng(0x71B);
+      for (var k = 0; k < 10; k++) {
+        final s = _gen(r, r.intIn(2, 80));
+        final state = _agg.fold(s.stream);
+        final back = _agg.decodeState(
+            jsonDecode(jsonEncode(_agg.encodeState(state))));
+        _same(_agg.finish(back), _agg.finish(_agg.fold(s.stream)), 'trip $k');
+      }
+    });
+  });
+
+  // # catches: HrStream.fromJson checks column lengths only, so a retained edge
+  // with an infinite timestamp decoded and later became an infinite credit gap,
+  // a histogram key that restore refuses.
+  group('retained timestamps must be finite at restore', () {
+    final three = _S([0, 1000, 2000], [150, 150, 150]).stream;
+    Map windows(Object? s) => (s as Map)['windows'] as Map;
+    for (final bad in ['Infinity', '-Infinity', 'NaN']) {
+      test('last edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['last'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'last $bad');
+      });
+      test('first edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['first'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'first $bad');
+      });
+      test('tail timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (s as Map)['tailTimestampMs'] = bad;
+          return s;
+        }, reason: 'tail $bad');
+      });
+    }
+    test('a good checkpoint still restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, three),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
+
+  // # catches: HeartRateZones.timeInZone re-sorted with Dart's unstable
+  // List.sort, so the 34 rows at one instant (more than the 32 that sort keeps
+  // in order) could swap places and a different reading was credited than the
+  // aggregator, which keeps input order, credited.
+  group('repeated timestamps keep their input order on every path', () {
+    // maxHr 200. 34 rows at t = 0: 33 at HR 110 then one at 190. Then six
+    // off-skin rows a second apart, from 500 ms.
+    final ts = <double>[for (var i = 0; i < 34; i++) 0, for (var i = 0; i < 6; i++) 500.0 + 1000 * i];
+    final hr = <double>[for (var i = 0; i < 33; i++) 110, 190, for (var i = 0; i < 6; i++) 0];
+    final s = _S(ts, hr);
+
+    test('the aggregator and the batch function both match the reference', () {
+      final want = _referenceTimeInZone(s.samples, _zones);
+      expect(want, isNotNull);
+      _same(_agg.run(s.stream), want, 'aggregator');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'batch');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), _agg.run(s.stream),
+          'batch vs aggregator');
+    });
+
+    test('the order the rows arrive in decides the credit, so it is kept', () {
+      // The same rows with the 190 reading first: a different credit, which
+      // shows the ordering is real and that the stable one is what is returned.
+      final swapped = _S(ts, [190, for (var i = 0; i < 33; i++) 110, for (var i = 0; i < 6; i++) 0]);
+      final a = HeartRateZones.timeInZone(s.samples, _zones)!;
+      final b = HeartRateZones.timeInZone(swapped.samples, _zones)!;
+      expect(_eq(a, b), isFalse,
+          reason: 'the last reading at the repeated instant is credited');
+      _same(b, _referenceTimeInZone(swapped.samples, _zones), 'swapped');
+    });
+
+    test('many repeated instants in a longer stream stay in input order', () {
+      final r = Rng(0x5712);
+      for (var k = 0; k < 10; k++) {
+        final n = 40 + r.intIn(0, 60);
+        final t = <double>[];
+        final h = <double>[];
+        var at = 0.0;
+        for (var i = 0; i < n; i++) {
+          if (r.nextBool(.3)) at += 1000;
+          t.add(at);
+          h.add(r.nextBool(.1) ? 0 : 60 + r.nextDouble() * 130);
+        }
+        final x = _S(t, h);
+        final want = _referenceTimeInZone(x.samples, _zones);
+        _same(HeartRateZones.timeInZone(x.samples, _zones), want, 'batch $k');
+        _same(_agg.run(x.stream), want, 'aggregator $k');
+      }
+    });
+  });
+}

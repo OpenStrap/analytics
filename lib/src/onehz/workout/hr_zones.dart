@@ -1,7 +1,9 @@
-import 'dart:math' as math;
+import 'dart:typed_data';
 
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
+import 'time_in_zone_aggregator.dart';
 
 /// One display heart-rate zone defined by a bpm interval.
 class HeartRateZone {
@@ -166,6 +168,9 @@ class HeartRateZones {
     return HeartRateZoneSet(zones: built, maxHr: maxHr, source: source);
   }
 
+  // Cadence validation, median-capped interval credit and tail credit are an
+  // internal rule, ESTIMATE with low confidence. Karvonen 1957 supports the
+  // HR-reserve zone option, not this duration-credit policy.
   /// Time-in-zone from a time-ordered HR stream.
   ///
   /// Each sample is credited with the duration until the next sample. The tail
@@ -181,30 +186,25 @@ class HeartRateZones {
     List<HrSample> hr,
     HeartRateZoneSet zoneSet,
   ) {
-    final sorted = [...hr]..sort((a, b) => a.tsMs.compareTo(b.tsMs));
-    // Karvonen (1957) supports reserve zones only. Duration credit is an
-    // internal ESTIMATE rule. Count equal gaps before summing their credit.
-    final cadence = sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
-    if (cadence == null) return null;
-    final credits = List.generate(6, (_) => <double, int>{});
-    for (var i = 1; i < sorted.length; i++) {
-      final previous = sorted[i - 1];
-      if (!previous.valid) continue;
-      final gap = (sorted[i].tsMs - previous.tsMs) / 1000.0;
-      final histogram = credits[zoneSet.zoneNumber(previous.hr)];
-      histogram[gap] = (histogram[gap] ?? 0) + 1;
-    }
-    final seconds = List<double>.filled(6, 0);
-    for (var zone = 0; zone < credits.length; zone++) {
-      for (final entry in credits[zone].entries) {
-        final gap = entry.key;
-        seconds[zone] += entry.value * (gap > 0 ? math.min(gap, cadence) : cadence);
-      }
-    }
-    if (sorted.isNotEmpty && sorted.last.valid) {
-      seconds[zoneSet.zoneNumber(sorted.last.hr)] += cadence;
-    }
-    return TimeInHeartRateZone(seconds: seconds.sublist(1), belowZone1: seconds[0]);
+    // A timestamp that is not a finite number has no place on the clock, so
+    // there is no time-in-zone to report (the aggregator refuses such a slice).
+    if (hr.any((s) => !s.tsMs.isFinite)) return null;
+    // Runs [timeInZoneAggregator] over the sorted stream in one slice: the
+    // aggregator holds the cadence rule, the credit bounding and the tail.
+    // Ordered by (timestamp, input position). Dart's List.sort is not stable
+    // above a few dozen elements, so equal timestamps could reorder, and the
+    // order decides which reading is credited for a repeated instant. The
+    // aggregator credits rows in the order it is given, so this puts both on the
+    // same deterministic one.
+    final order = List<int>.generate(hr.length, (i) => i)
+      ..sort((a, b) {
+        final c = hr[a].tsMs.compareTo(hr[b].tsMs);
+        return c != 0 ? c : a.compareTo(b);
+      });
+    final sorted = [for (final i in order) hr[i]];
+    return timeInZoneAggregator(zoneSet).run(HrStream(
+      Float64List.fromList([for (final s in sorted) s.tsMs]),
+      Float64List.fromList([for (final s in sorted) s.hr]),
+    ));
   }
-
 }
