@@ -556,4 +556,25 @@ void main() {
           isNotNull);
     });
   });
+
+  // why: the five-minute grid is anchored at originMs, so a checkpoint resumed
+  // on another origin would bin the retained beats and the appended ones on
+  // different grids.
+  // # catches: a restore under origin -300000 publishes SDANN and SDNN index
+  // where a fresh fold on one grid returns null for both.
+  test('a checkpoint is refused under a different originMs', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 0.0),
+      (nnMs: 810.0, timeMs: 810.0),
+      (nnMs: 820.0, timeMs: 1630.0),
+      (nnMs: 830.0, timeMs: 2460.0),
+    ]);
+    final saved = hrvTimeAggregator(originMs: 0.0);
+    final json = saved.encodeState(saved.addSlice(saved.empty(), beats, 0, 2));
+    final other = hrvTimeAggregator(originMs: -300000.0);
+    expect(() => other.decodeState(json), throwsFormatException);
+    final same = hrvTimeAggregator(originMs: 0.0);
+    final back = same.decodeState(json);
+    expect(same.finish(same.addSlice(back, beats, 2, 4)).nBeats, 4);
+  });
 }

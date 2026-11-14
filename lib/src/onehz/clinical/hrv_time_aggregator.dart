@@ -75,7 +75,8 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
   final combined = validateCheckpoint(both(core, evidence),
       (json) => _validateVersioned(json, gapAware));
-  final checked = _CheckedBeats(combined, gapAware: gapAware);
+  final checked =
+      _CheckedBeats(combined, gapAware: gapAware, originMs: originMs);
   return checked.map((result) => _finish(
       result.$1.$1, result.$1.$2, result.$1.$3, result.$1.$4,
       () => result.$2, gapAware: gapAware));
@@ -88,7 +89,8 @@ HrvTime hrvTimeOneSlice(Beats beats, {
   bool gapAware = true,
 }) {
   final core = _numericCore(originMs: originMs, gapAware: gapAware);
-  final result = _CheckedBeats(core, gapAware: gapAware).run(beats);
+  final result =
+      _CheckedBeats(core, gapAware: gapAware, originMs: originMs).run(beats);
   JitterEvidence? cached;
   JitterEvidence evidence() => cached ??= JitterEvidenceAggregator(
       originMs: originMs, gapAware: gapAware).run(beats);
@@ -143,9 +145,14 @@ class _CheckedBeatState<S> {
 /// Refuses non-finite NN in both modes, and non-finite or regressing times in
 /// gap-aware mode, before updating any child. Times are ignored otherwise.
 class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
-  const _CheckedBeats(this.inner, {required this.gapAware});
+  const _CheckedBeats(this.inner, {required this.gapAware, this.originMs});
   final Aggregator<S, Beats, R> inner;
   final bool gapAware;
+
+  /// The five-minute grid origin. A checkpoint resumed on another origin would
+  /// put the retained beats and the appended ones on different grids, so the
+  /// origin travels with the state and a mismatch is refused.
+  final double? originMs;
 
   @override
   _CheckedBeatState<S> empty() => _CheckedBeatState(inner.empty());
@@ -196,13 +203,16 @@ class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
     'first': state.first,
     'last': state.last,
     'gapAware': gapAware,
+    'originMs': gapAware ? originMs : null,
   };
   @override
   _CheckedBeatState<S> decodeState(Object? json) {
     final map = decodeMap(json);
     final first = decodeDoubleOrNull(field(map, 'first'));
     final last = decodeDoubleOrNull(field(map, 'last'));
+    final origin = decodeDoubleOrNull(field(map, 'originMs'));
     if (field(map, 'gapAware') != gapAware ||
+        origin != (gapAware ? originMs : null) ||
         (first == null) != (last == null) ||
         (first != null && (!first.isFinite || !last!.isFinite || last < first)) ||
         (!gapAware && first != null)) {

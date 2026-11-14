@@ -128,4 +128,126 @@ void main() {
       expect(jsonEncode(s.toJson()), before);
     }
   });
+
+  // why: the batch refuses a non-finite RR before cleaning; cleaning that drops
+  // the value would publish RMSSD 0 from the beats around it.
+  // # catches: 40 in-session 800 ms beats with a NaN in the middle give RMSSD 0.
+  test('session RMSSD refuses a non-finite RR like the batch', () {
+    final rr = List.filled(40, 800.0)..[20] = double.nan;
+    final ts = List.generate(40, (i) => 1000000 + i * 800.0);
+    final want =
+        sleepSessionWindowedRmssd(rr, ts, startSec: 1000, endSec: 1300);
+    expect(want.note, 'non-finite NN interval');
+    final s = SessionRmssdState(1000, 1300)
+      ..fold(rr.sublist(0, 25), ts.sublist(0, 25));
+    s.fold(rr.sublist(25), ts.sublist(25));
+    expect(s.evaluate().toJson(), want.toJson());
+  });
+  // why: the batch abstains when SDNN is below the rounding floor.
+  // # catches: SDNN ~1e-7 ms with a positive SD2 publishes a screen here.
+  test('prototype irregular screen applies the batch SDNN floor', () {
+    final nn = List.generate(600, (i) => 800.0 + i * 1e-9);
+    final ts = List.generate(600, (i) => i * 800.0);
+    final want = irregularBeatScreen(nn, nnTimesMs: ts);
+    final got = (IrregularScreenState()..fold(nn, ts)).evaluate([], []);
+    expect(want.present, isFalse, reason: 'the batch abstains');
+    expect(got.present, isFalse);
+    expect(got.note, want.note);
+  });
+  // why: a bad window config must fail closed; it may never manufacture a flag.
+  // # catches: windowMinutes infinity keeps one window and votes it flagged.
+  test('prototype irregular screen rejects invalid window settings', () {
+    final nn = [for (var i = 0; i < 600; i++) [500.0, 700.0, 1000.0, 800.0][i % 4]];
+    var acc = 0.0;
+    final ts = [for (final v in nn) acc += v];
+    for (final cfg in [
+      (windowMinutes: double.infinity, minWindowBeats: 40, sustained: 0.5),
+      (windowMinutes: 5.0, minWindowBeats: 1, sustained: 0.5),
+      (windowMinutes: 5.0, minWindowBeats: 40, sustained: 2.0),
+    ]) {
+      final want = irregularBeatScreen(nn,
+          nnTimesMs: ts,
+          windowMinutes: cfg.windowMinutes,
+          minWindowBeats: cfg.minWindowBeats,
+          sustainedFraction: cfg.sustained);
+      final st = IrregularScreenState(
+          windowMinutes: cfg.windowMinutes,
+          minWindowBeats: cfg.minWindowBeats,
+          sustainedFraction: cfg.sustained)
+        ..fold(nn, ts);
+      final got = st.evaluate([], []);
+      expect(want.value?.flag, isFalse, reason: '$cfg batch');
+      expect(got.value?.flag, isFalse, reason: '$cfg state');
+    }
+  });
+
+  // why: a rejected call must leave the columns the same length, and a
+  // mismatched tail must be the batch's refusal, not an exception.
+  // # catches: fold([800, 800], [0]) pushes into _sorted and _nn before
+  // throwing; evaluate with 20 NN and no times throws at allTs.first.
+  test('RSA state validates column lengths at both entry points', () {
+    final s = RsaWelchState();
+    expect(() => s.fold([800.0, 800.0], [0.0]), throwsArgumentError);
+    expect(s.bufferedBeats, 0);
+    final nn = List.filled(20, 800.0);
+    expectSameResp(
+        RsaWelchState().evaluate(nn, const [], artifactFraction: 0),
+        rsaRespRate(nn, const [], artifactFraction: 0),
+        'tail without times');
+    final folded = RsaWelchState()..fold(nn, [for (var i = 0; i < 20; i++) i * 800.0]);
+    expectSameResp(folded.evaluate([800.0], const [], artifactFraction: 0),
+        rsaRespRate([...nn, 800.0], [for (var i = 0; i < 20; i++) i * 800.0], artifactFraction: 0),
+        'mismatched tail');
+  });
+  // why: once folding has begun the buffer is cut, so a backward time in a later
+  // fold, at the seam or in the tail can only be refused from a kept flag.
+  // # catches: the cached segments publish an estimate the batch refuses.
+  group('RSA state keeps the batch regressing-time refusal', () {
+    List<double> nnOf(int a, int b) =>
+        [for (var i = a; i < b; i++) 800 + 30 * math.sin(i / 4)];
+    List<double> tsOf(int a, int b, {double shift = 0}) =>
+        [for (var i = a; i < b; i++) i * 800.0 + shift];
+    RsaWelchState start() =>
+        RsaWelchState()..fold(nnOf(0, 1000), tsOf(0, 1000));
+
+    void expectRefused(RsaWelchState s, List<double> tailNn,
+        List<double> tailT, List<double> allNn, List<double> allT, String why) {
+      final want = rsaRespRate(allNn, allT, artifactFraction: 0);
+      expect(want.note, 'regressing beat time', reason: '$why batch');
+      expectSameResp(s.evaluate(tailNn, tailT, artifactFraction: 0), want, why);
+    }
+
+    test('a later fold goes backward', () {
+      final s = start();
+      final nn2 = nnOf(1000, 1100), t2 = tsOf(1000, 1100, shift: -300000);
+      s.fold(nn2, t2);
+      expectRefused(s, const [], const [], [...nnOf(0, 1000), ...nn2],
+          [...tsOf(0, 1000), ...t2], 'later fold');
+      final back = RsaWelchState.fromJson(
+          jsonDecode(jsonEncode(s.toJson())) as Map<String, dynamic>);
+      expectRefused(back, const [], const [], [...nnOf(0, 1000), ...nn2],
+          [...tsOf(0, 1000), ...t2], 'after a checkpoint');
+    });
+    test('the tail starts before the last folded beat', () {
+      final s = start();
+      final tn = nnOf(1000, 1050), tt = tsOf(1000, 1050, shift: -300000);
+      expectRefused(s, tn, tt, [...nnOf(0, 1000), ...tn],
+          [...tsOf(0, 1000), ...tt], 'seam');
+    });
+    test('the tail goes backward inside itself', () {
+      final s = start();
+      final tn = nnOf(1000, 1050);
+      final tt = tsOf(1000, 1050)..[30] = tsOf(1000, 1050)[10];
+      expectRefused(s, tn, tt, [...nnOf(0, 1000), ...tn],
+          [...tsOf(0, 1000), ...tt], 'inside the tail');
+    });
+    test('ordered input is still estimated', () {
+      final s = start();
+      final tn = nnOf(1000, 1050), tt = tsOf(1000, 1050);
+      expectSameResp(s.evaluate(tn, tt, artifactFraction: 0),
+          rsaRespRate([...nnOf(0, 1000), ...tn], [...tsOf(0, 1000), ...tt],
+              artifactFraction: 0),
+          'ordered');
+    });
+  });
 }

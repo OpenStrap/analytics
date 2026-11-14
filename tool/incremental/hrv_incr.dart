@@ -12,6 +12,8 @@ import 'package:openstrap_analytics/aggregate.dart' show Beats;
 import 'package:openstrap_analytics/onehz.dart'
     hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'package:openstrap_analytics/src/onehz/clinical/hrv_jitter_evidence.dart';
+import 'package:openstrap_analytics/src/onehz/clinical/irregular_window.dart'
+    show irregularWindowConfigOk;
 
 // ===========================================================================
 // 1. hrvTime scalars: RMSSD, pNN50, SDNN, SDANN, SDNN-index, diffAcf1
@@ -1180,6 +1182,10 @@ class SessionRmssdState {
   final List<_WinRec> recs = [];
   double? _previousTime;
   bool _regressing = false;
+  // Any non-finite RR, in the session or not: the batch refuses the whole input
+  // before segmentation, and cleaning that drops the value would publish RMSSD
+  // 0 from the beats around it.
+  bool _nonFinite = false;
   int _seen = 0; // beats folded, in the session or not
   // Session-wide coverage (rrCoverage over the in-session beats), from
   // running figures: the earliest beat (first of equals) and its interval,
@@ -1220,6 +1226,7 @@ class SessionRmssdState {
 
   void _step(double rr, double ts, List<_WinRec> sink) {
     if (_previousTime != null && ts < _previousTime!) _regressing = true;
+    if (!rr.isFinite) _nonFinite = true;
     _previousTime = ts;
     _seen++;
     final tsSec = (ts / 1000.0).round();
@@ -1277,6 +1284,10 @@ class SessionRmssdState {
     if (_regressing) {
       return const Metric<double>.absent(tier: Tier.high, inputs_used: inputs,
           note: 'regressing beat time');
+    }
+    if (_nonFinite) {
+      return const Metric<double>.absent(tier: Tier.high, inputs_used: inputs,
+          note: 'non-finite NN interval');
     }
     if (startSec <= 0 || endSec <= startSec || _seen == 0) {
       return const Metric<double>.absent(
@@ -1529,7 +1540,7 @@ class IrregularScreenState {
     final sd1 = sdsd / math.sqrt2;
     final v = 2 * sdnn * sdnn - sd1 * sd1;
     final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-    if (sd2 <= 0) {
+    if (sd2 <= 0 || sdnn < kDegenerateSdnnMs) {
       return const Metric<IrregularRhythm>.absent(
         tier: Tier.estimate,
         inputs_used: inputs,
@@ -1541,7 +1552,12 @@ class IrregularScreenState {
     final pnnPct = c._dN == 0 ? 0.0 : 100.0 * c._over / c._dN;
     final aggregateHigh = ratio >= sd1sd2Flag && pnnPct >= pnnFlagPct;
     var flag = false;
-    if (aggregateHigh) {
+    // A bad window config fails CLOSED, as in the batch: never sustained.
+    final windowsOk = irregularWindowConfigOk(
+        windowMinutes: windowMs / 60000,
+        minWindowBeats: minWindowBeats,
+        sustainedFraction: sustainedFraction);
+    if (aggregateHigh && windowsOk) {
       c._flush(); // the open window closes at end of data
       flag = c._valid != 0 && c._flagged / c._valid >= sustainedFraction;
     }

@@ -313,6 +313,16 @@ class CvhrStream {
               openCount == 0 || rawNn.isEmpty))) {
         throw const FormatException('inconsistent CvhrStream checkpoint');
       }
+      // Times drive the grid generation: an infinite endpoint is never reached
+      // by the step loop, which then allocates without end. NN values (and so
+      // the resampled grid, smooth, base and exc) may be non-finite on their
+      // own; times may not.
+      if ((first != null && !first.isFinite) ||
+          (last != null && !last.isFinite) ||
+          (openStart != null && !openStart.isFinite) ||
+          rawTimes.any((t) => !t.isFinite)) {
+        throw const FormatException('non-finite CvhrStream checkpoint time');
+      }
       final s = CvhrStream(
         minWidthSec: minWidthSec,
         maxWidthSec: maxWidthSec,
@@ -558,12 +568,14 @@ class CvhrStream {
     final grid = <double>[..._grid];
     final start = _openStart!;
     final last = rawTimes.last;
-    while (start + grid.length < last) {
-      grid.add(_resampleLinear(rawTimes, rawNn, [start + grid.length])[0]);
-    }
+    // One resample for every missing grid time: a call per point re-scans the
+    // same tail each time, quadratic in the tail length. The grid reaches
+    // floor(last - start) + 1 points (ceil(last - start) and that agree except
+    // when last - start is whole, where the endpoint adds the one more).
     final nGrid = (last - start).floor() + 1;
-    while (grid.length < nGrid) {
-      grid.add(_resampleLinear(rawTimes, rawNn, [start + grid.length])[0]);
+    if (grid.length < nGrid) {
+      grid.addAll(_resampleLinear(rawTimes, rawNn,
+          [for (var k = grid.length; k < nGrid; k++) start + k]));
     }
     final smooth = <double>[..._smooth];
     while (smooth.length < grid.length) {

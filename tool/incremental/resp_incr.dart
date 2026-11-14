@@ -95,6 +95,12 @@ class RsaWelchState {
   List<double> _sorted = [];
   // A non-finite beat time was folded: the batch abstains on it.
   bool _nonFinite = false;
+  // A beat time moved backward in the folded stream (across folds too): the
+  // batch refuses the whole input on it, and the cached segments cannot show
+  // it once the buffer has been cut, so the fact is kept.
+  bool _regressing = false;
+  // The last folded beat time (ms), for the seam with the next fold or tail.
+  double? _prevMs;
   double? _first;
   int _count = 0;
   double _lastT = 0;
@@ -109,6 +115,19 @@ class RsaWelchState {
       _sc.peaks.length + _sc.atCeiling + _sc.atFloor + _sc.belowBand + _sc.thin + _sc.gappy;
 
   void fold(List<double> nn, List<double> tMs) {
+    // Checked before any state changes: a rejected call must leave the columns
+    // the same length.
+    if (nn.length != tMs.length) {
+      throw ArgumentError('nn and tMs must have the same length');
+    }
+    var prev = _prevMs;
+    for (final t in tMs) {
+      if (prev != null && t.isFinite && prev.isFinite && t < prev) {
+        _regressing = true;
+      }
+      prev = t;
+    }
+    _prevMs = prev;
     _sorted = _mergeSorted(_sorted, [...nn]..sort());
     for (final t in tMs) {
       if (!(t / 1000.0).isFinite) _nonFinite = true;
@@ -208,6 +227,15 @@ class RsaWelchState {
       double minConsensus = 0.5,
       double maxArtifact = 0.30}) {
     const inputs = ['rr_cleaned', 'beat_times'];
+    // Mismatched columns are the batch's "too few beats" refusal; reading
+    // allTs.first below would throw before the batch fallback could say so.
+    if (tailNn.length != tailTMs.length) {
+      return const Metric<RespEstimate>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'too few beats for an RSA spectral estimate (need ≥20)',
+      );
+    }
     final n = _count + tailNn.length;
     if (n < 20) {
       return const Metric<RespEstimate>.absent(
@@ -245,6 +273,16 @@ class RsaWelchState {
         note: 'non-finite beat time',
       );
     }
+    // The batch checks order before the span: folded beats, the seam to the
+    // tail, and the tail itself.
+    if (_regressing ||
+        hasRegressingBeatTimes([if (_prevMs != null) _prevMs!, ...tailTMs])) {
+      return const Metric<RespEstimate>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'regressing beat time',
+      );
+    }
     if (spanSec <= 0) {
       return const Metric<RespEstimate>.absent(
         tier: Tier.high,
@@ -252,9 +290,11 @@ class RsaWelchState {
         note: 'degenerate beat times',
       );
     }
-    // The beat interval is the median NN over settled ++ tail (gap-free).
+    // The beat interval is the median NN over settled ++ tail (gap-free);
+    // _mergeSorted already returns it sorted.
     final beatSec =
-        percentile(_mergeSorted(_sorted, [...tailNn]..sort()), 50)! / 1000.0;
+        percentileSorted(_mergeSorted(_sorted, [...tailNn]..sort()), 50)! /
+            1000.0;
     final hiHz = rsaCeilingHz(beatSec);
     if (hiHz < rsaHiHz) {
       return Metric<RespEstimate>.absent(
@@ -372,6 +412,8 @@ class RsaWelchState {
         'nn': [for (final x in _nn) encodeDouble(x)],
         'sorted': [for (final x in _sorted) encodeDouble(x)],
         'nonFinite': _nonFinite,
+        'regressing': _regressing,
+        'prevMs': _prevMs == null ? null : encodeDouble(_prevMs!),
         'first': _first,
         'count': _count,
         'lastT': _lastT,
@@ -397,6 +439,8 @@ class RsaWelchState {
     s._nn = dl(j['nn']);
     s._sorted = dl(j['sorted']);
     s._nonFinite = j['nonFinite'] as bool;
+    s._regressing = j['regressing'] as bool? ?? false;
+    s._prevMs = j['prevMs'] == null ? null : decodeDouble(j['prevMs']);
     s._first = (j['first'] as num?)?.toDouble();
     s._count = j['count'] as int;
     s._lastT = (j['lastT'] as num).toDouble();
