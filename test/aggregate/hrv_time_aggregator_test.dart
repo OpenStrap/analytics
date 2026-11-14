@@ -12,6 +12,8 @@
 //  * originMs is needed as soon as a beat is binned; without it that is a
 //    StateError. Empty input with a null origin is fine.
 
+import 'dart:convert';
+
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
@@ -576,5 +578,31 @@ void main() {
     final same = hrvTimeAggregator(originMs: 0.0);
     final back = same.decodeState(json);
     expect(same.finish(same.addSlice(back, beats, 2, 4)).nBeats, 4);
+  });
+
+  // why: the stored boundary clock must name beats the checkpoint really holds,
+  // or the gap test at the next seam runs against a time no beat has.
+  // # catches: [800, 900] at [1000, 1900] restores with last changed to 1000.
+  test('a boundary clock that disagrees with the retained beats is refused', () {
+    final beats = hrvBeats([
+      (nnMs: 800.0, timeMs: 1000.0),
+      (nnMs: 900.0, timeMs: 1900.0),
+    ]);
+    final a = hrvTimeAggregator(originMs: 1000.0);
+    final json = jsonDecode(jsonEncode(a.encodeState(a.fold(beats))))
+        as Map<String, dynamic>;
+    expect(json['first'], 1000.0);
+    expect(json['last'], 1900.0);
+    expect(() => a.decodeState(json), returnsNormally);
+    for (final (key, value) in [('last', 1000.0), ('first', 1900.0)]) {
+      final bad = Map<String, dynamic>.of(json)..[key] = value;
+      if (key == 'first') bad['last'] = 1900.0;
+      expect(() => a.decodeState(bad), throwsFormatException, reason: key);
+    }
+    // An empty outer clock over retained beats is refused as well.
+    final noClock = Map<String, dynamic>.of(json)
+      ..['first'] = null
+      ..['last'] = null;
+    expect(() => a.decodeState(noClock), throwsFormatException);
   });
 }

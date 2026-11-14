@@ -470,18 +470,46 @@ class RespWindowsState {
   int _bin = 0;
   RsaWelchState _open = RsaWelchState();
   int _openCount = 0;
+  // The open bin is one the clock came back to: the batch would merge these
+  // beats into the bin's earlier ones, which are no longer held, so it gets no
+  // estimate at all rather than a second one beside the old.
+  bool _openReturned = false;
   final List<double> closed = [];
+  // Bin index of each entry of [closed], and every bin closed so far
+  // (estimate or not), to tell a return from a step forward.
+  final List<int> _closedIdx = [];
+  final Set<int> _seen = {};
 
   RespWindowsState({this.windowMs = 1800000.0, this.minBeats = 60});
 
-  void _closeOpen(List<double> sink, RsaWelchState st, int count) {
-    if (count < minBeats) return;
+  /// Closes the open bin [idx]: its estimate joins [sink] unless it is thin,
+  /// unresolved, or a returned bin.
+  void _closeOpen(List<double> sink, List<int> sinkIdx, int idx,
+      RsaWelchState st, int count, bool returned) {
+    if (count < minBeats || returned) return;
     final r = st.evaluate(const [], const [], artifactFraction: 0.0);
     final b = r.present ? r.value!.brpm : null;
-    if (b != null) sink.add(b);
+    if (b != null) {
+      sink.add(b);
+      sinkIdx.add(idx);
+    }
+  }
+
+  /// The clock moved to a bin that was already closed: its old estimate is
+  /// dropped, so the bin has none.
+  static void _withdraw(List<double> sink, List<int> sinkIdx, int idx) {
+    for (var k = sinkIdx.length - 1; k >= 0; k--) {
+      if (sinkIdx[k] == idx) {
+        sinkIdx.removeAt(k);
+        sink.removeAt(k);
+      }
+    }
   }
 
   void fold(List<double> nn, List<double> tMs) {
+    if (nn.length != tMs.length) {
+      throw ArgumentError('nn and tMs must have the same length');
+    }
     var from = 0;
     for (var i = 0; i < nn.length; i++) {
       _t0 ??= tMs[i];
@@ -490,7 +518,10 @@ class RespWindowsState {
         _open.fold(nn.sublist(from, i), tMs.sublist(from, i));
         _openCount += i - from;
         from = i;
-        _closeOpen(closed, _open, _openCount);
+        _closeOpen(closed, _closedIdx, _bin, _open, _openCount, _openReturned);
+        _seen.add(_bin);
+        _openReturned = _seen.contains(idx);
+        if (_openReturned) _withdraw(closed, _closedIdx, idx);
         _open = RsaWelchState();
         _openCount = 0;
         _bin = idx;
@@ -503,40 +534,47 @@ class RespWindowsState {
   /// `_respPerWindow(settled ++ tail)`.
   List<double> evaluate(List<double> tailNn, List<double> tailTMs) {
     final out = [...closed];
+    final outIdx = [..._closedIdx];
     if (tailNn.isEmpty) {
-      _closeOpen(out, _open, _openCount);
+      _closeOpen(out, outIdx, _bin, _open, _openCount, _openReturned);
       return out;
     }
+    final seen = {..._seen};
     // tail beats may open new bins: split by bin index
     var curIdx = _bin;
     var curSettledOpen = _open;
     var curCount = _openCount;
+    var curReturned = _openReturned;
     var from = 0;
-    var useCopy = true; // the first bin continues the settled open bin
     for (var i = 0; i < tailNn.length; i++) {
       final idx = ((tailTMs[i] - (_t0 ?? tailTMs[0])) / windowMs).floor();
       if (idx != curIdx) {
-        _flushTail(out, curSettledOpen, curCount, useCopy, tailNn.sublist(from, i),
-            tailTMs.sublist(from, i));
-        useCopy = false;
+        _flushTail(out, outIdx, curIdx, curSettledOpen, curCount, curReturned,
+            tailNn.sublist(from, i), tailTMs.sublist(from, i));
+        seen.add(curIdx);
+        curReturned = seen.contains(idx);
+        if (curReturned) _withdraw(out, outIdx, idx);
         curSettledOpen = RsaWelchState();
         curCount = 0;
         curIdx = idx;
         from = i;
       }
     }
-    _flushTail(out, curSettledOpen, curCount, useCopy, tailNn.sublist(from),
-        tailTMs.sublist(from));
+    _flushTail(out, outIdx, curIdx, curSettledOpen, curCount, curReturned,
+        tailNn.sublist(from), tailTMs.sublist(from));
     return out;
   }
 
-  void _flushTail(List<double> out, RsaWelchState st, int count, bool settled,
-      List<double> nn, List<double> t) {
+  void _flushTail(List<double> out, List<int> outIdx, int idx, RsaWelchState st,
+      int count, bool returned, List<double> nn, List<double> t) {
     final total = count + nn.length;
-    if (total < minBeats) return;
+    if (total < minBeats || returned) return;
     final r = st.evaluate(nn, t, artifactFraction: 0.0);
     final b = r.present ? r.value!.brpm : null;
-    if (b != null) out.add(b);
+    if (b != null) {
+      out.add(b);
+      outIdx.add(idx);
+    }
   }
 }
 

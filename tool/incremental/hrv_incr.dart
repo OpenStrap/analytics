@@ -336,7 +336,13 @@ class NightShapeState {
   // closed bins by index (holes included): [n, rmssd?, lo?, hi?]
   final List<List<num?>> closed = [];
 
-  NightShapeState({this.binMin = 30, this.minBeatsPerBin = kMinBeatsPerHrvBin});
+  NightShapeState({this.binMin = 30, this.minBeatsPerBin = kMinBeatsPerHrvBin}) {
+    // A bin of no width never reaches the next edge: the closing loop in
+    // [_step] would spin forever on the first beat.
+    if (!binMin.isFinite || binMin <= 0) {
+      throw ArgumentError.value(binMin, 'binMin', 'must be positive and finite');
+    }
+  }
 
   double get _binMs => binMin * 60000.0;
   double _hi(int b) => _t0! + (b + 1) * _binMs;
@@ -1186,6 +1192,9 @@ class SessionRmssdState {
   // before segmentation, and cleaning that drops the value would publish RMSSD
   // 0 from the beats around it.
   bool _nonFinite = false;
+  // Any non-finite beat TIME: the batch refuses the whole input on it, and
+  // rounding one to a second would throw partway through a fold.
+  bool _nonFiniteTime = false;
   int _seen = 0; // beats folded, in the session or not
   // Session-wide coverage (rrCoverage over the in-session beats), from
   // running figures: the earliest beat (first of equals) and its interval,
@@ -1225,8 +1234,16 @@ class SessionRmssdState {
   }
 
   void _step(double rr, double ts, List<_WinRec> sink) {
-    if (_previousTime != null && ts < _previousTime!) _regressing = true;
     if (!rr.isFinite) _nonFinite = true;
+    if (!ts.isFinite) {
+      // Nothing else is read from a beat with no place on the clock; the
+      // evaluation refuses. The previous time stays as it was, as the batch's
+      // order check skips non-finite times.
+      _nonFiniteTime = true;
+      _seen++;
+      return;
+    }
+    if (_previousTime != null && ts < _previousTime!) _regressing = true;
     _previousTime = ts;
     _seen++;
     final tsSec = (ts / 1000.0).round();
@@ -1254,6 +1271,10 @@ class SessionRmssdState {
   }
 
   void fold(List<double> rr, List<double> ts) {
+    // Before any state changes: a short column would throw part-way through.
+    if (rr.length != ts.length) {
+      throw ArgumentError('rr and ts must have the same length');
+    }
     for (var i = 0; i < rr.length; i++) {
       _step(rr[i], ts[i], recs);
     }
@@ -1294,6 +1315,13 @@ class SessionRmssdState {
         tier: Tier.high,
         inputs_used: inputs,
         note: 'invalid or empty RR session window',
+      );
+    }
+    if (_nonFiniteTime) {
+      return const Metric<double>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'non-finite beat time',
       );
     }
     if (_inN == 0) {

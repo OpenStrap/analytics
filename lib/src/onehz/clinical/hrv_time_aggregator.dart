@@ -75,8 +75,8 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
   final combined = validateCheckpoint(both(core, evidence),
       (json) => _validateVersioned(json, gapAware));
-  final checked =
-      _CheckedBeats(combined, gapAware: gapAware, originMs: originMs);
+  final checked = _CheckedBeats(combined,
+      gapAware: gapAware, originMs: originMs, retainedEdges: _retainedEdges);
   return checked.map((result) => _finish(
       result.$1.$1, result.$1.$2, result.$1.$3, result.$1.$4,
       () => result.$2, gapAware: gapAware));
@@ -145,7 +145,8 @@ class _CheckedBeatState<S> {
 /// Refuses non-finite NN in both modes, and non-finite or regressing times in
 /// gap-aware mode, before updating any child. Times are ignored otherwise.
 class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
-  const _CheckedBeats(this.inner, {required this.gapAware, this.originMs});
+  const _CheckedBeats(this.inner,
+      {required this.gapAware, this.originMs, this.retainedEdges});
   final Aggregator<S, Beats, R> inner;
   final bool gapAware;
 
@@ -153,6 +154,12 @@ class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
   /// put the retained beats and the appended ones on different grids, so the
   /// origin travels with the state and a mismatch is refused.
   final double? originMs;
+
+  /// Reads the first and last beat TIMES the inner checkpoint retained (null
+  /// when it holds no beats). The boundary clock stored beside it must name
+  /// those same beats, or the seam test would run against a clock that no
+  /// retained beat has.
+  final (double?, double?) Function(Object? innerJson)? retainedEdges;
 
   @override
   _CheckedBeatState<S> empty() => _CheckedBeatState(inner.empty());
@@ -218,9 +225,30 @@ class _CheckedBeats<S, R> extends Aggregator<_CheckedBeatState<S>, Beats, R> {
         (!gapAware && first != null)) {
       throw const FormatException('invalid HRV boundary clock');
     }
+    if (gapAware && retainedEdges != null) {
+      final (retainedFirst, retainedLast) = retainedEdges!(field(map, 'inner'));
+      if (retainedFirst != first || retainedLast != last) {
+        throw const FormatException(
+            'HRV boundary clock disagrees with the retained beats');
+      }
+    }
     return _CheckedBeatState(inner.decodeState(field(map, 'inner')),
         first: first, last: last);
   }
+}
+
+/// First and last retained beat time of a version-2 `[core, evidence]` state,
+/// from the difference lookback's edge rows; (null, null) when it holds none.
+(double?, double?) _retainedEdges(Object? innerJson) {
+  final core = decodeList(decodeList(innerJson)[0]);
+  final diffs = decodeMap(decodeList(core[0])[0]);
+  if (decodeCount(field(diffs, 'length')) == 0) return (null, null);
+  final first = Beats.fromJson(field(diffs, 'first'));
+  final last = Beats.fromJson(field(diffs, 'last'));
+  if (first.length == 0 || last.length == 0) {
+    throw const FormatException('Missing retained beat rows');
+  }
+  return (first.timeMs.first, last.timeMs.last);
 }
 
 /// Version 2: `[core, evidence]`, the evidence counting what the core counts.

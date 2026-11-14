@@ -250,4 +250,74 @@ void main() {
           'ordered');
     });
   });
+
+  // why: a bin of no width never reaches the next edge.
+  // # catches: NightShapeState(binMin: 0)..fold([800], [0]) never returns. The
+  // check is on construction so a regression fails instead of hanging.
+  test('night shape rejects a non-positive or non-finite bin width', () {
+    for (final bad in [0.0, -30.0, double.nan, double.infinity]) {
+      expect(() => NightShapeState(binMin: bad), throwsArgumentError,
+          reason: '$bad');
+    }
+    final ok = NightShapeState(binMin: 30)..fold([800.0], [0.0]);
+    expect(ok.closed, isEmpty);
+  });
+  // why: one non-finite beat time must refuse like the batch, not throw halfway
+  // through a fold with state already changed.
+  // # catches: .round() on NaN throws UnsupportedError after _seen and the
+  // previous time were updated.
+  test('session RMSSD refuses a non-finite beat time without mutating', () {
+    final s = SessionRmssdState(1000, 1300);
+    expect(() => s.fold([800.0], [double.nan]), returnsNormally);
+    final want = sleepSessionWindowedRmssd([800.0], [double.nan],
+        startSec: 1000, endSec: 1300);
+    expect(want.note, 'non-finite beat time');
+    expect(s.evaluate().toJson(), want.toJson());
+    // A later finite fold neither throws nor lifts the refusal.
+    final rr = List.filled(40, 800.0);
+    final ts = List.generate(40, (i) => 1000000 + i * 800.0);
+    s.fold(rr, ts);
+    expect(s.evaluate().note, 'non-finite beat time');
+    // A short time column is rejected before anything is read.
+    final fresh = SessionRmssdState(1000, 1300);
+    expect(() => fresh.fold([800.0, 800.0], [1000000.0]), throwsArgumentError);
+    expect(fresh.evaluate().note, 'invalid or empty RR session window');
+  });
+  // why: the batch bins by index in a map, so beats that come back to bin 0
+  // join the old bin 0. A closed state cannot merge them, so that bin must have
+  // no estimate, never the old one and never a second one beside it.
+  // # catches: bin 0 -> bin 1 -> bin 0 keeps the old bin-0 estimate and opens a
+  // separate state that adds another.
+  test('a bin the clock returns to has no estimate', () {
+    List<double> nnAt(double fromMs, double toMs) => [
+          for (var t = fromMs; t < toMs; t += 800)
+            800 + 40 * math.sin(2 * math.pi * 0.25 * t / 1000)
+        ];
+    List<double> tAt(double fromMs, double toMs) =>
+        [for (var t = fromMs; t < toMs; t += 800) t];
+    RespWindowsState fresh() => RespWindowsState(windowMs: 180000, minBeats: 20);
+    final forward = fresh()
+      ..fold(nnAt(0, 180000), tAt(0, 180000))
+      ..fold(nnAt(180000, 360000), tAt(180000, 360000))
+      ..fold(nnAt(360000, 540000), tAt(360000, 540000));
+    final all = forward.evaluate(const [], const []);
+    expect(all.length, 3, reason: 'the setup resolves every bin');
+    // 0 -> 1 -> 0 (settled): only bin 1 has an estimate.
+    final back = fresh()
+      ..fold(nnAt(0, 180000), tAt(0, 180000))
+      ..fold(nnAt(180000, 360000), tAt(180000, 360000))
+      ..fold(nnAt(60000, 100000), tAt(60000, 100000));
+    expect(back.evaluate(const [], const []), [all[1]]);
+    // ...and going on to a later bin still leaves bin 0 without one.
+    back.fold(nnAt(360000, 540000), tAt(360000, 540000));
+    expect(back.evaluate(const [], const []), [all[1], all[2]]);
+    // The same return seen only in the tail.
+    final tail = fresh()
+      ..fold(nnAt(0, 180000), tAt(0, 180000))
+      ..fold(nnAt(180000, 360000), tAt(180000, 360000));
+    expect(
+        tail.evaluate(nnAt(60000, 100000), tAt(60000, 100000)), [all[1]]);
+    // A forward-only stream is unchanged.
+    expect(forward.evaluate(const [], const []), all);
+  });
 }
