@@ -470,7 +470,8 @@ void _observe(_Ops ops, _Case c, void Function(String) bump) {
   ops.observe(c, bump);
 }
 
-void _register<S>(_Ops<S> ops, {int maxN = 1200, int cases = 60}) {
+void _register<S>(_Ops<S> ops,
+    {int maxN = 1200, int cases = 60, Duration? roundTripBudget}) {
   const pool = [0, 1, 15, 16, 19, 20, 59, 60, 61, 300, 700, 1200];
   final shares = {..._sharesOf(ops), ...ops.shares};
   final reach = Reach<_Case>(shares, (c, bump) => _observe(ops, c, bump));
@@ -505,6 +506,7 @@ void _register<S>(_Ops<S> ops, {int maxN = 1200, int cases = 60}) {
       examples: ops.forced,
       cases: cases,
       reach: noEval,
+      budget: roundTripBudget,
     );
     _laws.law<(_Case, Mut)>(
       'L3 ${ops.name}: another version or type, a missing, mistyped or '
@@ -1084,7 +1086,14 @@ class _CvhrOps extends _Ops<CvhrStream> {
 }
 
 void main() {
-  _register(_RsaOps());
+  // L2 folds each night, writes real JSON text, restores, and goes on, for 60
+  // generated cases plus the forced examples on nights up to 1,200 beats; RSA is
+  // the costly one (each evaluation re-runs Lomb-Scargle over the sub-windows).
+  // It took 5,073 ms against the 5,000 ms guard on the slow Dart 3.5.0 runner.
+  // The guard exists to stop a runaway, not to time a healthy run, so this law
+  // gets a larger explicit one. Nothing it checks changes: same 60 cases, same
+  // night lengths, same forced examples.
+  _register(_RsaOps(), roundTripBudget: const Duration(seconds: 20));
   _register(_HrvOps());
   _register(_CvhrOps());
 

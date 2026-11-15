@@ -48,6 +48,12 @@ class IncrementalMinuteMetrics {
     state._basalPerMinute = json['basalPerMinute'] == null
         ? null
         : _number(json['basalPerMinute'], finite: true);
+    // A basal rate is energy per minute at rest: never negative. A negative one
+    // would pass through an unchanged-parameter sync and price a walking minute
+    // at a negative surplus, which the next restore then refuses.
+    if (state._basalPerMinute != null && state._basalPerMinute! < 0) {
+      throw const FormatException('Invalid basal rate');
+    }
     if (json['parameters'] != null) {
       final parameters = json['parameters'];
       if (parameters is! List ||

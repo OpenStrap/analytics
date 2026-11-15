@@ -333,4 +333,81 @@ void main() {
           profile: p);
     }
   });
+
+  // why: a basal rate is energy per minute at rest, never negative. A checkpoint
+  // carrying -1 decoded, passed through an unchanged-parameter sync, and then
+  // priced an appended walking minute (HR 60, cadence 110, resting HR 54, max HR
+  // 186) at a walking surplus of -3, a contribution the next restore refuses.
+  // catches: IncrementalMinuteMetrics.fromJson accepting a finite negative rate.
+  group('a negative basal rate is refused', () {
+    final profile = energyProfiles['male']!;
+
+    Map<String, dynamic> saved() {
+      final original = IncrementalMinuteMetrics();
+      original.sync([0], [110], restingHr: 54, maxHr: 186, profile: profile);
+      return checkpoint(original.toJson());
+    }
+
+    test('restoring a checkpoint whose basalPerMinute is negative', () {
+      expect(() => IncrementalMinuteMetrics.fromJson(saved()), returnsNormally);
+      for (final bad in [-1.0, -1e-9, -1e300]) {
+        final json = saved()..['basalPerMinute'] = bad;
+        expect(() => IncrementalMinuteMetrics.fromJson(json),
+            throwsFormatException,
+            reason: 'basalPerMinute $bad');
+      }
+    });
+
+    test('zero and a larger rate are still accepted', () {
+      for (final ok in [0.0, 1.2, 5.0]) {
+        final json = saved()..['basalPerMinute'] = ok;
+        // A bill that is not a rest or cadence minute needs no particular
+        // rate, so these restore.
+        expect(() => IncrementalMinuteMetrics.fromJson(json), returnsNormally,
+            reason: 'basalPerMinute $ok');
+      }
+    });
+
+    test('no restored state can price a walking minute at a negative surplus',
+        () {
+      // The rate that used to be accepted, then the appended minute from the
+      // thread: with the check, restoration stops before any minute is priced.
+      final json = saved()..['basalPerMinute'] = -1.0;
+      expect(() => IncrementalMinuteMetrics.fromJson(json), throwsFormatException);
+      // A valid rate prices that minute at a non-negative surplus.
+      final state = IncrementalMinuteMetrics.fromJson(saved());
+      final result = state.sync([0, 1], [110, 60],
+          cadenceSpm: [null, 110],
+          restingHr: 54, maxHr: 186, profile: profile);
+      for (final m in result.minutes!.minutes) {
+        if (m.abstained != null) continue;
+        if (m.active != null) expect(m.active, greaterThanOrEqualTo(0));
+        if (m.walking != null) expect(m.walking, greaterThanOrEqualTo(0));
+      }
+    });
+
+    test('a negative or non-finite basal override prices nothing', () {
+      for (final bad in [-1.0, -1e-9, double.nan, double.infinity,
+          double.negativeInfinity]) {
+        expect(
+            Calories.minuteEnergyPricer(
+                profile: profile,
+                hrmax: 186,
+                restingHr: 54,
+                basalKcalPerMin: bad),
+            isNull,
+            reason: 'override $bad');
+      }
+      for (final ok in [0.0, 1.0, 1.4]) {
+        final pricer = Calories.minuteEnergyPricer(
+            profile: profile, hrmax: 186, restingHr: 54, basalKcalPerMin: ok);
+        expect(pricer, isNotNull, reason: 'override $ok');
+        expect(pricer!.basalKcalPerMin, ok);
+        // The thread's minute: surplus is never below zero.
+        final bill = pricer.price(60, 110);
+        expect(bill.active, greaterThanOrEqualTo(0));
+        expect(bill.walking, greaterThanOrEqualTo(0));
+      }
+    });
+  });
 }

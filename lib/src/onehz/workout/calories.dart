@@ -379,6 +379,13 @@ class Calories {
     final age = profile.age > 0 ? profile.age : 30.0;
     final flexHr = activeGateHr(hrmax, restingHr);
     if (flexHr == null) return null;
+    // An override stands in for the profile's basal rate, which is never
+    // negative or non-finite: a bad one is refused like a bad anchor (no
+    // pricing) instead of billing minutes at a negative surplus.
+    if (basalKcalPerMin != null &&
+        !(basalKcalPerMin.isFinite && basalKcalPerMin >= 0)) {
+      return null;
+    }
     return (
       coeffs: resolveCoeffs(profile.sex),
       weightKg: weightKg,
