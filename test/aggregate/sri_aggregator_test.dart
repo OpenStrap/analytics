@@ -230,6 +230,18 @@ void _checkRecord(Rng r, _Rec rec, int epd, int? floor, String tag,
 
 void main() {
   group('Epochs batch', () {
+    // why: reject mismatched columns at construction before aggregation can
+    // overrun a short mask or silently ignore a long one (analytics#107).
+    test('constructor asserts equal column lengths', () {
+      for (final maskLength in [1, 3]) {
+        expect(
+          () => Epochs(Uint8List(2), valid: Uint8List(maskLength)),
+          throwsA(isA<AssertionError>()),
+          reason: 'valid length $maskLength must match asleep length 2',
+        );
+      }
+    });
+
     Epochs mk(int n, {bool mask = false, int first = 0}) => Epochs(
           Uint8List.fromList([for (var i = 0; i < n; i++) i % 3 == 0 ? 1 : 0]),
           valid: mask

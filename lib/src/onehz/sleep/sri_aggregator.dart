@@ -11,7 +11,8 @@ import 'sri.dart';
 /// [firstIndex] is the absolute index of row zero. It lets [Lookback] preserve
 /// the day a comparison belongs to when it joins copied chunks at a seam.
 class Epochs extends Batch<Epochs> {
-  Epochs(this.asleep, {this.valid, this.firstIndex = 0});
+  Epochs(this.asleep, {this.valid, this.firstIndex = 0})
+      : assert(valid == null || valid.length == asleep.length);
 
   factory Epochs.fromJson(Object? json) {
     final map = decodeMap(json);
