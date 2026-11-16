@@ -338,9 +338,15 @@ class SleepUserProfile {
 
 /// One night's observed sleep baselines, emitted by [cardioStager] for folding
 /// into a [SleepUserProfile]. [epochs] = staged epoch count (lets the caller
-/// pick the MAIN sleep among a night's sessions/naps, and reject short naps).
+/// reject short naps). [startTsSec]/[endTsSec] = the staged window in epoch
+/// seconds, which is what ties an observation to ITS night: among the sessions
+/// a search window stages, the epoch count alone cannot tell the night the
+/// caller chose from a longer session of the day before. Null when the caller
+/// did not know the window (the fold then has nothing to match on).
 class SleepNightObservation {
   final int epochs;
+  final int? startTsSec;
+  final int? endTsSec;
   final double? hrFloorP5;
   final double? hrFloorP25;
   final double? hrSleepMedian;
@@ -353,6 +359,8 @@ class SleepNightObservation {
   final double? rkMed;
   const SleepNightObservation({
     required this.epochs,
+    this.startTsSec,
+    this.endTsSec,
     this.hrFloorP5,
     this.hrFloorP25,
     this.hrSleepMedian,
@@ -431,9 +439,14 @@ CardioStagerResult cardioStager(
   final cadence = runStarts.isEmpty ? null : sampleCadenceSeconds(
       [for (var i = 0; i < n; i++) accel[i].tsMs / 1000.0]);
   final perEpoch = math.max(1, (epochSec / (cadence ?? 1)).round());
+  // The staged window, for the observation this call may record.
+  final firstMs = n > 0 ? accel[0].tsMs : double.nan;
+  final lastMs = n > 0 ? accel[n - 1].tsMs : double.nan;
   return classifyCardioEpochs(
     features,
     epochSec: epochSec,
+    startTsSec: firstMs.isFinite ? (firstMs / 1000).floor() : null,
+    endTsSec: lastMs.isFinite ? (lastMs / 1000).ceil() : null,
     segmentStarts: [for (final i in runStarts)
       if (i > 0 && i ~/ perEpoch < features.length) i ~/ perEpoch],
     userProfile: userProfile ?? cardioUserProfile,
@@ -997,6 +1010,8 @@ void _removeEpochSorted(List<double> sorted, double value) {
 CardioStagerResult classifyCardioEpochs(
   CardioEpochFeatures f, {
   int epochSec = _epochSec,
+  int? startTsSec,
+  int? endTsSec,
   List<int> segmentStarts = const [],
   SleepUserProfile? userProfile,
   double remScoreCut = _remScoreCut,
@@ -1344,6 +1359,8 @@ CardioStagerResult classifyCardioEpochs(
     final hrSleepMed = median(sleepHr);
     _cardioObservations.add(SleepNightObservation(
       epochs: nEpoch,
+      startTsSec: startTsSec,
+      endTsSec: endTsSec,
       hrFloorP5: percentile(sleepHr, 5),
       hrFloorP25: percentile(sleepHr, 25),
       hrSleepMedian: hrSleepMed,

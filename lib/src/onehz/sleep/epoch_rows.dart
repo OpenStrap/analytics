@@ -556,7 +556,9 @@ class EpochRows {
         lfhf: [for (final r in pooled) r.lfhf],
         rk: [for (final r in pooled) r.rk],
         sdnn: [for (final r in pooled) r.sdnn]),
-        segmentStarts: segmentStarts);
+        segmentStarts: segmentStarts,
+        startTsSec: runs.isEmpty ? null : runs.first.lo,
+        endTsSec: runs.isEmpty ? null : runs.last.hi);
     final labels = result.base.stages;
     var offset = 0;
     for (final run in runs) {
