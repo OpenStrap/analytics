@@ -114,6 +114,28 @@ void main() {
       }
     });
 
+    test('an observation carries the window it was staged over', () {
+      // Which night an observation belongs to cannot be read from its epoch
+      // count: a longer session of the day before looks the same. The window
+      // is what the caller matches against the night it chose.
+      const n = 4 * 3600, t0 = 1780000000;
+      final hr = [for (var i = 0; i < n; i++) 55.0 + (i ~/ 60) % 5];
+      final accel = <AccelSample>[
+        for (var i = 0; i < n; i++) AccelSample((t0 + i) * 1000.0, 0, 0, 1.0),
+      ];
+      cardioRecordObservations = true;
+      resetCardioObservations();
+      try {
+        cardioStager(hr, accel);
+        final o = takeCardioObservations().single;
+        expect(o.startTsSec, t0);
+        expect(o.endTsSec, t0 + n - 1);
+      } finally {
+        cardioRecordObservations = false;
+        resetCardioObservations();
+      }
+    });
+
     test('a profile consistent with the night does not destabilize staging',
         () {
       // Synthetic still, low-HR night (should read as overwhelmingly asleep).
